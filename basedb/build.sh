@@ -31,6 +31,8 @@ export JAVA_HOME="${BASEDB_JAVA_HOME:-/usr/lib/jvm/java-1.8.0-openjdk}"
 for p in "$dbdir" "$pristine" "$unload" "$ev"; do   # cp -a onto an existing $pristine would nest the copy inside it
   [ ! -e "$p" ] || { echo "$p exists; remove it by literal path first" >&2; exit 1; }
 done
+# a failed step (csql error, size cap) exits with the server still up; stop it so no server outlives the script
+trap 'rc=$?; [ $rc -eq 0 ] || bash "$ctl" stop "$db" > "$ev/stop.on-error.out" 2>&1 || true' EXIT
 mkdir -p "$base" "$dbdir" "$ev" "$base/pristine" "$base/unload"
 touch "$base/databases.txt"
 
