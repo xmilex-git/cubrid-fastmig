@@ -94,3 +94,44 @@ External crates, each with the reason it is not a few lines of our own (add a ro
   rather than read off a real page says so (`offset computed, not yet checked on a page`).
 - **Decision comments.** Where code follows a map decision, leave one line of why plus the ticket:
   `// clone whenever the filesystem allows it (workspace#481)`. The reasoning stays in the ticket.
+
+## Rust shape
+
+- **Volume bytes are untrusted input.** Every length, offset or count read from a page is checked
+  before it indexes a slice; a decoder returns `DecodeResult` with the offset, never panics. A
+  source database with a damaged record must yield a verify finding or a clean error, not an
+  aborted process. Read big-endian fields through `value::OrReader` and little-endian ones
+  through `le_field`; do not add a third set of helpers or slice `b[at..at + 4]` on a computed `at`.
+  `panic!`/`unwrap` stay only for invariants of our own code (a match the type already rules out).
+- **Do not port engine C idioms.** Take the byte format from the engine, not its code shape:
+  no out-parameters, no error codes, no setjmp-style escapes, no manual buffer bookkeeping a slice
+  or iterator already gives. Fixed-size reads use `split_first_chunk::<N>()` /
+  `first_chunk` instead of `try_into().unwrap()`.
+- **Make wrong states unrepresentable.** A value checked once (a version pair, a page kind, a
+  class's page treatment grade) becomes an enum or newtype that later code matches on; it is not
+  re-derived from bytes or flags downstream.
+- **`unsafe` only for a syscall or the counting allocator**, each block with a `// SAFETY:` line
+  saying why the call is sound. Threads are `std::thread::scope`; shared state is passed by
+  reference, not `Arc`, unless it must outlive the scope.
+
+## Performance
+
+The rule IDs below are from the workspace skill `cpp-perf-rules` (written for C/C++; the ones
+cited here carry over to Rust). Apply them to the hot path only: per-page and per-row loops of
+copy, heap rewrite, key extraction, sort and leaf build. Setup, catalog and error paths favour
+readability.
+
+- **Measure before optimizing** (MEAS-01/04): a performance change cites a before/after run of the
+  same command on the same CPU set, median of 3. No guessed optimizations.
+- **No allocation per row** (ALLOC-01): buffers live per worker and are reused (`clear()`, not
+  a new `Vec`); keys are borrowed slices until they enter a run.
+- **Decide outside the loop** (BR-04): what is fixed per class or per index (domain, page treatment
+  grade, key layout) is resolved before the row loop, as a chosen function or a generic
+  parameter, not tested again on every row.
+- **Per-worker state, merged once** (PAR-17, COH-12): counters and partial results are
+  worker-local and combined at the end; shared counters are `Relaxed` atomics on their own cache
+  line (`#[repr(align(64))]`, MEM-03). No lock taken per row.
+- **Large sequential I/O** (SYS): read and write in batches of contiguous pages; one fsync pass at
+  the end (ADR 0014).
+- **Bounds checks**: let the compiler drop them with `chunks_exact`, iterators and
+  checked-once slices; `get_unchecked` is not used.
