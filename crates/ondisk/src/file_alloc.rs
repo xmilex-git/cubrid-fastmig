@@ -190,10 +190,14 @@ impl<'v> SpaceManager<'v> {
                     vfid.volid, vfid.fileid
                 )));
             }
+            // page by page, not through the batch: nothing else in this operation touches the file's pages, and
+            // the batch would hold the whole file in memory (a big B-tree: ~400 MiB, workspace#526)
+            let mut p = vec![0u8; vols.io_pagesize()];
             for v in ft.allocated_pages() {
-                let p = op.pages.get(v)?;
-                page::set_ptype(p, PageType::Unknown);
-                page::reserved_mut(p).pflag = 0;
+                vols.read_page_into(v, &mut p)?;
+                page::set_ptype(&mut p, PageType::Unknown);
+                page::reserved_mut(&mut p).pflag = 0;
+                vols.write_page(v, &p)?;
             }
             for s in &ft.sectors {
                 op.disk.release(vols, s.vsid)?;
