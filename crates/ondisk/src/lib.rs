@@ -7,6 +7,7 @@ pub mod class_object;
 pub mod crc32;
 pub mod databases_txt;
 pub mod extdata;
+pub mod file_alloc;
 pub mod file_header;
 pub mod file_table;
 pub mod file_tracker;

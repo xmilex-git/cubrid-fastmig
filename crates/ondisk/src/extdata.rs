@@ -59,7 +59,7 @@ impl ExtdataHeader {
         let mut max = (size - EXTDATA_HEADER_SIZE) / item_size * item_size;
         if !max.is_multiple_of(8) {
             // the engine keeps max_size 8-aligned by dropping one item
-            max -= item_size;
+            max = (max - item_size).div_ceil(8) * 8;
         }
         ExtdataHeader {
             vpid_next: Vpid::NULL,
@@ -67,6 +67,11 @@ impl ExtdataHeader {
             size_of_item: item_size as i16,
             n_items: 0,
         }
+    }
+
+    /// Engine `file_extdata_max_size`: bytes the component occupies, header included.
+    pub fn footprint(&self) -> usize {
+        EXTDATA_HEADER_SIZE + self.max_size as usize
     }
 }
 
