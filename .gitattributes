@@ -1,0 +1,2 @@
+# Catalog templates are engine-extracted data, not Go templates; keep them out of language stats.
+crates/catalog/template/*.tpl linguist-generated=true linguist-language=Text
