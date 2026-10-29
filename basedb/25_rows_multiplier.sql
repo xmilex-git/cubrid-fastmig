@@ -3,12 +3,13 @@
 -- T1 rows stay as they are. New ids start at 1000001, clear of the ids 40_post.sql inserts later.
 -- Runs before 30_objects.sql, so trg_orders_ai does not fire for these orders.
 -- seq_n holds 1..65536; m = (b.n - 1) * 65536 + a.n numbers up to 65536^2 rows.
+-- Interval arithmetic is INT: MOD keeps m * 60000 and m * 1000 under 2^31 (MOD(m, 5000000) * 60000 overflowed at k = 180).
 
 INSERT INTO customer (id, code, name, name_n, grade, region, credit, score, ratio, born, created, tz_at, ltz_at, flags, profile, note)
 SELECT 1000000 + m, LPAD(1000000 + m, 8, '0'), 'Cust ' || m, N'고객' || m, CAST(ELT(MOD(m, 3) + 1, N'A', N'B', N'C') AS NCHAR(2)),
        ELT(MOD(m, 4) + 1, 'N', 'S', 'E', 'W'), MOD(m * 37, 100000) / 100.0, m / 7.0e0, MOD(m, 100) / 3.0,
-       ADDDATE(DATE '1960-01-01', MOD(m * 13, 15000)), DATETIME '2020-01-01 00:00:00' + MOD(m, 5000000) * 60000,
-       TIMESTAMPTZ '2021-06-01 00:00:00 Asia/Seoul' + m, DATETIMELTZ '2021-06-01 00:00:00' + MOD(m, 5000000) * 1000,
+       ADDDATE(DATE '1960-01-01', MOD(m * 13, 15000)), DATETIME '2020-01-01 00:00:00' + MOD(m, 30000) * 60000,
+       TIMESTAMPTZ '2021-06-01 00:00:00 Asia/Seoul' + m, DATETIMELTZ '2021-06-01 00:00:00' + MOD(m, 2000000) * 1000,
        CASE MOD(m, 2) WHEN 0 THEN X'A5' ELSE X'5A' END, JSON_OBJECT('n', m, 'tier', MOD(m, 3)), REPEAT('x', MOD(m, 50))
 FROM (SELECT (b.n - 1) * 65536 + a.n AS m FROM seq_n a, seq_n b
       WHERE b.n <= CEIL (5000 * (@ROWS_MULTIPLIER@ - 1) / 65536.0)) s
