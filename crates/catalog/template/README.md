@@ -1,0 +1,33 @@
+# Catalog templates
+
+Data files for catalog regeneration ([ADR 0011](../../../docs/adr/0011-catalog-template-is-build-time-engine-output.md),
+decision [workspace#482](https://github.com/xmilex-git/workspace/issues/482) 2): the system class objects and static
+catalog rows of a database the target engine created with `createdb`, one file per target line and charset.
+`template_store.rs` compiles them into the binary.
+
+| File | Target | Locale given to `createdb` |
+|---|---|---|
+| `develop-iso88591.tpl` | develop | `en_US.iso88591` |
+| `develop-euckr.tpl` | develop | `ko_KR.euckr` |
+| `develop-utf8.tpl` | develop | `en_US.utf8` |
+
+Each file says in its `meta` lines which install and engine release made it. The current files:
+`/home/cubrid/release/CUBRID-fastmig-dev`, `CUBRID 11.5.0 (11.5.0.2781-682b080)` (develop 682b080b2, the T1 install).
+
+## Rebuild
+
+```sh
+bash crates/catalog/template/build.sh <work dir>     # TEMPLATE_INSTALL=<install> to use another engine
+```
+
+`<work dir>` must not exist (put it under the workspace repo's `.git_ignored_dir/scratch/`); it holds the fresh
+databases and can be removed afterwards. The script runs `just run template-extract`.
+
+## Content
+
+The format is described in `src/template.rs`. Per file: 74 `class` lines (30 catalog tables, 25 system views,
+19 `INFORMATION_SCHEMA` views) and the rows of `_db_data_type`, `dual`, `_db_user`, `_db_password`,
+`_db_authorization`, `_db_auth` and `db_root` (`ROW_CLASSES` in `src/template_extract.rs`).
+
+Two builds from the same install differ only in the `created_time`/`updated_time` values of the `_db_user` and
+`_db_auth` rows; regeneration replaces those with the migration start time (workspace#482 decision 8).

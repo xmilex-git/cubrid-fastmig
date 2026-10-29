@@ -6,6 +6,7 @@ version = 4
 name = "cubrid-fastmig"
 version = "0.1.0"
 dependencies = [
+ "fastmig-catalog",
  "fastmig-copy",
  "fastmig-ondisk",
 ]
@@ -13,6 +14,9 @@ dependencies = [
 [[package]]
 name = "fastmig-catalog"
 version = "0.1.0"
+dependencies = [
+ "fastmig-ondisk",
+]
 
 [[package]]
 name = "fastmig-copy"

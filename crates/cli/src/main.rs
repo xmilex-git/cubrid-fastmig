@@ -6,6 +6,7 @@
 
 mod args;
 mod migrate;
+mod template_extract;
 
 use std::process::ExitCode;
 
@@ -16,6 +17,7 @@ fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = match argv.first().map(String::as_str) {
         Some("migrate") => migrate::run(&argv[1..]),
+        Some("template-extract") => template_extract::run(&argv[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
