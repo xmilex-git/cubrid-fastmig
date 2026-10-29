@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ondisk",
+    "crates/plan",
+    "crates/copy",
+    "crates/catalog",
+    "crates/index",
+    "crates/verify",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/xmilex-git/cubrid-fastmig"
