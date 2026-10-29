@@ -190,6 +190,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         temp_disk,
         est.as_ref(),
         mem,
+        o.verify,
         plan.needed_bytes,
         plan.available_bytes,
         &o.limits.spill_dir,

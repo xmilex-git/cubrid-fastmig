@@ -12,7 +12,9 @@ pair per index. Pairs that do not fit the memory limit (`--mem`) are sorted and 
 at once by the end of the scan; the builds that follow read them back and write nothing more to disk.
 
 The verifier (`--verify`) spills in its own pass after the build's spill files are gone, so a run needs
-**max(build, verify)** temp disk, not the sum. The verifier's spill is not estimated or limited yet (see below).
+**max(build, verify)** temp disk, not the sum. The verifier scans every index at once under the same memory rule
+(its heap side is the same pairs), so its bound is temp max; with `--verify` the smallest workable limit is temp
+max.
 
 ## The estimate
 
@@ -56,6 +58,6 @@ at any moment of the run (the build and, with `--verify`, the verifier).
 
 - 11.4 sources have no estimate (their keys come from re-encoded rows): `plan` says so, `--temp-disk min|max` is
   refused, `--temp-disk <size>` is taken and checked against the exact count on the target before the build.
-- The verifier's spill is neither in the estimate nor kept under the limit (T1 develop dirty, `--mem 64M`,
-  `--temp-disk min`: build peak 0.85 MB under a 1.48 MB limit, the verifier then reached 7.5 MB).
+- The verifier does not batch: with `--verify` the limit must be temp max (T1 develop dirty, `--mem 64M`,
+  `--temp-disk min --verify` before this rule: build peak 0.85 MB under a 1.48 MB limit, the verifier 7.5 MB).
 - Space is not reserved at the start yet: another process can still fill the disk during the run.

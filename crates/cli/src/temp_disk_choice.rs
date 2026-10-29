@@ -4,7 +4,8 @@
 //! limit, the target space the plan needs, and the free space of the target and spill filesystems.
 //! Output: the limit in bytes, or None for no limit (an 11.4 source without `--temp-disk`, as before).
 //! Rules (user, 2026-10-30): no option on a terminal → show min and max and ask; no option otherwise → max when it
-//! fits the free space, else refuse naming the choices; a limit below min or a limit plus the target growth over
+//! fits the free space, else refuse naming the choices; with `--verify` the minimum is max (the verifier spills
+//! every index in one scan); a limit below min or a limit plus the target growth over
 //! the free space → refuse. Nothing is retried or grown during the run.
 //! Source: workspace#526.
 
@@ -51,10 +52,12 @@ fn choices(e: &ResourceEstimate, mem: u64) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn choose(
     choice: Option<TempDiskChoice>,
     est: Option<&ResourceEstimate>,
     mem: u64,
+    verify: bool,
     needed: u64,
     target_available: u64,
     spill: &Path,
@@ -69,7 +72,9 @@ pub fn choose(
             )),
         };
     };
-    let (lo, hi) = (e.temp_min(mem), e.temp_max(mem));
+    // the verifier scans every index at once, after the build's spill is gone (docs/resources.md)
+    let hi = e.temp_max(mem);
+    let lo = if verify { hi } else { e.temp_min(mem) };
     let limit = match choice {
         Some(TempDiskChoice::Min) => lo,
         Some(TempDiskChoice::Max) => hi,
@@ -89,9 +94,14 @@ pub fn choose(
     };
     if limit < lo {
         return Err(refuse(format!(
-            "{} MiB is below the minimum {} MiB (the largest index's spill bound)",
+            "{} MiB is below the minimum {} MiB ({})",
             mib(limit),
-            mib(lo)
+            mib(lo),
+            if verify {
+                "--verify spills every index at once: temp max"
+            } else {
+                "the largest index's spill bound"
+            }
         )));
     }
     if !room_for(limit, needed, target_available, spill, target)? {

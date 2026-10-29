@@ -220,6 +220,10 @@ impl ResourceEstimate {
                 self.extra_seconds(b)
             );
         }
+        let _ = writeln!(
+            s,
+            "  --verify needs >= temp max: the verifier spills every index in one scan (docs/resources.md)"
+        );
         s
     }
 }
