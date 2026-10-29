@@ -47,7 +47,11 @@ fastmig_tc_migrate_one() {
   ( cd "$d" && CUBRID_DATABASES="$FASTMIG_TC_TARGET_DBS" "$CUBRID/bin/cubrid" unloaddb -S -O "$d/target-unload" "$db" ) \
     >"$d/target-unload.log" 2>&1
   r_tu=$?
-  if [ "$r_su" = 0 ] && [ "$r_tu" = 0 ]; then
+  # unloaddb exits 1 on a database without user classes: empty on both sides is the same set
+  if [ "$r_su" = 1 ] && [ "$r_tu" = 1 ] && /usr/bin/grep -q 'No data to be unloaded' "$d/source-unload.log" \
+    && /usr/bin/grep -q 'No data to be unloaded' "$d/target-unload.log"; then
+    r_su=0 r_tu=0 r_co=0
+  elif [ "$r_su" = 0 ] && [ "$r_tu" = 0 ]; then
     "$FASTMIG_TC_BIN" set-comparison "$d/source-unload/$db" "$d/target-unload/$db" --diff "$d/set-comparison.diff" \
       >"$d/set-comparison.log" 2>&1
     r_co=$?
