@@ -14,6 +14,7 @@ pub mod row_encode;
 pub mod same_slot_rows;
 pub mod serial_name;
 pub mod source_classes;
+pub mod static_rows;
 pub mod system_classes;
 pub mod target_classes;
 pub mod template;

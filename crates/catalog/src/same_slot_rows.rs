@@ -90,7 +90,7 @@ fn new_column(
 }
 
 /// A develop row from a source row: shared columns re-encoded, new columns by rule, dropped columns checked.
-fn rewrite(
+pub(crate) fn rewrite(
     table: &str,
     src_name: &str,
     t: &ClassObject,
