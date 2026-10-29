@@ -20,6 +20,7 @@ mod set_comparison;
 mod source_fingerprint;
 mod template_extract;
 mod unload_files;
+mod unload_normalize;
 mod verify;
 
 use std::process::ExitCode;

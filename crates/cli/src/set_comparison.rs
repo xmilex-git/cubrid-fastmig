@@ -6,8 +6,8 @@
 //! same counts, order ignored; 1 = they differ (a file on one side only counts as differing); 2 = usage or I/O
 //! error. What an entry is: `unload_files`.
 //! Source: G3 workspace#483 and ADR 0007 (the set comparison is the pass oracle independent of the verifier);
-//! same-version rule only — a version pair whose unloaddb prints differently gets its normalization with P1
-//! workspace#484.
+//! `--source-version`/`--target-version` name the two engine lines; where they print the same content differently
+//! the rules of `unload_normalize` rewrite the entries first, and the entries each rule changed are printed.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -15,12 +15,17 @@ use std::io;
 use std::path::Path;
 
 use crate::args::{CliError, parse};
+use fastmig_ondisk::VersionLine;
+
 use crate::unload_files::{entries, unload_set};
+use crate::unload_normalize::{normalize, rules};
 
 const HELP: &str = "\
 cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix> [--diff <file>]
   <prefix>         <dir>/<db name> as unloaddb -O <dir> wrote it (files <prefix>_schema, _objects, ...)
   --diff <file>    write every differing entry (< source only, > target only)
+  --source-version <11.4|develop> --target-version <11.4|develop>
+                   the engine lines that wrote each side; both or neither (default: one line, no normalization)
   exit 0 = same entries, 1 = differ, 2 = usage or I/O error";
 
 /// Differing entries printed per file on stdout; `--diff` has all of them.
@@ -31,7 +36,21 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
         println!("{HELP}");
         return Ok(0);
     }
-    let p = parse(args, &["--diff"], &[])?;
+    let p = parse(
+        args,
+        &["--diff", "--source-version", "--target-version"],
+        &[],
+    )?;
+    let pair = match (p.value("--source-version"), p.value("--target-version")) {
+        (None, None) => &[],
+        (Some(s), Some(t)) => rules(version_line(s)?, version_line(t)?),
+        _ => {
+            return Err(CliError::Usage(
+                "give --source-version and --target-version together".into(),
+            ));
+        }
+    };
+    let mut normalized = vec![(0usize, 0usize); pair.len()];
     let [source, target] = p.positional.as_slice() else {
         return Err(CliError::Usage(
             "set-comparison takes two unload prefixes".into(),
@@ -52,14 +71,22 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
     let mut differs = false;
     let mut diff = String::new();
     for suffix in suffixes {
-        let s = match source_set.get(suffix) {
+        let mut s = match source_set.get(suffix) {
             Some(path) => entries(suffix, path)?,
             None => Vec::new(),
         };
-        let t = match target_set.get(suffix) {
+        let mut t = match target_set.get(suffix) {
             Some(path) => entries(suffix, path)?,
             None => Vec::new(),
         };
+        let (ns, nt) = (
+            normalize(pair, suffix, true, &mut s),
+            normalize(pair, suffix, false, &mut t),
+        );
+        for (n, (a, b)) in ns.into_iter().zip(nt).enumerate() {
+            normalized[n].0 += a;
+            normalized[n].1 += b;
+        }
         let presence = match (
             source_set.contains_key(suffix),
             target_set.contains_key(suffix),
@@ -91,6 +118,12 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
             }
         }
     }
+    if pair.is_empty() {
+        println!("normalization: none");
+    }
+    for (r, (a, b)) in pair.iter().zip(&normalized) {
+        println!("normalized {}: source {a} target {b}", r.name);
+    }
     if let Some(file) = p.value("--diff") {
         fs::write(file, diff)?;
     }
@@ -99,6 +132,16 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
         if differs { "DIFFER" } else { "SAME" }
     );
     Ok(u8::from(differs))
+}
+
+fn version_line(v: &str) -> Result<VersionLine, CliError> {
+    match v {
+        "11.4" => Ok(VersionLine::V11_4),
+        "develop" => Ok(VersionLine::Develop),
+        _ => Err(CliError::Usage(format!(
+            "unknown version {v} (11.4 or develop)"
+        ))),
+    }
 }
 
 /// Entries of `a` not matched in `b` and of `b` not matched in `a`, counting repeats.

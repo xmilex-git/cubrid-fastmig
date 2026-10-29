@@ -1,0 +1,213 @@
+//! The rules that make two engine lines' `unloaddb` outputs comparable: where the target line prints the same
+//! content differently, the source entry is rewritten to the target's form before the set comparison.
+//!
+//! Input: the source and target release lines, the unload file suffix, that file's entries (`unload_files`).
+//! Output: the rewritten entries and, per rule, how many entries it changed on each side — the evidence that a rule
+//! touched only the difference it names. Two entries of one line get no rule at all.
+//! Source: the engine change cited on each rule (release/11.4 vs develop); request in workspace#502 (from the
+//! workspace#484 end-to-end run, where these five differences were the whole set-comparison diff).
+
+use std::collections::HashMap;
+
+use fastmig_ondisk::VersionLine;
+
+/// Which side's entries a rule rewrites.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Source,
+    Both,
+}
+
+/// How a rule rewrites an entry.
+#[derive(Clone, Copy)]
+pub enum Rewrite {
+    /// Replace every occurrence of the first byte string with the second.
+    Replace(&'static [u8], &'static [u8]),
+    /// Drop the `N` of an `N'...'` literal outside string values.
+    NcharLiteral,
+    /// `%id <class> <n>` → `%id <class>`, `@<n>|` → `@<class>|`: class ids are numbered per unload and the two lines
+    /// number their system classes differently.
+    ClassIdNames,
+}
+
+pub struct Rule {
+    pub name: &'static str,
+    /// Unload file suffixes the rule reads (`schema`, `indexes`, `objects`, ...).
+    pub files: &'static [&'static str],
+    pub side: Side,
+    pub rewrite: Rewrite,
+}
+
+/// The rules of one version pair, applied in order.
+pub fn rules(source: VersionLine, target: VersionLine) -> &'static [Rule] {
+    match (source, target) {
+        (VersionLine::V11_4, VersionLine::Develop) => V11_4_TO_DEVELOP,
+        // one line prints alike; a downgrade is out of scope (ADR 0003)
+        _ => &[],
+    }
+}
+
+const V11_4_TO_DEVELOP: &[Rule] = &[
+    // CBRD-27324 (develop 5de66400a, CUBRID/cubrid#8104) removed the DEDUPLICATE index feature; 11.4 prints level 0
+    Rule {
+        name: "with-deduplicate-0",
+        files: &["schema", "indexes"],
+        side: Side::Source,
+        rewrite: Rewrite::Replace(b" WITH DEDUPLICATE=0", b""),
+    },
+    // CBRD-24156 (develop bb8f3cbda, CUBRID/cubrid#6420): NCHAR/VARNCHAR are CHAR/VARCHAR aliases in develop
+    Rule {
+        name: "national-character",
+        files: &["schema"],
+        side: Side::Source,
+        rewrite: Rewrite::Replace(b"national character", b"character"),
+    },
+    // CBRD-24156, as above: the values of a former NCHAR column print as plain string literals
+    Rule {
+        name: "nchar-literal",
+        files: &["objects"],
+        side: Side::Source,
+        rewrite: Rewrite::NcharLiteral,
+    },
+    // CBRD-25862 (develop 8ba543178, CUBRID/cubrid#6903): CT_USER_NAME "db_user" -> "_db_user"
+    Rule {
+        name: "db-user-class",
+        files: &["schema"],
+        side: Side::Source,
+        rewrite: Rewrite::Replace(b"on class [db_user]", b"on class [_db_user]"),
+    },
+    // develop has more system classes than 11.4 (R4: 29 -> 30 tables, 20 -> 25 views), so user class ids shift
+    Rule {
+        name: "class-id-names",
+        files: &["objects"],
+        side: Side::Both,
+        rewrite: Rewrite::ClassIdNames,
+    },
+];
+
+/// Applies `rules` to one file's entries of one side; returns how many entries each rule changed.
+pub fn normalize(
+    rules: &[Rule],
+    suffix: &str,
+    source_side: bool,
+    entries: &mut [Vec<u8>],
+) -> Vec<usize> {
+    rules
+        .iter()
+        .map(|r| {
+            let applies = r.files.contains(&suffix) && (source_side || r.side == Side::Both);
+            if !applies {
+                return 0;
+            }
+            match r.rewrite {
+                Rewrite::Replace(from, to) => entries
+                    .iter_mut()
+                    .filter_map(|e| replace(e, from, to))
+                    .count(),
+                Rewrite::NcharLiteral => entries.iter_mut().filter_map(drop_nchar_prefix).count(),
+                Rewrite::ClassIdNames => class_id_names(entries),
+            }
+        })
+        .collect()
+}
+
+/// `Some(())` when the entry changed.
+fn replace(e: &mut Vec<u8>, from: &[u8], to: &[u8]) -> Option<()> {
+    if !e.windows(from.len()).any(|w| w == from) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(e.len());
+    let mut i = 0;
+    while i < e.len() {
+        if e[i..].starts_with(from) {
+            out.extend_from_slice(to);
+            i += from.len();
+        } else {
+            out.push(e[i]);
+            i += 1;
+        }
+    }
+    *e = out;
+    Some(())
+}
+
+/// Calls `f(position, byte)` for every byte outside a quoted string value ('' is a quote inside one).
+fn outside_strings(e: &[u8], mut f: impl FnMut(usize, u8)) {
+    let mut in_string = false;
+    for (i, &b) in e.iter().enumerate() {
+        if b == b'\'' {
+            in_string = !in_string;
+        } else if !in_string {
+            f(i, b);
+        }
+    }
+}
+
+/// Drops `N` where it opens a string literal: an `N` outside strings, at a token start, followed by a quote.
+fn drop_nchar_prefix(e: &mut Vec<u8>) -> Option<()> {
+    let mut drop = Vec::new();
+    outside_strings(e, |i, b| {
+        let token_start = i == 0 || matches!(e[i - 1], b' ' | b'\t' | b'\n' | b'{' | b'(' | b',');
+        if b == b'N' && token_start && e.get(i + 1) == Some(&b'\'') {
+            drop.push(i);
+        }
+    });
+    if drop.is_empty() {
+        return None;
+    }
+    for i in drop.into_iter().rev() {
+        e.remove(i);
+    }
+    Some(())
+}
+
+/// Rewrites class ids to class names in one `_objects` file; returns the number of entries changed.
+fn class_id_names(entries: &mut [Vec<u8>]) -> usize {
+    // `%id <class> <n>`: the class is everything between "%id " and the last space
+    let mut names: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    for e in entries.iter() {
+        if let Some(rest) = e.strip_prefix(b"%id ")
+            && let Some(sp) = rest.iter().rposition(|&b| b == b' ')
+        {
+            names.insert(rest[sp + 1..].to_vec(), rest[..sp].to_vec());
+        }
+    }
+    let mut changed = 0;
+    for e in entries.iter_mut() {
+        if let Some(rest) = e.strip_prefix(b"%id ") {
+            if let Some(sp) = rest.iter().rposition(|&b| b == b' ') {
+                let class = rest[..sp].to_vec();
+                *e = [b"%id ".as_slice(), &class].concat();
+                changed += 1;
+            }
+            continue;
+        }
+        // object references `@<n>|<instance>` outside string values
+        let mut refs = Vec::new();
+        outside_strings(e, |i, b| {
+            if b == b'@' {
+                let digits = e[i + 1..].iter().take_while(|d| d.is_ascii_digit()).count();
+                if digits > 0 && e.get(i + 1 + digits) == Some(&b'|') {
+                    refs.push((i + 1, i + 1 + digits));
+                }
+            }
+        });
+        if refs.is_empty() {
+            continue;
+        }
+        let mut out = Vec::with_capacity(e.len());
+        let mut at = 0;
+        for (from, to) in refs {
+            out.extend_from_slice(&e[at..from]);
+            match names.get(&e[from..to]) {
+                Some(name) => out.extend_from_slice(name),
+                None => out.extend_from_slice(&e[from..to]),
+            }
+            at = to;
+        }
+        out.extend_from_slice(&e[at..]);
+        *e = out;
+        changed += 1;
+    }
+    changed
+}
