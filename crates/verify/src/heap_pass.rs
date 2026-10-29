@@ -12,10 +12,14 @@
 //! `spage_check` (free-space counters).
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fastmig_index::BuildError;
 use fastmig_index::heap_scan::{ClassRuns, RowKey, ScanClass, scan_classes};
+use fastmig_index::job_pool::run_jobs;
+use fastmig_index::temp_disk::spill_record_bytes;
 use fastmig_index::{KeyOrder, MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{ClassObject, Constraint};
 use fastmig_ondisk::file_table::FileTable;
@@ -201,6 +205,52 @@ pub fn scan_heaps<'m>(
             }
         })
         .collect())
+}
+
+/// Spill bytes of every (key, OID) pair the live rows of `jobs` give (`temp_disk::spill_record_bytes` per key), read
+/// as [`scan_heaps`] reads them but with nothing kept: pages on `workers` threads, 64 at a time.
+pub fn pair_bytes(db: &Database, jobs: &[HeapScanJob], workers: usize) -> io::Result<u64> {
+    let mut pages: Vec<(usize, Vpid)> = Vec::new();
+    let mut layouts = Vec::with_capacity(jobs.len());
+    for (c, j) in jobs.iter().enumerate() {
+        layouts.push(
+            j.target
+                .class
+                .map(|k| layouts_of(db, k))
+                .unwrap_or_default(),
+        );
+        if !j.indexes.is_empty() {
+            let ft = FileTable::read(&db.vols, j.target.hfid.vfid)?;
+            pages.extend(ft.user_pages().into_iter().map(|p| (c, p)));
+        }
+    }
+    let total = AtomicU64::new(0);
+    let done = run_jobs(workers, pages.chunks(64).collect(), |chunk| {
+        let mut n = 0u64;
+        for &(c, vpid) in chunk {
+            let page = db.vols.read_page(vpid)?;
+            let j = &jobs[c];
+            let mut out = Shared::default();
+            scan_page(
+                db,
+                &j.target,
+                &j.indexes,
+                &layouts[c],
+                vpid,
+                &page,
+                &mut out,
+                &mut |_, _, k| {
+                    if let RowKey::Key(k) = k {
+                        n += spill_record_bytes(k.len() as u64);
+                    }
+                },
+            );
+        }
+        total.fetch_add(n, Ordering::Relaxed);
+        Ok::<(), io::Error>(())
+    });
+    done.into_iter().collect::<io::Result<()>>()?;
+    Ok(total.into_inner())
 }
 
 /// The layout of every representation the class still knows (records may carry an old repid).

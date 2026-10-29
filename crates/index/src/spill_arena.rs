@@ -3,15 +3,15 @@
 //! the run ends, so no other process can take it in the middle (user: no disk full during a run).
 //!
 //! Input: the path and the size (`--temp-disk`). Output: [`SpillArena`] — extents handed out first fit and taken
-//! back on free (a run that finds no single free range big enough gets several), an [`ExtentWriter`] and an
-//! [`ExtentReader`] that see a run's extents as one byte stream. The file is removed when the arena is dropped;
+//! back on free (a run that finds no single free range big enough gets several), and an
+//! [`ExtentReader`] that sees a run's extents as one byte stream. The file is removed when the arena is dropped;
 //! a killed run leaves it to the incomplete marker's rerun cleanup (cli records it).
 //! Source: workspace#526 (1번 세션 decision: spill inside the reservation, no window between freeing and taking
 //! space); POSIX `posix_fallocate(3)`.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -146,41 +146,6 @@ fn locate(extents: &[Extent], pos: u64) -> Option<(usize, u64)> {
         start += e.len;
     }
     None
-}
-
-/// Writes a run's byte stream into its extents, in order.
-pub struct ExtentWriter<'a> {
-    file: &'a File,
-    extents: &'a [Extent],
-    pos: u64,
-}
-
-impl<'a> ExtentWriter<'a> {
-    pub fn new(file: &'a File, extents: &'a [Extent]) -> Self {
-        Self {
-            file,
-            extents,
-            pos: 0,
-        }
-    }
-}
-
-impl Write for ExtentWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let Some((i, at)) = locate(self.extents, self.pos) else {
-            return Err(io::Error::other("spill run longer than its extents"));
-        };
-        let e = self.extents[i];
-        let room = (e.offset + e.len - at) as usize;
-        let n = buf.len().min(room);
-        self.file.write_all_at(&buf[..n], at)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 /// Reads a run's byte stream back from its extents; seeks only from the start.

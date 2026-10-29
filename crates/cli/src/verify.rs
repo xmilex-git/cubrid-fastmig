@@ -23,6 +23,7 @@ use fastmig_verify::{Database, Role, classify, verify_database};
 
 use crate::args::{CliError, parse};
 use crate::limits::{self, Limits};
+use crate::plan::OpenSource;
 
 const HELP: &str = "\
 cubrid-fastmig verify <db | first-volume-path> [options]
@@ -100,6 +101,19 @@ fn open(a: &DbArg, role: Role) -> io::Result<Database> {
         }
         None => Database::open(&a.first_volume, a.locate, &a.log, role, a.lob_base.clone()),
     }
+}
+
+/// Spill bytes the verifier's source side takes when every pair spills (`fastmig_verify::run::heap_pair_bytes`), the
+/// log read through the header `src` holds locked (workspace#526: the temp disk `--verify` needs).
+pub fn source_pair_bytes(src: &OpenSource, locate: Locate, workers: usize) -> io::Result<u64> {
+    let db = Database::open_with_log(
+        &src.entry.first_volume(),
+        locate,
+        &src.log,
+        Role::Source,
+        None,
+    )?;
+    fastmig_verify::run::heap_pair_bytes(&db, workers)
 }
 
 fn horizon(a: &DbArg) -> io::Result<fastmig_ondisk::heap_rewrite::VacuumHorizon> {

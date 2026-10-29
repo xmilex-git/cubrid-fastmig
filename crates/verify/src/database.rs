@@ -45,7 +45,9 @@ pub struct Database {
 }
 
 fn read_log(log: &Path) -> io::Result<LogHeader> {
-    let page = std::fs::read(log)?;
+    // the header's first 512 bytes, as `plan` reads it, not the whole active log
+    let mut page = vec![0u8; 512];
+    std::os::unix::fs::FileExt::read_exact_at(&std::fs::File::open(log)?, &mut page, 0)?;
     log_header::read_source(&page)
         .map(|(_, lh)| lh)
         .map_err(|e| io::Error::other(format!("{}: {} at {}", log.display(), e.what, e.at)))

@@ -8,8 +8,8 @@
 //! batches a temp limit needs and their extra time, and the memory rows.
 //! Bounds (docs/resources.md): a scan spills at most the pair bytes of its indexes, whatever `--mem` is: temp_min
 //! = the largest index's, temp_max = all of them in one batch; a batch is one more heap scan, priced at the
-//! counting scan's time. mem_recommended spills less, not nothing; mem_min is what the copy engine needs (one I/O
-//! buffer per worker) — the rest of the run degrades to spill under a smaller limit.
+//! counting scan's time. mem_recommended spills less, not nothing; mem_min is the fixed buffers per worker (copy I/O
+//! buffer, index build merge floor and spill buffer, `limits::mem_min`) — the keys spill under a smaller limit.
 //! Temp disk the verifier needs comes after the build's spill is gone: a run needs max(build, verify), not the sum.
 //! Source: workspace#526 (user requests: the sizes before the start, no disk full in the middle).
 
@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Instant;
 
+use crate::limits;
 use fastmig_catalog::catalog_layout::generated_rows;
 use fastmig_catalog::classify::ClassKind;
 use fastmig_catalog::row_encode::encode_row;
@@ -24,7 +25,6 @@ use fastmig_catalog::same_version_catalog::{DevelopCatalog, deferred_rows};
 use fastmig_catalog::source_catalog::SourceCatalog;
 use fastmig_catalog::target_classes::{Origin, TargetClass as CatalogClass};
 use fastmig_catalog::template_store::builtin;
-use fastmig_copy::volume_copy::IO_BUF_BYTES;
 use fastmig_index::IndexDef;
 use fastmig_index::heap_scan::WORKER_SHARE;
 use fastmig_index::pair_count::{pair_bytes, record_pair_bytes};
@@ -52,6 +52,8 @@ pub struct ResourceEstimate {
     pub scan_seconds: f64,
     pub workers: usize,
     pub physical_memory: u64,
+    /// Spill bytes the verifier's source side takes (`verify::source_pair_bytes`), counted only for `--verify`.
+    pub verify_source: Option<u64>,
 }
 
 fn invalid(e: impl std::fmt::Display) -> io::Error {
@@ -205,6 +207,7 @@ fn count(
         scan_seconds: 0.0,
         workers,
         physical_memory: 0,
+        verify_source: None,
     })
 }
 
@@ -219,6 +222,12 @@ impl ResourceEstimate {
         self.per_def.iter().sum()
     }
 
+    /// The smallest limit `--verify` takes: the verifier spills every index in one scan, on the target (temp max) and
+    /// then on the source; None when the source side was not counted.
+    pub fn verify_min(&self) -> Option<u64> {
+        self.verify_source.map(|s| s.max(self.temp_max()))
+    }
+
     /// Batches a temp limit cuts the indexes into; None below `temp_min`.
     pub fn batches(&self, limit: u64) -> Option<usize> {
         index_batches(&self.per_def, limit).ok().map(|b| b.len())
@@ -229,9 +238,9 @@ impl ResourceEstimate {
         self.scan_seconds * batches.saturating_sub(1) as f64
     }
 
-    /// What the copy engine needs: one I/O buffer per worker (the rest of the run spills under less).
+    /// The smallest limit a run takes (`limits::mem_min`): fixed buffers per worker; the keys spill under it.
     pub fn mem_min(&self) -> u64 {
-        (self.workers * IO_BUF_BYTES) as u64
+        limits::mem_min(self.workers)
     }
 
     /// Room for every pair (as spill bytes) in finished runs plus the workers' shares, at most the physical memory:
@@ -257,12 +266,14 @@ impl ResourceEstimate {
             })
             .collect();
         format!(
-            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"indexes\": [{}]}}",
+            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"indexes\": [{}]}}",
             self.scan_seconds,
             self.workers,
             self.extra_seconds(b),
             self.mem_min(),
             self.mem_recommended(),
+            opt(self.verify_source),
+            opt(self.verify_min()),
             idx.join(", ")
         )
     }
@@ -272,8 +283,17 @@ impl ResourceEstimate {
         let mib = |b: u64| b.div_ceil(1 << 20);
         let (lo, hi) = (self.temp_min(), self.temp_max());
         let b = self.batches(lo).unwrap_or(0);
+        let verify = match self.verify_min() {
+            Some(v) => format!(
+                "--verify needs >= {} MiB: the verifier spills every index in one scan, on the target ({} MiB) then on the source ({} MiB)",
+                mib(v),
+                mib(hi),
+                mib(self.verify_source.unwrap_or(0))
+            ),
+            None => "--verify needs >= temp max and the source side (counted by plan --verify; docs/resources.md)".into(),
+        };
         format!(
-            "resources (index rebuild, --workers {}; counted in {:.1} s, one heap scan):\n  temp disk: min {} MiB ({b} index batches, about {:.1} s more), max {} MiB (one batch)\n  --verify needs >= temp max: the verifier spills every index in one scan (docs/resources.md)\n  memory: min {} MiB, this run {} MiB, recommended {} MiB (fewer spills; temp does not depend on it)\n",
+            "resources (index rebuild, --workers {}; counted in {:.1} s, one heap scan):\n  temp disk: min {} MiB ({b} index batches, about {:.1} s more), max {} MiB (one batch)\n  {verify}\n  memory: min {} MiB, this run {} MiB, recommended {} MiB (fewer spills; temp does not depend on it)\n",
             self.workers,
             self.scan_seconds,
             mib(lo),
@@ -284,4 +304,8 @@ impl ResourceEstimate {
             mib(self.mem_recommended())
         )
     }
+}
+
+fn opt(v: Option<u64>) -> String {
+    v.map_or_else(|| "null".into(), |b| b.to_string())
 }

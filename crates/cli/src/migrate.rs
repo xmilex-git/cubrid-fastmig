@@ -24,7 +24,6 @@ use std::time::Instant;
 
 use fastmig_catalog::output_sql::UPDATE_STATISTICS_SQL;
 use fastmig_copy::out_of_volume_asset::{self, AssetOutcome};
-use fastmig_copy::volume_copy::IO_BUF_BYTES;
 use fastmig_copy::volume_copy::preallocate_targets;
 use fastmig_copy::{
     AsIs, CopyMethod, IncompleteMarker, VolumeJob, VolumeOutcome, copy_volumes, durable,
@@ -54,7 +53,7 @@ use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan
 use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
 use crate::target_space::{self, Reservation, TargetSpace};
-use crate::verify::{DbArg, run_verifier};
+use crate::verify::{self, DbArg, run_verifier};
 use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
 use fastmig_index::spill_arena::SpillArena;
 use fastmig_index::temp_disk::TEMP_DISK;
@@ -166,12 +165,13 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         verify: p.switch("--verify"),
         plan,
     };
-    // the copy engine streams every volume through one fixed buffer per worker
-    if (o.worker_limit as u64).saturating_mul(IO_BUF_BYTES as u64) > o.limits.memory_limit_bytes {
+    // the copy engine streams every volume through one fixed buffer per worker; the index build merges and spills
+    // through fixed buffers per worker too
+    if limits::mem_min(o.worker_limit) > o.limits.memory_limit_bytes {
         return Err(CliError::Usage(format!(
-            "--workers {} needs {} KiB of copy buffers, over --mem",
+            "--workers {} needs --mem {} KiB at least (copy buffers, index build merge and spill buffers)",
             o.worker_limit,
-            (o.worker_limit * IO_BUF_BYTES) >> 10
+            limits::mem_min(o.worker_limit) >> 10
         )));
     }
     // The plan decides everything and refuses before anything is written, the temp disk limit included (asked on a
@@ -185,13 +185,20 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             plan.refusals.join("\n  ")
         ))));
     }
-    let est = resource_estimate::estimate(
+    let mut est = resource_estimate::estimate(
         &src.vols,
         plan.version_pair,
         plan.source_version,
         o.worker_limit,
         limits::physical_memory()?,
     )?;
+    if o.verify {
+        est.verify_source = Some(verify::source_pair_bytes(
+            &src,
+            o.plan.locate,
+            o.worker_limit,
+        )?);
+    }
     let mem = o.limits.memory_limit_bytes;
     let target = target_space::bound(
         &plan,

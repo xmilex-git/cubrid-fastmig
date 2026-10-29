@@ -21,7 +21,7 @@ use fastmig_plan::{Plan, PlanInputs};
 
 use crate::args::{CliError, Parsed, parse};
 use crate::limits::{self, Limits};
-use crate::{plan_report, resource_estimate, target_space};
+use crate::{plan_report, resource_estimate, target_space, verify};
 
 const HELP: &str = "\
 cubrid-fastmig plan <db> --dest <dir> [options]
@@ -35,6 +35,8 @@ cubrid-fastmig plan <db> --dest <dir> [options]
   --volumes-in-first-dir         find volumes 1.. next to volume 0 (a source copied without its headers rewritten)
   --workers <n>                  worker limit the resource table assumes (default: CPUs / 2)
   --mem <size>                   memory limit the resource table assumes (default: physical memory / 4)
+  --verify                       also count the temp disk the verifier needs on the source (migrate --verify;
+                                 one more read of every indexed heap)
   --json                         print plan.json instead of the table
 The resource table (temp disk and memory per --mem, docs/resources.md) needs one read of every indexed heap.";
 
@@ -166,7 +168,11 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
 
 pub fn run(argv: &[String]) -> Result<u8, CliError> {
     let flags = [FLAGS, limits::FLAGS, &["--workers"]].concat();
-    let p = parse(argv, &flags, &[SWITCHES, &["--json", "--help"]].concat())?;
+    let p = parse(
+        argv,
+        &flags,
+        &[SWITCHES, &["--json", "--verify", "--help"]].concat(),
+    )?;
     if p.switch("--help") {
         println!("{HELP}");
         return Ok(0);
@@ -182,13 +188,16 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         r => r?,
     };
     let mem = Limits::from(&p, &o.target_dir)?.memory_limit_bytes;
-    let est = resource_estimate::estimate(
+    let mut est = resource_estimate::estimate(
         &s.vols,
         plan.version_pair,
         plan.source_version,
         limits::worker_limit(&p)?,
         limits::physical_memory()?,
     )?;
+    if p.switch("--verify") {
+        est.verify_source = Some(verify::source_pair_bytes(&s, o.locate, est.workers)?);
+    }
     let t = target_space::bound(
         &plan,
         &est,

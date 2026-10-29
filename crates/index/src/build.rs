@@ -2,8 +2,8 @@
 //! the same time, join them at the seams, build the non-leaf levels and the root.
 //!
 //! Input: the index's runs (in memory and spilled, from the heap scan's `RunWriter`s), the NULL-key row count,
-//! the index shape and key order, the root and the B-tree file's sink (`btree_file` allocates the root with the file), and the shared worker and
-//! memory limits.
+//! the index shape and key order, the root and the B-tree file's sink (`btree_file` allocates the root with the file), the
+//! shared worker limit, the spill directory and the merge memory of one worker (`intermediate_merge`).
 //! Output: the root VPID, the root header written, the overflow key file if any, and `BtStats`.
 //! Source: R6 § 2 steps 5–11 (engine no-logging parallel load, `btsort_px_*`, `bt_load_patch_seam`
 //! btree_load.c:5481-5555, develop 5b1867174); workspace#481 G1 (one `--workers` limit for everything).
@@ -11,15 +11,16 @@
 use crate::bt_stats::BtStats;
 use crate::build_error::BuildError;
 use crate::index_shape::IndexShape;
+use crate::intermediate_merge::{MERGE_BUFFER, bound_open_runs};
 use crate::key_order::KeyOrder;
 use crate::kway_merge::{Cursor, KwayMerge};
 use crate::leaf_builder::{ShardLeaves, build_shard};
-use crate::memory_limit::MemoryLimit;
 use crate::nonleaf_builder::{NonleafLevels, build_nonleaf_levels, write_empty_root};
 use crate::ovf_key_file::{MakeSink, OvfKeyFile};
 use crate::page_sink::PageSink;
 use crate::run_writer::IndexRuns;
 use crate::sort_run::Run;
+use crate::spill_dir::SpillDir;
 use crate::spill_run::SpillCursor;
 use crate::splitter::{select_splitters, slice_runs};
 use crate::worker_limit::WorkerLimit;
@@ -33,9 +34,6 @@ use std::time::{Duration, Instant};
 
 /// Entries per extra shard: below this, splitting the leaves costs more than it saves.
 const MIN_ENTRIES_PER_SHARD: usize = 4096;
-
-/// Read buffer of one spill file in one shard's merge.
-const MERGE_BUFFER: usize = 64 << 10;
 
 pub struct BuiltIndex {
     pub root: Vpid,
@@ -96,7 +94,8 @@ pub struct IndexJob<'a, 'm> {
 pub fn build_index(
     job: IndexJob,
     worker_limit: &WorkerLimit,
-    memory: &MemoryLimit,
+    spill: &SpillDir,
+    merge_budget: usize,
 ) -> Result<BuiltIndex, BuildError> {
     let IndexJob {
         root,
@@ -112,6 +111,9 @@ pub fn build_index(
     let ovf_keys = OvfKeyFile::new(make_ovf_key_sink);
 
     let t0 = Instant::now();
+    // no more spilled runs than one merge holds buffers for in the merge memory of a worker; every shard below
+    // holds a worker permit, so the shards running at once stay within the merge memory of the workers
+    bound_open_runs(&mut runs, order, spill, merge_budget)?;
     // spilled runs are sorted already; the in-memory ones sort inside the grant they were collected under
     let extra = worker_limit.try_acquire(runs.mem.len().saturating_sub(1));
     let workers = 1 + extra.count;
@@ -133,12 +135,6 @@ pub fn build_index(
     let splitters = select_splitters(&runs, shard_count, order);
     let bounds = slice_runs(&runs, &splitters, order)?;
     let shard_total = splitters.len() + 1;
-    // read buffers of the spill files every shard merges
-    let open_files = shard_total * runs.spilled.len();
-    let merge_grant = memory.try_acquire(open_files * MERGE_BUFFER);
-    // shortcut: with the memory limit spent, a spill file still gets a 4 KiB buffer outside it; a multi-pass merge
-    // would bound the open files when spill files outnumber the memory limit / 4 KiB
-    let buf_bytes = (merge_grant.bytes / open_files.max(1)).clamp(4096, MERGE_BUFFER);
     let shards: Vec<Mutex<Option<ShardLeaves>>> =
         (0..shard_total).map(|_| Mutex::new(None)).collect();
     parallel_for(shard_count, shard_total, |s| {
@@ -155,7 +151,7 @@ pub fn build_index(
                 run,
                 b[s],
                 b[s + 1].index,
-                buf_bytes,
+                MERGE_BUFFER,
             )?));
         }
         let mut stream = KwayMerge::new(cursors, order);
@@ -219,7 +215,6 @@ pub fn build_index(
         p.write(sink)?;
     }
     // the keys are in the leaves now: give back their memory and remove the spill files
-    drop(merge_grant);
     drop(runs);
     let t_leaves = t1.elapsed();
 

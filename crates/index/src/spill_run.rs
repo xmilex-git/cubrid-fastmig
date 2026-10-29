@@ -7,13 +7,14 @@
 
 use crate::key_order::KeyOrder;
 use crate::sort_run::Run;
-use crate::spill_arena::{Extent, ExtentReader, ExtentWriter, SpillArena};
+use crate::spill_arena::{Extent, ExtentReader, SpillArena};
 use crate::spill_dir::SpillDir;
 use crate::temp_disk::{TEMP_DISK, spill_record_bytes};
 use fastmig_ondisk::Oid;
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -39,6 +40,8 @@ pub struct SpillRun {
     samples: Vec<Sample>,
     /// Bytes of the file, counted in `TEMP_DISK` while the run lives.
     bytes: u64,
+    /// The longest key: what a cursor's key buffer grows to.
+    max_key: usize,
 }
 
 /// A position in a spill file: entry index and byte offset.
@@ -48,58 +51,133 @@ pub struct SpillPos {
     pub offset: u64,
 }
 
-impl SpillRun {
-    /// Writes the sorted `run` to a new file in `dir`; its bytes count in [`TEMP_DISK`] from before the first write
-    /// until the run is dropped (also when the write fails).
-    pub fn write(dir: &SpillDir, run: &Run) -> io::Result<Self> {
-        let bytes = (0..run.len())
-            .map(|i| spill_record_bytes(run.key(i).len() as u64))
-            .sum();
-        TEMP_DISK.add(bytes);
-        let storage = match dir.arena() {
-            Some(a) => Storage::Arena(a.clone(), Vec::new()),
-            None => Storage::File(dir.new_file_path()),
-        };
-        let mut me = Self {
-            storage,
-            len: run.len(),
-            samples: Vec::with_capacity(run.len() / SAMPLE_EVERY + 1),
-            bytes,
-        };
-        // the run owns its space (and frees it on drop) before the first byte goes out
-        let arena_extents;
-        let sink: Box<dyn Write> = match &mut me.storage {
-            Storage::File(p) => Box::new(File::create(p)?),
+/// The space of a run being written, taken as its bytes go out: an arena run gets extents per buffer flush, so a
+/// merge that frees its inputs as it reads them never holds an input and its output at once (workspace#526).
+struct RunSink {
+    run: SpillRun,
+    file: Option<File>,
+}
+
+impl Write for RunSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = buf.len() as u64;
+        match &mut self.run.storage {
+            Storage::File(_) => {
+                let n = self.file.as_mut().unwrap().write(buf)?;
+                TEMP_DISK.add(n as u64);
+                self.run.bytes += n as u64;
+                Ok(n)
+            }
             Storage::Arena(a, ext) => {
-                *ext = a.alloc(bytes)?;
-                arena_extents = (a.clone(), ext.clone());
-                Box::new(ExtentWriter::new(arena_extents.0.file(), &arena_extents.1))
+                // the run owns the extents (and frees them on drop) before a byte goes into them
+                let new = a.alloc(n)?;
+                TEMP_DISK.add(n);
+                self.run.bytes += n;
+                let mut at = 0;
+                for e in &new {
+                    a.file()
+                        .write_all_at(&buf[at..at + e.len as usize], e.offset)?;
+                    at += e.len as usize;
+                    match ext.last_mut() {
+                        Some(l) if l.offset + l.len == e.offset => l.len += e.len,
+                        _ => ext.push(*e),
+                    }
+                }
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.as_mut().map_or(Ok(()), |f| f.flush())
+    }
+}
+
+/// Writes one sorted run record by record (`key_len u32 · OID 8 B · key`), through a buffer of `buf_bytes`.
+pub struct SpillOut {
+    w: BufWriter<RunSink>,
+    offset: u64,
+    len: usize,
+    max_key: usize,
+    samples: Vec<Sample>,
+}
+
+impl SpillOut {
+    pub fn new(dir: &SpillDir, buf_bytes: usize) -> io::Result<Self> {
+        let (storage, file) = match dir.arena() {
+            Some(a) => (Storage::Arena(a.clone(), Vec::new()), None),
+            None => {
+                let p = dir.new_file_path();
+                let f = File::create(&p)?;
+                (Storage::File(p), Some(f))
             }
         };
-        let mut w = BufWriter::with_capacity(1 << 20, sink);
-        let mut offset = 0u64;
-        let mut hdr = [0u8; RECORD_HEADER];
-        for i in 0..run.len() {
-            let key = run.key(i);
-            if i % SAMPLE_EVERY == 0 {
-                me.samples.push(Sample {
-                    index: i,
-                    offset,
-                    key: key.to_vec(),
-                });
-            }
-            hdr[..4].copy_from_slice(&(key.len() as u32).to_le_bytes());
-            run.oid(i).write(&mut hdr, 4);
-            w.write_all(&hdr)?;
-            w.write_all(key)?;
-            offset += (RECORD_HEADER + key.len()) as u64;
+        let run = SpillRun {
+            storage,
+            len: 0,
+            samples: Vec::new(),
+            bytes: 0,
+            max_key: 0,
+        };
+        Ok(Self {
+            w: BufWriter::with_capacity(buf_bytes, RunSink { run, file }),
+            offset: 0,
+            len: 0,
+            max_key: 0,
+            samples: Vec::new(),
+        })
+    }
+
+    pub fn push(&mut self, key: &[u8], oid: Oid) -> io::Result<()> {
+        if self.len.is_multiple_of(SAMPLE_EVERY) {
+            self.samples.push(Sample {
+                index: self.len,
+                offset: self.offset,
+                key: key.to_vec(),
+            });
         }
-        w.flush()?;
-        Ok(me)
+        let mut hdr = [0u8; RECORD_HEADER];
+        hdr[..4].copy_from_slice(&(key.len() as u32).to_le_bytes());
+        oid.write(&mut hdr, 4);
+        self.w.write_all(&hdr)?;
+        self.w.write_all(key)?;
+        self.offset += spill_record_bytes(key.len() as u64);
+        self.len += 1;
+        self.max_key = self.max_key.max(key.len());
+        Ok(())
+    }
+
+    pub fn finish(self) -> io::Result<SpillRun> {
+        let mut sink = self.w.into_inner().map_err(|e| e.into_error())?;
+        sink.run.len = self.len;
+        sink.run.max_key = self.max_key;
+        sink.run.samples = self.samples;
+        Ok(sink.run)
+    }
+}
+
+impl SpillRun {
+    /// Writes the sorted `run` to a new file in `dir` through a buffer of `buf_bytes`; its bytes count in
+    /// [`TEMP_DISK`] from before they are written until the run is dropped (also when the write fails).
+    pub fn write(dir: &SpillDir, run: &Run, buf_bytes: usize) -> io::Result<Self> {
+        let mut out = SpillOut::new(dir, buf_bytes)?;
+        for i in 0..run.len() {
+            out.push(run.key(i), run.oid(i))?;
+        }
+        out.finish()
     }
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Bytes the run holds on disk.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    pub fn max_key(&self) -> usize {
+        self.max_key
     }
 
     pub fn is_empty(&self) -> bool {
@@ -165,11 +243,49 @@ impl Drop for SpillRun {
     }
 }
 
-/// Reads entries `[from.index, end)` of a spill file in order.
-/// A run's bytes as one stream: its file, or its arena extents.
+/// A run read once from its start by the merge that replaces it: each range of an arena run is freed as soon as it
+/// is in the read buffer, so the merged output can take its place (a file run keeps its file until dropped).
+struct Consumer {
+    run: SpillRun,
+    file: Option<File>,
+    /// First extent not yet read to its end.
+    head: usize,
+}
+
+impl Read for Consumer {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Storage::Arena(a, ext) = &mut self.run.storage else {
+            return self.file.as_mut().unwrap().read(buf);
+        };
+        while ext.get(self.head).is_some_and(|e| e.len == 0) {
+            self.head += 1;
+        }
+        let Some(e) = ext.get_mut(self.head) else {
+            return Ok(0);
+        };
+        let take = buf.len().min(e.len as usize);
+        let n = a.file().read_at(&mut buf[..take], e.offset)?;
+        if n == 0 {
+            return Err(io::Error::other("spill arena shorter than a run's extent"));
+        }
+        let read = Extent {
+            offset: e.offset,
+            len: n as u64,
+        };
+        e.offset += read.len;
+        e.len -= read.len;
+        a.free(&[read]);
+        self.run.bytes -= read.len;
+        TEMP_DISK.sub(read.len);
+        Ok(n)
+    }
+}
+
+/// A run's bytes as one stream: its file, its arena extents, or the run consumed as it is read.
 enum RunReader {
     File(File),
     Arena(ExtentReader),
+    Consume(Consumer),
 }
 
 impl Read for RunReader {
@@ -177,6 +293,7 @@ impl Read for RunReader {
         match self {
             RunReader::File(f) => f.read(buf),
             RunReader::Arena(r) => r.read(buf),
+            RunReader::Consume(c) => c.read(buf),
         }
     }
 }
@@ -186,6 +303,9 @@ impl Seek for RunReader {
         match self {
             RunReader::File(f) => f.seek(to),
             RunReader::Arena(r) => r.seek(to),
+            RunReader::Consume(_) => Err(io::Error::other(
+                "a consumed run is read from its start only",
+            )),
         }
     }
 }
@@ -210,6 +330,27 @@ impl SpillCursor {
         let mut c = Self {
             r: BufReader::with_capacity(buf_bytes, f),
             remaining: end.saturating_sub(from.index),
+            key: Vec::new(),
+            oid: Oid::NULL,
+            valid: false,
+        };
+        c.advance()?;
+        Ok(c)
+    }
+
+    /// Takes `run` and reads all of it once, freeing its space as it goes ([`Consumer`]).
+    pub fn consume(run: SpillRun, buf_bytes: usize) -> io::Result<Self> {
+        let file = match &run.storage {
+            Storage::File(p) => Some(File::open(p)?),
+            Storage::Arena(..) => None,
+        };
+        let remaining = run.len;
+        let mut c = Self {
+            r: BufReader::with_capacity(
+                buf_bytes,
+                RunReader::Consume(Consumer { run, file, head: 0 }),
+            ),
+            remaining,
             key: Vec::new(),
             oid: Oid::NULL,
             valid: false,

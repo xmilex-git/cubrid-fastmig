@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use fastmig_index::intermediate_merge::{MERGE_FLOOR, bound_open_runs};
 use fastmig_index::job_pool::run_jobs;
 use fastmig_index::splitter::ShardBounds;
 use fastmig_index::{BuildError, IndexRuns, MemoryLimit, Run, SpillDir, WorkerLimit};
@@ -89,16 +90,18 @@ fn tool_err(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
 
-pub fn verify_database(
-    db: &Database,
-    measured: &BTreeSet<Oid>,
-    lim: &Limits,
-) -> std::io::Result<DbResult> {
-    let mut r = DbResult::default();
-    let mut phases = Vec::new();
-    let (files, d4) = phase(&mut phases, "sectors", || check_sectors(db))?;
-    r.defects.extend(d4);
+/// The database's indexes: per class its constraints, one spec per BTID, and the trees opened — a plain one's key
+/// domain drives the heap side; a deferred one (or an 11.4 DEDUPLICATE one) is checked without it.
+struct Indexes<'a> {
+    constraints: Vec<Result<Vec<Constraint>, String>>,
+    specs: Vec<IndexSpec>,
+    trees: BTreeMap<usize, IndexTree<'a>>,
+    deferred: Vec<(usize, IndexTree<'a>)>,
+    not_checked: Vec<String>,
+    defects: Vec<Defect>,
+}
 
+fn open_indexes(db: &Database) -> Indexes<'_> {
     let constraints: Vec<Result<Vec<Constraint>, String>> = db
         .classes
         .iter()
@@ -127,13 +130,14 @@ pub fn verify_database(
         }
     }
     let specs: Vec<IndexSpec> = by_btid.into_values().collect();
-    r.indexes = specs.len();
-
-    let mut refs: Vec<ObjectRef> = Vec::new();
-    let mut deferred: Vec<(usize, IndexTree)> = Vec::new();
-    let t_heaps = Instant::now();
-    // every index tree first: a plain one's key domain drives the heap side
-    let mut trees: BTreeMap<usize, IndexTree> = BTreeMap::new();
+    let mut x = Indexes {
+        constraints,
+        specs: Vec::new(),
+        trees: BTreeMap::new(),
+        deferred: Vec::new(),
+        not_checked: Vec::new(),
+        defects: Vec::new(),
+    };
     for (s, spec) in specs.iter().enumerate() {
         let (ci, c) = &spec.owners[0];
         let class = db.class_name(db.classes[*ci].oid);
@@ -143,7 +147,7 @@ pub fn verify_database(
                 let dedup = t.root.dedup_key_idx_114().is_some()
                     && db.line == fastmig_ondisk::VersionLine::V11_4;
                 if !spec.is_plain() || dedup {
-                    r.not_checked.push(format!(
+                    x.not_checked.push(format!(
                         "{}.{name}: {}",
                         t.class,
                         if dedup {
@@ -152,18 +156,93 @@ pub fn verify_database(
                             "deferred index (function or filter)"
                         }
                     ));
-                    deferred.push((s, t));
+                    x.deferred.push((s, t));
                 } else {
-                    trees.insert(s, t);
+                    x.trees.insert(s, t);
                 }
             }
-            Err(d) => r.defects.push(*d),
+            Err(d) => x.defects.push(*d),
         }
     }
-    // one multi-class scan over every heap (workspace#503), then the class checks in class order
+    x.specs = specs;
+    x
+}
+
+/// Every class with a heap, by position in `db.classes`; per class the plain indexes its rows feed (spec positions)
+/// and its heap scan job.
+fn heap_jobs<'a>(
+    db: &'a Database,
+    specs: &'a [IndexSpec],
+    trees: &'a BTreeMap<usize, IndexTree<'a>>,
+) -> (Vec<usize>, Vec<Vec<usize>>, Vec<HeapScanJob<'a>>) {
     let heap_classes: Vec<usize> = (0..db.classes.len())
         .filter(|&i| !db.classes[i].class.heap.is_null())
         .collect();
+    let mut feeds: Vec<Vec<usize>> = Vec::with_capacity(heap_classes.len());
+    let jobs: Vec<HeapScanJob> = heap_classes
+        .iter()
+        .map(|&ci| {
+            let sc = &db.classes[ci];
+            let mine: Vec<usize> = trees
+                .keys()
+                .copied()
+                .filter(|s| specs[*s].owners.iter().any(|(j, _)| *j == ci))
+                .collect();
+            let indexes = mine
+                .iter()
+                .map(|s| IndexKeys {
+                    constraint: &specs[*s].owners.iter().find(|(j, _)| *j == ci).unwrap().1,
+                    kd: &trees[s].kd,
+                })
+                .collect();
+            feeds.push(mine);
+            HeapScanJob {
+                target: HeapTarget {
+                    name: db.class_name(sc.oid),
+                    class_oid: sc.oid,
+                    class: Some(&sc.class),
+                    hfid: sc.class.heap,
+                },
+                indexes,
+            }
+        })
+        .collect();
+    (heap_classes, feeds, jobs)
+}
+
+/// The spill bytes the heap side of this verifier takes on `db` when every pair spills: the pairs its own reader
+/// extracts, counted without keeping them (workspace#526: the temp disk `--verify` needs on the source).
+pub fn heap_pair_bytes(db: &Database, workers: usize) -> std::io::Result<u64> {
+    let x = open_indexes(db);
+    let (_, _, jobs) = heap_jobs(db, &x.specs, &x.trees);
+    crate::heap_pass::pair_bytes(db, &jobs, workers)
+}
+
+pub fn verify_database(
+    db: &Database,
+    measured: &BTreeSet<Oid>,
+    lim: &Limits,
+) -> std::io::Result<DbResult> {
+    let mut r = DbResult::default();
+    let mut phases = Vec::new();
+    let (files, d4) = phase(&mut phases, "sectors", || check_sectors(db))?;
+    r.defects.extend(d4);
+
+    let t_heaps = Instant::now();
+    let Indexes {
+        constraints,
+        specs,
+        mut trees,
+        deferred,
+        not_checked,
+        defects,
+    } = open_indexes(db);
+    r.indexes = specs.len();
+    r.not_checked.extend(not_checked);
+    r.defects.extend(defects);
+    let mut refs: Vec<ObjectRef> = Vec::new();
+    // one multi-class scan over every heap (workspace#503), then the class checks in class order
+    let (heap_classes, feeds, jobs) = heap_jobs(db, &specs, &trees);
     // the live row map is reserved before the scan, from the heaps' page counts (workspace#509)
     let heap_pages: usize = heap_classes
         .iter()
@@ -172,38 +251,12 @@ pub fn verify_database(
         .map(|h| FileTable::read(&db.vols, h.vfid).map_or(0, |ft| ft.user_pages().len()))
         .sum();
     let mut live = LiveRowMap::reserve(lim.memory, heap_pages)?;
+    // merge memory (fastmig_index::intermediate_merge): a floor per worker held from before the scan, which cannot
+    // take it, and after the sorts all the limit has free; each check-2 job merges within one worker's part
+    let floor = lim.memory.try_acquire(lim.workers.limit() * MERGE_FLOOR);
     let mut runs: BTreeMap<usize, IndexRuns> = BTreeMap::new();
     let mut nulls: BTreeMap<usize, u64> = BTreeMap::new();
     {
-        let mut feeds: Vec<Vec<usize>> = Vec::with_capacity(heap_classes.len());
-        let jobs: Vec<HeapScanJob> = heap_classes
-            .iter()
-            .map(|&ci| {
-                let sc = &db.classes[ci];
-                let mine: Vec<usize> = trees
-                    .keys()
-                    .copied()
-                    .filter(|s| specs[*s].owners.iter().any(|(j, _)| *j == ci))
-                    .collect();
-                let indexes = mine
-                    .iter()
-                    .map(|s| IndexKeys {
-                        constraint: &specs[*s].owners.iter().find(|(j, _)| *j == ci).unwrap().1,
-                        kd: &trees[s].kd,
-                    })
-                    .collect();
-                feeds.push(mine);
-                HeapScanJob {
-                    target: HeapTarget {
-                        name: db.class_name(sc.oid),
-                        class_oid: sc.oid,
-                        class: Some(&sc.class),
-                        hfid: sc.class.heap,
-                    },
-                    indexes,
-                }
-            })
-            .collect();
         let passes =
             scan_heaps(db, &jobs, lim.workers, lim.memory, lim.spill).map_err(build_err)?;
         for (((job, &ci), mine), p) in jobs.iter().zip(&heap_classes).zip(&feeds).zip(passes) {
@@ -228,6 +281,8 @@ pub fn verify_database(
             }
         }
     }
+    // the jobs borrow the trees, which give up their defects below
+    drop((jobs, feeds));
     phases.push(("heap pass", t_heaps.elapsed()));
     let t_sort = Instant::now();
     // a tree's own defects (from open) are reported once, whatever its shards find
@@ -257,6 +312,16 @@ pub fn verify_database(
         sorts.sort_by_key(|(m, _)| std::cmp::Reverse(m.len()));
         run_jobs(lim.workers.limit(), sorts, |(m, kd)| m.sort(kd));
     }
+    let free = lim.memory.try_acquire(lim.memory.limit());
+    let merge_budget = (floor.bytes + free.bytes) / lim.workers.limit().max(1);
+    let bounded = run_jobs(
+        lim.workers.limit(),
+        index_runs.iter_mut().collect(),
+        |(s, run, _): &mut (usize, IndexRuns, u64)| {
+            bound_open_runs(run, &trees[s].kd, lim.spill, merge_budget)
+        },
+    );
+    bounded.into_iter().collect::<std::io::Result<()>>()?;
     let plans = index_runs
         .iter()
         .map(|(s, run, _)| {

@@ -6,6 +6,7 @@
 //! Source: workspace#493 (memory limit and spill); engine counterpart `external_sort.c` (sorted runs written to
 //! temporary files when the sort buffer fills).
 
+use crate::intermediate_merge::MERGE_BUFFER;
 use crate::key_order::KeyOrder;
 use crate::memory_limit::{MemoryGrant, MemoryLimit};
 use crate::sort_run::Run;
@@ -71,7 +72,8 @@ impl<'a> RunWriter<'a> {
 
     fn spill(&mut self) -> io::Result<()> {
         self.run.sort(self.order);
-        self.spilled.push(SpillRun::write(self.dir, &self.run)?);
+        self.spilled
+            .push(SpillRun::write(self.dir, &self.run, MERGE_BUFFER)?);
         self.run.clear();
         Ok(())
     }

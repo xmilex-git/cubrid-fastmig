@@ -17,6 +17,7 @@
 //! R-ROW-3 all-NULL keys are counted and left out, R-ROW-4 a NULL in a NOT NULL (PK) key stops the build.
 
 use crate::build_error::BuildError;
+use crate::intermediate_merge::MERGE_BUFFER;
 use crate::key_order::KeyOrder;
 use crate::memory_limit::MemoryLimit;
 use crate::run_writer::{IndexRuns, RunWriter};
@@ -135,7 +136,9 @@ where
                                 done.push(finish(w, memory)?);
                             }
                             let orders = &classes[c].orders;
-                            let part = grant.bytes / orders.len().max(1);
+                            // the share also pays the write buffer of the one spill this worker makes at a time
+                            let part =
+                                grant.bytes.saturating_sub(MERGE_BUFFER) / orders.len().max(1);
                             cur = Some(Writers {
                                 class: c,
                                 writers: orders

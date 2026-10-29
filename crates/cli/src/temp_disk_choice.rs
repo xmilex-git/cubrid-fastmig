@@ -4,8 +4,8 @@
 //! target space the plan needs, and the free space of the target and spill filesystems.
 //! Output: the limit in bytes.
 //! Rules (user, 2026-10-30): no option on a terminal → show min and max and ask; no option otherwise → max when it
-//! fits the free space, else refuse naming the choices; with `--verify` the minimum is max (the verifier spills
-//! every index in one scan); a limit below min or a limit plus the target growth over
+//! fits the free space, else refuse naming the choices; with `--verify` min and max are the verifier's need (it
+//! spills every index in one scan, on the target then on the source: `ResourceEstimate::verify_min`); a limit below min or a limit plus the target growth over
 //! the free space → refuse. Nothing is retried or grown during the run.
 //! Source: workspace#526.
 
@@ -63,14 +63,17 @@ pub fn choose(
     spill: &Path,
     target: &Path,
 ) -> io::Result<u64> {
-    // the verifier scans every index at once, after the build's spill is gone (docs/resources.md)
-    let hi = e.temp_max();
-    let lo = if verify { hi } else { e.temp_min() };
+    // the verifier scans every index at once, on the target then on the source, after the build's spill is gone
+    // (docs/resources.md): its need is both the least and the most the run takes
+    let (lo, hi) = match e.verify_min() {
+        Some(v) if verify => (v, v),
+        _ => (e.temp_min(), e.temp_max()),
+    };
     let limit = match choice {
         Some(TempDiskChoice::Min) => lo,
         Some(TempDiskChoice::Max) => hi,
         Some(TempDiskChoice::Bytes(b)) => b,
-        None if io::stdin().is_terminal() && io::stderr().is_terminal() => ask(e, mem)?,
+        None if io::stdin().is_terminal() && io::stderr().is_terminal() => ask(e, mem, lo, hi)?,
         None => {
             if !room_for(hi, needed, target_available, spill, target)? {
                 return Err(refuse(format!(
@@ -89,7 +92,7 @@ pub fn choose(
             mib(limit),
             mib(lo),
             if verify {
-                "--verify spills every index at once: temp max"
+                "--verify spills every index at once, on the target then on the source"
             } else {
                 "the largest index's pair bytes"
             }
@@ -107,7 +110,7 @@ pub fn choose(
 }
 
 /// Shows the table and reads `min`, `max` or a size from the terminal (empty: max).
-fn ask(e: &ResourceEstimate, mem: u64) -> io::Result<u64> {
+fn ask(e: &ResourceEstimate, mem: u64, lo: u64, hi: u64) -> io::Result<u64> {
     let mut err = io::stderr();
     write!(
         err,
@@ -119,8 +122,8 @@ fn ask(e: &ResourceEstimate, mem: u64) -> io::Result<u64> {
     let mut line = String::new();
     io::stdin().lock().read_line(&mut line)?;
     match line.trim() {
-        "" | "max" => Ok(e.temp_max()),
-        "min" => Ok(e.temp_min()),
+        "" | "max" => Ok(hi),
+        "min" => Ok(lo),
         v => crate::limits::parse_size(v).ok_or_else(|| refuse(format!("bad answer {v:?}"))),
     }
 }

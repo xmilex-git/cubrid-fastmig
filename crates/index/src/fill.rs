@@ -23,6 +23,7 @@ use crate::build_many::build_indexes;
 use crate::heap_keys::{ClassKeys, page_keys};
 use crate::heap_scan::{RowKey, ScanClass, scan_classes};
 use crate::index_def::IndexDef;
+use crate::intermediate_merge::MERGE_FLOOR;
 use crate::key_order::KeyOrder;
 use crate::memory_limit::MemoryLimit;
 use crate::ovf_key_file::MakeSink;
@@ -148,6 +149,10 @@ fn fill_batch(
         });
     }
     let io_pagesize = vols.io_pagesize();
+    // merge memory (intermediate_merge): a floor per worker held from before the scan, which cannot take it, and
+    // after the scan all the limit has free; the builds' merges split it per worker permit
+    let workers = lim.workers.limit();
+    let floor = lim.memory.try_acquire(workers * MERGE_FLOOR);
     let class_runs = scan_classes(
         &scans,
         lim.workers,
@@ -209,8 +214,10 @@ fn fill_batch(
             make_ovf_key_sink: &make_ovf[i],
         })
         .collect();
+    let free = lim.memory.try_acquire(lim.memory.limit());
+    let merge_budget = (floor.bytes + free.bytes) / workers.max(1);
     defs.iter()
-        .zip(build_indexes(jobs, lim.workers, lim.memory))
+        .zip(build_indexes(jobs, lim.workers, lim.spill, merge_budget))
         .map(|(d, built)| {
             let b = built?;
             Ok(FilledIndex {

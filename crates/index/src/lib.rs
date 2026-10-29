@@ -14,6 +14,7 @@ pub mod heap_keys;
 pub mod heap_scan;
 pub mod index_def;
 pub mod index_shape;
+pub mod intermediate_merge;
 pub mod job_pool;
 pub mod key_domain_order;
 pub mod key_order;

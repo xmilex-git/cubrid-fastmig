@@ -11,6 +11,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use fastmig_copy::volume_copy::IO_BUF_BYTES;
+use fastmig_index::intermediate_merge::WORKER_MIN;
 use fastmig_index::spill_arena::SpillArena;
 
 use crate::args::{CliError, Parsed};
@@ -44,6 +46,12 @@ impl Limits {
             arena: None,
         })
     }
+}
+
+/// The smallest `--mem` a run of `workers` workers takes: per worker the copy engine's I/O buffer or what the index
+/// build needs (`intermediate_merge::WORKER_MIN`), whichever is more (docs/resources.md).
+pub fn mem_min(workers: usize) -> u64 {
+    (workers * IO_BUF_BYTES.max(WORKER_MIN)) as u64
 }
 
 pub fn parse_size(v: &str) -> Option<u64> {

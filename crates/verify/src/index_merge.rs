@@ -15,6 +15,7 @@ use std::cmp::Ordering;
 use std::io;
 
 use fastmig_index::IndexRuns;
+use fastmig_index::intermediate_merge::MERGE_BUFFER;
 use fastmig_index::kway_merge::{Cursor, KeyStream, KwayMerge};
 use fastmig_index::spill_run::{SpillCursor, SpillPos};
 use fastmig_index::splitter::ShardBounds;
@@ -24,9 +25,6 @@ use fastmig_ondisk::value::KeyDomain;
 use crate::btree_walk::LeafPairs;
 use crate::defect::{Check, Defect, OidText};
 use crate::live_row_map::LiveRowMap;
-
-/// Read buffer per spill file.
-const MERGE_BUFFER: usize = 64 << 10;
 
 fn key_text(kd: &KeyDomain, k: &[u8]) -> String {
     match kd.decode_key(k) {
