@@ -5,6 +5,7 @@ pub mod auth_rows;
 pub mod class_rewrite;
 pub mod class_rows;
 pub mod classify;
+pub mod collation_check;
 pub mod ct_index_rows;
 pub mod ct_rows;
 pub mod disk_repr_build;
