@@ -5,6 +5,10 @@ version = 4
 [[package]]
 name = "cubrid-fastmig"
 version = "0.1.0"
+dependencies = [
+ "fastmig-copy",
+ "fastmig-ondisk",
+]
 
 [[package]]
 name = "fastmig-catalog"
@@ -13,6 +17,9 @@ version = "0.1.0"
 [[package]]
 name = "fastmig-copy"
 version = "0.1.0"
+dependencies = [
+ "fastmig-ondisk",
+]
 
 [[package]]
 name = "fastmig-index"

@@ -1,11 +1,17 @@
-//! Opens a source volume read-only and holds a whole-file POSIX read lock on it for the rest of the run, so a CUBRID
-//! server cannot boot on the source while the tool reads it, and the tool refuses a source a server holds.
+//! Opens source files read-only, and holds a whole-file POSIX read lock on the source active log `<db>_lgat` for
+//! the rest of the run: a CUBRID server cannot boot on the source while the tool reads it, and the tool refuses a
+//! source whose server is up.
 //!
-//! Input: the volume path, and whether to ask for direct I/O. Output: the open file; the lock lives as long as the
-//! process keeps this file open. POSIX locks belong to the process and are dropped when *any* descriptor of the same
-//! file in this process is closed, so every later read of a locked volume must go through the returned handle.
-//! Source: engine `src/storage/file_io.c:fileio_lock` (`lockf (vol_fd, F_TLOCK, 0)`, a whole-file write lock that
-//! fails on a conflicting lock), release/11.4 and develop; decision G1 workspace#481 (Q5).
+//! The lock goes on the active log, not on the volumes: the engine write-locks only the active log at boot
+//! (`log_initialize_internal` mounts it with `lock_wait` true) and mounts data volumes without a lock
+//! (`boot_mount` passes `lock_wait` false), so a read lock on a volume does not stop a server (checked on develop
+//! release, workspace#494).
+//! Input: a path. Output: the open file; a lock lives as long as the process keeps that file open. POSIX locks
+//! belong to the process and are dropped when *any* descriptor of the same file in this process is closed, so
+//! every later read of the locked log must go through the returned handle.
+//! Source: engine `src/storage/file_io.c:fileio_lock` (`fileio_lock_file_write` = `F_SETLK F_WRLCK` on the whole
+//! file, fails on a conflicting lock), `log_manager.c:log_initialize_internal`, `boot_sr.c:boot_mount`
+//! (release/11.4 and develop @5b1867174); decision G1 workspace#481 (Q5).
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -33,9 +39,9 @@ unsafe extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
 }
 
-/// Opens `path` read-only (with `O_DIRECT` when `direct` and the filesystem takes it) and read-locks the whole file.
-pub fn open_locked(path: &Path, direct: bool) -> io::Result<File> {
-    let file = open_read_only(path, direct)?;
+/// Opens the source active log read-only and read-locks it; fails when a server holds it.
+pub fn open_locked_log(path: &Path) -> io::Result<File> {
+    let file = open_source(path, false)?;
     let fl = Flock {
         l_type: F_RDLCK,
         l_whence: SEEK_SET,
@@ -58,7 +64,8 @@ pub fn open_locked(path: &Path, direct: bool) -> io::Result<File> {
     Ok(file)
 }
 
-fn open_read_only(path: &Path, direct: bool) -> io::Result<File> {
+/// Opens a source file read-only, with `O_DIRECT` when `direct` and the filesystem takes it.
+pub fn open_source(path: &Path, direct: bool) -> io::Result<File> {
     if direct {
         match OpenOptions::new()
             .read(true)
@@ -70,5 +77,5 @@ fn open_read_only(path: &Path, direct: bool) -> io::Result<File> {
             Err(e) => return Err(e),
         }
     }
-    File::open(path)
+    File::open(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }

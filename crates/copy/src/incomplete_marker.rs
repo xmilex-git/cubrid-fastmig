@@ -80,12 +80,16 @@ fn remove_listed(marker: &Path) -> io::Result<()> {
     let listed = fs::read_to_string(marker)?;
     for line in listed.lines().rev() {
         let p = Path::new(line);
-        match fs::symlink_metadata(p) {
-            Ok(m) if m.is_dir() => fs::remove_dir(p)?,
-            Ok(_) => fs::remove_file(p)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
+        let removed = match fs::symlink_metadata(p) {
+            Ok(m) if m.is_dir() => fs::remove_dir(p),
+            Ok(_) => fs::remove_file(p),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
+        // a directory holding files the tool did not create is left for the user to clear
+        removed.map_err(|e| {
+            io::Error::new(e.kind(), format!("cleaning the previous run: {line}: {e}"))
+        })?;
     }
     Ok(())
 }

@@ -129,6 +129,19 @@ fn copy_files(
     Ok(out.into_inner().unwrap())
 }
 
+/// Copies the single file `src` to `dst` if it exists (`None` when it does not).
+pub fn copy_one(
+    src: &Path,
+    dst: &Path,
+    marker: &IncompleteMarker,
+) -> io::Result<Option<CopyMethod>> {
+    match File::open(src) {
+        Ok(f) => Ok(Some(copy_file(&f, dst, marker)?.0)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io::Error::new(e.kind(), format!("{}: {e}", src.display()))),
+    }
+}
+
 /// Clones or copies one file to a new `dst` with the source's permission bits.
 fn copy_file(src: &File, dst: &Path, marker: &IncompleteMarker) -> io::Result<(CopyMethod, u64)> {
     let meta = src.metadata()?;

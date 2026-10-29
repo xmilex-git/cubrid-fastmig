@@ -26,7 +26,7 @@ const DIRECT_ALIGN: usize = 4096;
 
 pub struct VolumeJob {
     pub volid: i16,
-    /// Opened by [`crate::source_lock::open_locked`]; reading through it keeps the lock.
+    /// Opened read-only by [`crate::source_lock::open_source`].
     pub source: File,
     pub target: PathBuf,
     pub io_pagesize: usize,
