@@ -194,3 +194,20 @@ pub fn recompile_plcsql_sql(routines: &[(Vec<u8>, bool)]) -> String {
     }
     s
 }
+
+/// The user PL/CSQL routines among `_db_stored_procedure` rows: `lang` = `SP_LANG_PLCSQL` (0) and not
+/// `is_system_generated`, as `(unique_name, sp_type == SP_TYPE_FUNCTION)` (engine `sp_constants.hpp`, same values in
+/// 11.4 and develop).
+pub fn plcsql_routines(rows: &[crate::class_rows::Row]) -> Vec<(Vec<u8>, bool)> {
+    let int = |r: &crate::class_rows::Row, k: &str| match r.values.get(k) {
+        Some(Value::Integer(i)) => Some(*i),
+        _ => None,
+    };
+    rows.iter()
+        .filter(|r| int(r, "lang") == Some(0) && int(r, "is_system_generated") != Some(1))
+        .filter_map(|r| match r.values.get("unique_name") {
+            Some(Value::Varchar(n)) => Some((n.clone(), int(r, "sp_type") == Some(2))),
+            _ => None,
+        })
+        .collect()
+}
