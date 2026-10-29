@@ -129,6 +129,10 @@ _Avoid_: 이식 TC, 변환 TC
 포팅 TC가 처음 unloaddb를 부르는 자리. 하네스가 여기서 그 TC가 만든 DB 전부를 migrate·verify·집합 비교하고, TC가 이어서 쓰는 DB를 도착 DB로 바꾼다.
 _Avoid_: 훅, 가로채기
 
+**끝-끝 실행 (end-to-end run)**:
+기준 DB 하나를 `e2e/` 실행기로 pristine 사본 → plan → migrate → verify → 집합 비교 → 엔진 기동 smoke(LOB 내용 포함) → finalize → 일부러 깨뜨린 도착 → 도착 삭제까지 한 번에 돌리고 단계마다 시간과 종료 코드를 남기는 것. 판정은 도구와 엔진의 종료 코드다.
+_Avoid_: 통합 테스트, e2e 테스트
+
 ## 볼륨 밖 자산
 
 **볼륨 밖 자산 (out-of-volume asset)**:
