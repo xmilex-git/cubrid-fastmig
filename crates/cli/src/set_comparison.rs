@@ -15,7 +15,7 @@ use std::io;
 use std::path::Path;
 
 use crate::args::{CliError, parse};
-use fastmig_ondisk::VersionLine;
+use fastmig_ondisk::{SourceVersion, VersionLine};
 
 use crate::unload_files::{entries, unload_set};
 use crate::unload_normalize::{normalize, rules};
@@ -24,7 +24,7 @@ const HELP: &str = "\
 cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix> [--diff <file>]
   <prefix>         <dir>/<db name> as unloaddb -O <dir> wrote it (files <prefix>_schema, _objects, ...)
   --diff <file>    write every differing entry (< source only, > target only)
-  --source-version <11.4|develop> --target-version <11.4|develop>
+  --source-version <11.2|11.3|11.4|develop> --target-version <11.4|develop>
                    the engine lines that wrote each side; both or neither (default: one line, no normalization)
   exit 0 = same entries, 1 = differ, 2 = usage or I/O error";
 
@@ -43,7 +43,7 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
     )?;
     let pair = match (p.value("--source-version"), p.value("--target-version")) {
         (None, None) => &[],
-        (Some(s), Some(t)) => rules(version_line(s)?, version_line(t)?),
+        (Some(s), Some(t)) => rules(source_version(s)?, version_line(t)?),
         _ => {
             return Err(CliError::Usage(
                 "give --source-version and --target-version together".into(),
@@ -142,6 +142,23 @@ fn version_line(v: &str) -> Result<VersionLine, CliError> {
             "unknown version {v} (11.4 or develop)"
         ))),
     }
+}
+
+/// The source version as `plan.json` names it (`SourceVersion::name`).
+fn source_version(v: &str) -> Result<SourceVersion, CliError> {
+    [
+        SourceVersion::V11_2,
+        SourceVersion::V11_3,
+        SourceVersion::V11_4,
+        SourceVersion::Develop,
+    ]
+    .into_iter()
+    .find(|s| s.name() == v)
+    .ok_or_else(|| {
+        CliError::Usage(format!(
+            "unknown source version {v} (11.2, 11.3, 11.4 or develop)"
+        ))
+    })
 }
 
 /// Entries of `a` not matched in `b` and of `b` not matched in `a`, counting repeats.

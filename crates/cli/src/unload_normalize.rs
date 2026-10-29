@@ -1,7 +1,7 @@
 //! The rules that make two engine lines' `unloaddb` outputs comparable: where the target line prints the same
 //! content differently, the source entry is rewritten to the target's form before the set comparison.
 //!
-//! Input: the source and target release lines, the unload file suffix, that file's entries (`unload_files`).
+//! Input: the source version and target release line, the unload file suffix, that file's entries (`unload_files`).
 //! Output: the rewritten entries and, per rule, how many entries it changed on each side — the evidence that a rule
 //! touched only the difference it names. Two entries of one line get no rule at all.
 //! Source: the engine change cited on each rule (release/11.4 vs develop); request in workspace#502 (from the
@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use fastmig_ondisk::VersionLine;
+use fastmig_ondisk::{SourceVersion, VersionLine};
 
 /// Which side's entries a rule rewrites.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,9 +42,14 @@ pub struct Rule {
 }
 
 /// The rules of one version pair, applied in order.
-pub fn rules(source: VersionLine, target: VersionLine) -> &'static [Rule] {
+pub fn rules(source: SourceVersion, target: VersionLine) -> &'static [Rule] {
     match (source, target) {
-        (VersionLine::V11_4, VersionLine::Develop) => V11_4_TO_DEVELOP,
+        // 11.2 and 11.3 unloads matched 11.4's under these rules on a smoke DB (workspace#529); rules of their own
+        // join here when a baseline DB shows one
+        (
+            SourceVersion::V11_2 | SourceVersion::V11_3 | SourceVersion::V11_4,
+            VersionLine::Develop,
+        ) => V11_4_TO_DEVELOP,
         // one line prints alike; a downgrade is out of scope (ADR 0003)
         _ => &[],
     }
