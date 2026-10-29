@@ -31,7 +31,19 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: cubrid-fastmig plan <db> --dest <dir> [options]      (cubrid-fastmig plan --help)\n       cubrid-fastmig migrate <db> --dest <dir> [options]   (cubrid-fastmig migrate --help)\n       cubrid-fastmig verify <db> [options]                  (cubrid-fastmig verify --help)\n       cubrid-fastmig set-comparison <source-prefix> <target-prefix>   (cubrid-fastmig set-comparison --help)\n       cubrid-fastmig finalize <target-dir>                  (cubrid-fastmig finalize --help)";
 
+unsafe extern "C" {
+    fn mallopt(param: i32, value: i32) -> i32;
+}
+
+/// glibc `M_MMAP_THRESHOLD`.
+const M_MMAP_THRESHOLD: i32 = -3;
+
 fn main() -> ExitCode {
+    // blocks of 1 MiB or more (key runs, merge and copy buffers) are mapped and go back to the system when freed:
+    // glibc raises its threshold after the first such free, and later ones stayed in the per-thread arenas (the big
+    // develop DB, --mem 1G --temp-disk min: max RSS 220 MiB above the live heap, over --mem; workspace#526)
+    // SAFETY: called once before any other thread exists; an unknown parameter only returns 0
+    unsafe { mallopt(M_MMAP_THRESHOLD, 1 << 20) };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = match argv.first().map(String::as_str) {
         Some("migrate") => migrate::run(&argv[1..]),

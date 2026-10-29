@@ -73,15 +73,17 @@ impl Write for RunSink {
                 let new = a.alloc(n)?;
                 TEMP_DISK.add(n);
                 self.run.bytes += n;
+                for e in &new {
+                    match ext.last_mut() {
+                        Some(l) if l.offset + l.len == e.offset => l.len += e.len,
+                        _ => ext.push(*e),
+                    }
+                }
                 let mut at = 0;
                 for e in &new {
                     a.file()
                         .write_all_at(&buf[at..at + e.len as usize], e.offset)?;
                     at += e.len as usize;
-                    match ext.last_mut() {
-                        Some(l) if l.offset + l.len == e.offset => l.len += e.len,
-                        _ => ext.push(*e),
-                    }
                 }
                 Ok(buf.len())
             }
