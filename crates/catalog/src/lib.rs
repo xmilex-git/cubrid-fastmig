@@ -1,5 +1,6 @@
 //! Regenerates the system catalog (class objects, representation directory, _db_* tables) in the target format.
 
+pub mod attr_default;
 pub mod class_rewrite;
 pub mod class_rows;
 pub mod classify;
