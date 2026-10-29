@@ -96,6 +96,9 @@ fn final_targets(
 /// an index's owners by the BTID the class objects name): source BTIDs as they are, template BTIDs with the root
 /// page id negated below -1, a value no real BTID has, so the two BTID spaces cannot merge two indexes. The
 /// rebuild's `by_constraint` is what [`write_catalog`] takes; these BTIDs are never written.
+// shortcut: the tagged BTIDs only group owners inside `rebuild_indexes`; they live in this vector and never reach a
+// page (the class objects written by `write_catalog` take `by_constraint`, checked there for a negative root page).
+// Upgrade to an owner key of its own if the index rebuild gets one.
 pub fn index_build_classes(
     source: &SourceCatalog,
     template: &CatalogTemplate,

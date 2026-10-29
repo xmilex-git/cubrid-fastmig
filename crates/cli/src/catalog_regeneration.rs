@@ -166,6 +166,13 @@ pub fn finish(
         Some(index_meter),
     )
     .map_err(|e| io::Error::other(format!("index rebuild: {e}")))?;
+    // every BTID written comes from the rebuild, never a grouping tag of `index_build_classes`
+    if let Some(((c, n), b)) = rebuilt.by_constraint.iter().find(|(_, b)| b.pageid < 0) {
+        return Err(io::Error::other(format!(
+            "index rebuild gave {c:?} {} the BTID {b:?}",
+            String::from_utf8_lossy(n)
+        )));
+    }
     write_catalog(
         space,
         &mut p.layout,
@@ -193,6 +200,8 @@ pub fn finish(
 }
 
 /// The disk-representation form of a filled index's statistics (`has_function` is set by the catalog writer).
+// a partition root keeps its own (empty) tree's statistics, not the partitions' sum UPDATE STATISTICS writes; the
+// update-statistics.sql of workspace#482 decision 7 replaces them (workspace#503)
 fn bt_stats(btid: Btid, s: &fastmig_index::bt_stats::BtStats) -> BtStats {
     let mut pkeys = [0i64; PKEYS_NUM];
     for (d, v) in pkeys.iter_mut().zip(&s.pkeys) {
