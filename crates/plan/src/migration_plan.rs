@@ -229,7 +229,9 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         });
     }
 
-    // files: TDE refuses (G1); B-tree pages are rebuilt, so they count toward the target's space
+    // files: TDE refuses (G1; not supported, user decision 2026-10-30); B-tree pages are rebuilt, so they count
+    // toward the target's space. The file header flag covers every encrypted permanent page: the engine sets a
+    // page's TDE pflag only from it (file_manager.c file_alloc, file_apply_tde_algorithm), so no page scan is needed.
     let (_, boot) = BootDbParm::read(i.vols)?;
     let (items, _) = file_tracker::read(i.vols, boot.trk_vfid)?;
     let mut btree_pages = 0u64;
@@ -238,7 +240,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         let h = FileHeader::read(&i.vols.read_page(it.vfid.header_vpid())?);
         if h.is_tde_encrypted() {
             refusals.push(format!(
-                "file {}|{} is TDE-encrypted (not supported, workspace#481)",
+                "TDE-encrypted source is not supported: file {}|{} is encrypted (workspace#510)",
                 it.vfid.volid, it.vfid.fileid
             ));
         }
@@ -260,6 +262,13 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     for (n, c) in classes.iter().enumerate() {
         let name = String::from_utf8_lossy(&c.class.name).into_owned();
         let system = c.class.flags & CLASSFLAG_SYSTEM != 0;
+        if c.class.tde_algorithm != 0 {
+            // a class created ENCRYPT=AES|ARIA, even one whose files are already gone (R9 workspace#510)
+            refusals.push(format!(
+                "TDE-encrypted source is not supported: class {name} has tde_algorithm {} (workspace#510)",
+                c.class.tde_algorithm
+            ));
+        }
         let p = class_plans.as_ref().map(|ps| &ps[n]);
         let re_encoded = p.is_some_and(|p| p.re_encoded);
         let heap = if c.class.heap.is_null() || c.class.class_type == ClassType::Vclass {
