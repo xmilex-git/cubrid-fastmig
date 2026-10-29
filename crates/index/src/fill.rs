@@ -74,9 +74,9 @@ pub fn fill_btrees(
                     .iter()
                     .map(|by_class| by_class.values().sum())
                     .collect();
-            index_batches(&bytes, limit, lim.memory.limit() as u64).map_err(|min| {
+            index_batches(&bytes, limit).map_err(|min| {
                 BuildError::TempDisk(format!(
-                    "{limit} B is below {min} B, the spill bound of the largest index"
+                    "{limit} B is below {min} B, the pair bytes of the largest index"
                 ))
             })?
         }

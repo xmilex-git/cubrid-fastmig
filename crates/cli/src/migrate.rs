@@ -278,7 +278,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let mem = o.limits.memory_limit_bytes;
     // one batch when the limit holds every index at once
     let mut limits = Limits {
-        temp_disk: Some(b.temp_limit).filter(|&l| l < b.est.temp_max(mem)),
+        temp_disk: Some(b.temp_limit).filter(|&l| l < b.est.temp_max()),
         ..o.limits.clone()
     };
     let resources = b.est.json(mem);

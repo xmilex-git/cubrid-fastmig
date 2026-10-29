@@ -4,17 +4,16 @@
 //! Input: the source volumes, the version pair, the worker limit. Output: [`ResourceEstimate`] — per index the bytes
 //! its (key, OID) pairs take as spill records (counted by reading the source heaps with the build's own key
 //! extractor, `fastmig_index::pair_count`; an 11.4 source's rows re-encoded first, its system catalog rows
-//! generated as the run writes them), the counting scan's seconds, and from those, per memory limit: temp min/max, the index batches a temp
-//! limit needs and their extra time.
-//! Bounds (docs/resources.md): temp_min(mem) = the largest single index's `spill_bound`, temp_max(mem) = the
-//! bound of all indexes in one batch (what one scan of every index spills at most); a batch is one more heap scan,
-//! priced at the counting scan's time. mem_recommended spills nothing at full parallelism; mem_min is what the copy
-//! engine needs (one I/O buffer per worker) — the rest of the run degrades to spill under a smaller limit.
+//! generated as the run writes them), the counting scan's seconds, and from those: temp min/max, the index
+//! batches a temp limit needs and their extra time, and the memory rows.
+//! Bounds (docs/resources.md): a scan spills at most the pair bytes of its indexes, whatever `--mem` is: temp_min
+//! = the largest index's, temp_max = all of them in one batch; a batch is one more heap scan, priced at the
+//! counting scan's time. mem_recommended spills less, not nothing; mem_min is what the copy engine needs (one I/O
+//! buffer per worker) — the rest of the run degrades to spill under a smaller limit.
 //! Temp disk the verifier needs comes after the build's spill is gone: a run needs max(build, verify), not the sum.
 //! Source: workspace#526 (user requests: the sizes before the start, no disk full in the middle).
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::io;
 use std::time::Instant;
 
@@ -27,9 +26,10 @@ use fastmig_catalog::target_classes::{Origin, TargetClass as CatalogClass};
 use fastmig_catalog::template_store::builtin;
 use fastmig_copy::volume_copy::IO_BUF_BYTES;
 use fastmig_index::IndexDef;
+use fastmig_index::heap_scan::WORKER_SHARE;
 use fastmig_index::pair_count::{pair_bytes, record_pair_bytes};
 use fastmig_index::rebuild::{TargetClass, class_constraints, plain_index_defs};
-use fastmig_index::temp_disk::{WORKER_SHARE, index_batches, spill_bound};
+use fastmig_index::temp_disk::index_batches;
 use fastmig_ondisk::heap_rewrite::{ClassReEncoder, ReEncode};
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
@@ -196,23 +196,19 @@ fn count(
 }
 
 impl ResourceEstimate {
-    pub fn temp_min(&self, mem: u64) -> u64 {
-        self.per_def
-            .iter()
-            .map(|&t| spill_bound(t, mem))
-            .max()
-            .unwrap_or(0)
+    /// The largest index alone: the smallest limit that lets the run finish.
+    pub fn temp_min(&self) -> u64 {
+        self.per_def.iter().copied().max().unwrap_or(0)
     }
 
-    pub fn temp_max(&self, mem: u64) -> u64 {
-        spill_bound(self.per_def.iter().sum(), mem)
+    /// Every index in one scan: what a run spills at most.
+    pub fn temp_max(&self) -> u64 {
+        self.per_def.iter().sum()
     }
 
     /// Batches a temp limit cuts the indexes into; None below `temp_min`.
-    pub fn batches(&self, limit: u64, mem: u64) -> Option<usize> {
-        index_batches(&self.per_def, limit, mem)
-            .ok()
-            .map(|b| b.len())
+    pub fn batches(&self, limit: u64) -> Option<usize> {
+        index_batches(&self.per_def, limit).ok().map(|b| b.len())
     }
 
     /// Seconds `batches` add over one batch: one heap scan each.
@@ -225,36 +221,18 @@ impl ResourceEstimate {
         (self.workers * IO_BUF_BYTES) as u64
     }
 
-    /// The smallest memory limit with no spill at full parallelism (`spill_bound` 0 for every index in one batch),
-    /// at most the physical memory.
+    /// Room for every pair (as spill bytes) in finished runs plus the workers' shares, at most the physical memory:
+    /// fewer spills, not none (an in-memory run takes more than its spill bytes); the temp limit does not depend on
+    /// it.
     pub fn mem_recommended(&self) -> u64 {
-        let pairs: u64 = self.per_def.iter().sum();
-        (2 * (pairs + WORKER_SHARE as u64))
+        (2 * (self.temp_max() + WORKER_SHARE as u64))
             .max(self.mem_min())
             .min(self.physical_memory)
     }
 
-    /// The memory limits the table shows: min, the run's own, recommended (sorted, distinct).
-    pub fn memory_rows(&self, mem: u64) -> Vec<u64> {
-        let mut rows = vec![self.mem_min(), mem, self.mem_recommended()];
-        rows.sort_unstable();
-        rows.dedup();
-        rows
-    }
-
     pub fn json(&self, mem: u64) -> String {
-        let rows: Vec<String> = self
-            .memory_rows(mem)
-            .into_iter()
-            .map(|m| {
-                let (lo, hi) = (self.temp_min(m), self.temp_max(m));
-                let b = self.batches(lo, m).unwrap_or(0);
-                format!(
-                    "{{\"mem_bytes\": {m}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}}}",
-                    self.extra_seconds(b)
-                )
-            })
-            .collect();
+        let (lo, hi) = (self.temp_min(), self.temp_max());
+        let b = self.batches(lo).unwrap_or(0);
         let idx: Vec<String> = self
             .indexes
             .iter()
@@ -266,56 +244,31 @@ impl ResourceEstimate {
             })
             .collect();
         format!(
-            "{{\"pair_bytes\": {}, \"scan_seconds\": {:.3}, \"workers\": {}, \"mem_min_bytes\": {}, \"mem_recommended_bytes\": {}, \"rows\": [{}], \"indexes\": [{}]}}",
-            self.per_def.iter().sum::<u64>(),
+            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"indexes\": [{}]}}",
             self.scan_seconds,
             self.workers,
+            self.extra_seconds(b),
             self.mem_min(),
             self.mem_recommended(),
-            rows.join(", "),
             idx.join(", ")
         )
     }
 
-    /// The table a person reads: one row per memory limit, temp min/max, batches and extra time at temp min.
+    /// The table a person reads: temp min/max with the batches and extra time at min, then the memory limits.
     pub fn table(&self, mem: u64) -> String {
         let mib = |b: u64| b.div_ceil(1 << 20);
-        let mut s = format!(
-            "resources (index rebuild, --workers {}; counted in {:.1} s, one heap scan):\n  {:>12}  {:>14}  {:>14}  {:>16}  {:>18}\n",
+        let (lo, hi) = (self.temp_min(), self.temp_max());
+        let b = self.batches(lo).unwrap_or(0);
+        format!(
+            "resources (index rebuild, --workers {}; counted in {:.1} s, one heap scan):\n  temp disk: min {} MiB ({b} index batches, about {:.1} s more), max {} MiB (one batch)\n  --verify needs >= temp max: the verifier spills every index in one scan (docs/resources.md)\n  memory: min {} MiB, this run {} MiB, recommended {} MiB (fewer spills; temp does not depend on it)\n",
             self.workers,
             self.scan_seconds,
-            "--mem MiB",
-            "temp min MiB",
-            "temp max MiB",
-            "batches at min",
-            "extra s at min"
-        );
-        for m in self.memory_rows(mem) {
-            let lo = self.temp_min(m);
-            let b = self.batches(lo, m).unwrap_or(0);
-            let tag = if m == mem {
-                " (this run)"
-            } else if m == self.mem_recommended() {
-                " (recommended)"
-            } else if m == self.mem_min() {
-                " (min)"
-            } else {
-                ""
-            };
-            let _ = writeln!(
-                s,
-                "  {:>12}  {:>14}  {:>14}  {:>16}  {:>18.1}{tag}",
-                mib(m),
-                mib(lo),
-                mib(self.temp_max(m)),
-                b,
-                self.extra_seconds(b)
-            );
-        }
-        let _ = writeln!(
-            s,
-            "  --verify needs >= temp max: the verifier spills every index in one scan (docs/resources.md)"
-        );
-        s
+            mib(lo),
+            self.extra_seconds(b),
+            mib(hi),
+            mib(self.mem_min()),
+            mib(mem),
+            mib(self.mem_recommended())
+        )
     }
 }

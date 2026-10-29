@@ -1,7 +1,7 @@
 //! The temp disk limit of one migrate, decided once before anything is written (workspace#526).
 //!
-//! Input: `--temp-disk min|max|<size>` or nothing, the resource estimate, the memory limit, the target space the
-//! plan needs, and the free space of the target and spill filesystems.
+//! Input: `--temp-disk min|max|<size>` or nothing, the resource estimate, the memory limit (for the table), the
+//! target space the plan needs, and the free space of the target and spill filesystems.
 //! Output: the limit in bytes.
 //! Rules (user, 2026-10-30): no option on a terminal → show min and max and ask; no option otherwise → max when it
 //! fits the free space, else refuse naming the choices; with `--verify` the minimum is max (the verifier spills
@@ -41,9 +41,9 @@ fn room_for(
     })
 }
 
-fn choices(e: &ResourceEstimate, mem: u64) -> String {
-    let (lo, hi) = (e.temp_min(mem), e.temp_max(mem));
-    let b = e.batches(lo, mem).unwrap_or(0);
+fn choices(e: &ResourceEstimate) -> String {
+    let (lo, hi) = (e.temp_min(), e.temp_max());
+    let b = e.batches(lo).unwrap_or(0);
     format!(
         "--temp-disk min ({} MiB, {b} index batches, about {:.1} s more) or --temp-disk max ({} MiB, one batch), or a size in between",
         mib(lo),
@@ -64,8 +64,8 @@ pub fn choose(
     target: &Path,
 ) -> io::Result<u64> {
     // the verifier scans every index at once, after the build's spill is gone (docs/resources.md)
-    let hi = e.temp_max(mem);
-    let lo = if verify { hi } else { e.temp_min(mem) };
+    let hi = e.temp_max();
+    let lo = if verify { hi } else { e.temp_min() };
     let limit = match choice {
         Some(TempDiskChoice::Min) => lo,
         Some(TempDiskChoice::Max) => hi,
@@ -77,7 +77,7 @@ pub fn choose(
                     "max ({} MiB) and the target's {} MiB do not fit the free space; choose {}",
                     mib(hi),
                     mib(needed),
-                    choices(e, mem)
+                    choices(e)
                 )));
             }
             hi
@@ -113,14 +113,14 @@ fn ask(e: &ResourceEstimate, mem: u64) -> io::Result<u64> {
         err,
         "{}Choose the temp disk limit of this run: {}.\ntemp disk [max]: ",
         e.table(mem),
-        choices(e, mem)
+        choices(e)
     )?;
     err.flush()?;
     let mut line = String::new();
     io::stdin().lock().read_line(&mut line)?;
     match line.trim() {
-        "" | "max" => Ok(e.temp_max(mem)),
-        "min" => Ok(e.temp_min(mem)),
+        "" | "max" => Ok(e.temp_max()),
+        "min" => Ok(e.temp_min()),
         v => crate::limits::parse_size(v).ok_or_else(|| refuse(format!("bad answer {v:?}"))),
     }
 }

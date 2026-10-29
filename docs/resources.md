@@ -29,24 +29,23 @@ system catalog index from the rows the run generates, encoded as the run encodes
 the same key extractor (`pair_count::record_pair_bytes`). T1 11.4 clean and dirty: all 75 indexes (44 user, 31
 system) equal to the count on the migrated target, byte for byte.
 
-The scan keeps finished runs in memory while the limit has room: each worker holds a share of at most
-`share = min(256 MiB, mem/2)` and finished runs get the other half, so at least `mem/2 − share` bytes stay in
-memory before anything spills. One scan over a set of indexes therefore spills at most
+A pair is spilled at most once (a run is written once; the build after the scan spills nothing more) and an
+arena extent takes exactly the run's bytes, so one scan over a set of indexes spills at most `T = Σ T_i` over the
+set, whatever the memory limit. Memory gives no credit: each worker's share (`min(256 MiB, mem / (2 ×
+workers))`) is split among the indexes of its class, and a writer spills when its part is full, in in-memory
+bytes (keys, radix words, entries, Vec growth) that exceed its spill bytes, however much room the limit has
+left. The first formula, `T − (mem/2 − share)`, was not a bound: T1 develop dirty at `--mem` 530 MiB spilled
+832 KiB where it gave 0, and the run stopped on the arena.
 
-    spill_bound(T, mem) = max(0, T − (mem/2 − share)),  T = Σ T_i over the set
-
-This is an upper bound: the table never shows less than a run can write.
-
-- **temp min** = max over indexes of `spill_bound(T_i, mem)`: the largest index alone. Any limit at or above it
-  lets the run finish.
-- **temp max** = `spill_bound(Σ T_i, mem)`: every index in one scan, what a run without a limit writes at most.
-- **index batches**: a limit between the two cuts the indexes largest first, first fit, into batches whose bound
-  fits it (`temp_disk::index_batches`). Each batch is its own heap scan, so a batch costs one more scan: the
+- **temp min** = the largest `T_i`: the largest index alone. Any limit at or above it lets the run finish.
+- **temp max** = `Σ T_i`: every index in one scan, what a run spills at most.
+- **index batches**: a limit between the two cuts the indexes largest first, first fit, into batches whose pair
+  bytes fit it (`temp_disk::index_batches`). Each batch is its own heap scan, so a batch costs one more scan: the
   table's *extra s* is the counting scan's time × (batches − 1).
 - **mem min** = one 256 KiB copy buffer per worker (the copy engine refuses less); below the other needs the
   build spills instead of failing.
-- **mem recommended** = `2 × (Σ T_i + 256 MiB)`, at most the physical memory: the limit at which nothing spills at
-  full parallelism.
+- **mem recommended** = `2 × (Σ T_i + 256 MiB)`, at most the physical memory: room for every pair, counted in
+  spill bytes, in finished runs. It spills less, not nothing; the temp figures do not depend on `--mem`.
 
 ## Choosing the limit (`--temp-disk min|max|<size>`)
 
