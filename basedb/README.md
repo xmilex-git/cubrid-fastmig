@@ -19,7 +19,7 @@ the three changed files were restored from pristine). Read a copy with `cubrid-f
 ## Run
 
 ```sh
-bash basedb/build.sh <label: 11.4|develop> <install> <port> <variant: clean|dirty>
+bash basedb/build.sh <label: 10.2|11.0|11.2|11.3|11.4|develop> <install> <port> <variant: clean|dirty>
 # or
 BASEDB_INSTALL=<install> BASEDB_PORT=<port> just basedb <label> <variant>
 ```
@@ -27,6 +27,12 @@ BASEDB_INSTALL=<install> BASEDB_PORT=<port> just basedb <label> <variant>
 - `<install>`: the CUBRID install to build with. T1 used `/home/cubrid/release/CUBRID-fastmig-11.4.6`
   (11.4.6.1963) and `/home/cubrid/release/CUBRID-fastmig-dev` (develop 682b080b2).
   The script overwrites `<install>/conf/cubrid.conf` on every run.
+- Older releases (T4, workspace#512) build with reflink copies of the release installs, so no shared
+  conf is rewritten: `/home/cubrid/release/CUBRID-fastmig-{10.2.18,11.0.16,11.2.9,11.3.6}`
+  (10.2.18.9024, 11.0.16.0419, 11.2.9.0866, 11.3.6.1321). 10.2, 11.0 and 11.2 need `libncurses.so.5`,
+  which the script takes from the workspace's `.git_ignored_dir/legacy-libs/ncurses5/lib64`. For these labels
+  the script stops the `cub_master` it started (matched by `CUBRID=<install>`), so the next label does not
+  register with a master of another version.
 - `<port>`: a `cubrid_port_id` claimed beforehand; the server is started and stopped through
   the workspace's `cubrid-server-control` wrapper.
 - Host paths come from the environment; the defaults are the dev host's:
@@ -40,14 +46,14 @@ BASEDB_INSTALL=<install> BASEDB_PORT=<port> just basedb <label> <variant>
   | `BASEDB_CAP_MB` | `5120` | the size cap below; raise it with k |
 
 - The script refuses to run when any output directory already exists; remove it by literal path first.
-- Size cap: `du -sm $BASEDB_ROOT` must stay ≤ 5120 MB (du counts the reflinked pristine copy
+- Size cap: `du -sm $BASEDB_ROOT/<label>` must stay ≤ 5120 MB (du counts the reflinked pristine copy
   twice). One variant takes about 513 MB registered, 465–473 MB pristine, 17–23 MB unload.
 - A multiplied DB (k > 1) is not a T1 DB: build it under its own `BASEDB_ROOT`, never into the T1 root.
   It is the large input of the speed-comparison baseline (workspace#484).
 
 ## Output
 
-Under `$BASEDB_ROOT/<label>/` (`CUBRID_DATABASES` points here), DB name `fm114_<variant>` or `fmdev_<variant>`:
+Under `$BASEDB_ROOT/<label>/` (`CUBRID_DATABASES` points here), DB name `fm<tag>_<variant>`, tag `102`, `110`, `112`, `113`, `114` or `dev`:
 
 | Path | Content |
 |---|---|
@@ -61,7 +67,9 @@ After the diagnostic SA runs, the registered DB is rsynced back to the pristine 
 ## Variants
 
 - **clean**: load, full SA vacuum, clean shutdown. No vacuum work is left.
-- **dirty**: clean, then `50_dirty.sql` on a server started with `vacuum_disable=yes`, then a
+- **dirty**: clean, then `50_dirty.sql` on a server started with `vacuum_disable=yes` (10.2 and 11.0:
+  `vacuum_master_interval_in_msecs=20000`, because they die with SIGFPE in `vacuum_get_log_blockid` on the
+  first write when vacuum is disabled), then a
   clean shutdown. Vacuum work is left; any SA boot runs it, so work from the pristine copy.
 
 ## Scripts
@@ -77,7 +85,7 @@ Run in this order by `build.sh` (user, mode in parentheses):
 | `30_objects.sql` (app_owner) | serial, views (one WITH CHECK OPTION), triggers, synonym, PL/CSQL function and procedure, GRANTs | T1 |
 | `31_dba_objects.sql` (dba) | dba tables (one `utf8_ko_cs`), synonym, Java SP `fm_hello` | T1; G6 (workspace#488) for `java/` |
 | `40_post.sql` (app_owner) | record relocations, AUTO_INCREMENT/trigger/serial/SP use | T1 |
-| `45_orphan_lob.sql` (app_owner, 11.4 only) | 10 orphan LOB files: 11.4 DROP TABLE leaves them behind | G6 (workspace#488) |
+| `45_orphan_lob.sql` (app_owner, all but develop) | 10 orphan LOB files: DROP TABLE before develop leaves them behind | G6 (workspace#488) |
 | `46_partition_fx.sql` (app_owner) | partition expressions with operators renumbered after 11.4, CHAR/NUMERIC constants, a HASH table with a NUMERIC column | R7 (workspace#487), T3 (workspace#489) |
 | `50_dirty.sql` (app_owner, dirty only) | deletes and updates left for vacuum | T1 |
 | `counts.sql` (dba, SA) | one row count per object and catalog counts | T1 |
@@ -85,3 +93,16 @@ Run in this order by `build.sh` (user, mode in parentheses):
 
 Fixtures the engine refuses are absent on purpose: 11.4.6 rejects a UNIQUE function index and
 a NUMERIC partition key, so neither exists in an 11.4 source.
+
+### Per-label overrides (T4, workspace#512)
+
+`<label>/<file>.sql` replaces `<file>.sql` for that label. Each override is the common file minus what
+that release rejects, and its header says what it drops:
+
+| Label | Files | Drops or rewrites |
+|---|---|---|
+| 10.2 | `10_schema`, `30_objects`, `31_dba_objects`, `40_post`, `counts` | as 11.0, plus filter index `i_f5` rewritten on `(id, label)`: 10.2 ignores the filter when it compares keys on a partitioned table and rejects the duplicate key |
+| 11.0 | `30_objects`, `31_dba_objects`, `40_post`, `counts` | as 11.2/11.3, plus no synonyms (11.2+) and no `db_synonym` count; the Java SP needs `cubrid javasp start`, which the script runs for 11.0 |
+| 11.2, 11.3 | `30_objects`, `31_dba_objects`, `40_post` | no PL/CSQL function/procedure and their calls (11.4+), no `GRANT EXECUTE ON PROCEDURE` (11.4+), Java SP called unqualified (`fm_hello`, no owner prefix before 11.4) |
+
+Catalog counts differ from 11.4 accordingly (auths 33/34/36/36 for 10.2/11.0/11.2/11.3 vs 38); data counts equal T1.
