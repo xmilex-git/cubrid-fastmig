@@ -91,7 +91,7 @@ _Avoid_: 미지원 인덱스, 누락 인덱스
 ## 검증과 원본 삭제
 
 **검증기 (verifier)**:
-출발 DB와 도착 DB를 엔진 없이 읽어 힙·인덱스·카탈로그·섹터 소유·볼륨 밖 자산의 정합을 검사하는 이 도구의 부품. 엔진 checkdb를 대신한다.
+출발 DB와 도착 DB를 엔진 없이 읽어 힙·인덱스·카탈로그·섹터 소유·볼륨 밖 자산의 정합을 검사하는 이 도구의 부품. 엔진 checkdb를 대신한다. `verify` 명령으로 따로 돌리거나 `migrate --verify`로 migrate 끝에서 돌린다. migrate는 기본으로 돌리지 않고, finalize는 통과한 검증 기록을 요구한다([ADR 0015](docs/adr/0015-migrate-verifies-only-with-verify-option.md)).
 _Avoid_: checkdb, 체커
 
 **집합 비교 (set comparison)**:
@@ -110,7 +110,7 @@ _Avoid_: 원본 오류, 무시된 결함
 출발 DB에 있었으나 재빌드·재생성으로 도착 DB에서 사라진 결함. 보고만 한다.
 
 **미완료 표지 (incomplete marker)**:
-도착 디렉터리에 놓여 그 마이그레이션이 아직 검증을 통과하지 못했음을 나타내는 표지. 표지가 있는 도착은 다시 실행할 때 처음부터 새로 만든다.
+도착 디렉터리에 놓여 그 마이그레이션이 아직 끝나지 않았음(`--verify`면 검증을 통과하기 전)을 나타내는 표지. 표지가 있는 도착은 다시 실행할 때 처음부터 새로 만든다.
 _Avoid_: 잠금 파일, 체크포인트
 
 **출발 지문 (source fingerprint)**:
@@ -118,7 +118,7 @@ migrate 때 기록해 두는 출발 DB의 식별 값(로그 헤더의 위치와 
 _Avoid_: 체크섬, 해시
 
 **finalize**:
-검증을 통과한 뒤 출발 DB의 파일을 지우는 단계. 출발을 지우는 것은 이 단계뿐이다.
+검증을 통과한 뒤 출발 DB의 파일을 지우는 단계. 출발을 지우는 것은 이 단계뿐이고, 통과한 검증 기록이 없으면 거부한다([ADR 0015](docs/adr/0015-migrate-verifies-only-with-verify-option.md)).
 _Avoid_: 정리, cleanup, 커밋
 
 **포팅 TC (ported testcase)**:
@@ -163,7 +163,7 @@ _Avoid_: 스왑, 임시 볼륨(엔진 용어와 섞인다)
 ## 진행 표시
 
 **단계 (phase)**:
-한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier, register. `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
+한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier(`--verify`일 때만 일하고, 아니면 0초), register. `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
 _Avoid_: 스텝(짧은 고정 작업만 가리킬 때 외에는), 스테이지
 
 **진행 표시 (progress display)**:

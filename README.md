@@ -26,9 +26,10 @@ The first target is 11.4 → develop.
 
 ## The source database is deleted only after verification
 
-`migrate` verifies the target at its end; only a target with no migration defect is registered and loses
-its `FASTMIG_INCOMPLETE` marker. `finalize <target-dir>` is the only command that deletes the source, and it
-refuses unless that verification passed and the source is unchanged since the migration (ADR 0008).
+`migrate` registers the target when every write succeeded; with `--verify` it first runs the verifier and only a
+target with no migration defect is registered and loses its `FASTMIG_INCOMPLETE` marker (ADR 0015).
+`finalize <target-dir>` is the only command that deletes the source, and it refuses unless a verification passed
+(`migrate --verify` or a later `verify` run) and the source is unchanged since the migration (ADR 0008).
 The verifier runs on both source and target, so defects already present in the source are
 not reported as migration defects.
 

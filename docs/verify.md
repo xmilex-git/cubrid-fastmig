@@ -13,7 +13,9 @@ cubrid-fastmig verify /path/to/first-volume --role source      # one database, s
 
 Exit code: 0 no migration defect, 1 migration defects, 2 usage or tool error. Report: `--report` (default
 `<target volume dir>/fastmig/verify.jsonl`), one `{"kind":"defect",...}` line per defect, then one
-`{"kind":"summary",...}` line (also printed). A defect's identity is (check, class, index, object, code); source and
+`{"kind":"summary",...}` line (also printed). `migrate` runs the same check at its end only with `--verify`; `finalize` reads this report
+(ADR 0015), so a target migrated without `--verify` needs `verify <target> --source <source> --measured-classes
+<dest>/fastmig/measured-classes` before finalize. A defect's identity is (check, class, index, object, code); source and
 target defects with the same identity are the same defect, because placement preservation keeps OIDs.
 
 ## Checks and defect codes

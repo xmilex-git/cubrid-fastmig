@@ -1,16 +1,18 @@
-//! `cubrid-fastmig migrate`: moves a cleanly shut down database to a new directory, verifies it, and registers it.
+//! `cubrid-fastmig migrate`: moves a cleanly shut down database to a new directory and registers it; with `--verify`
+//! it verifies the target first.
 //!
 //! Input: the source DB name (found in the source `databases.txt`), the target directory and options.
 //! Output: the target volumes, a new `_lgat`, `_vinf`, `_keys`, Java SP directories, referenced LOB files, and in
-//! `<dest>/fastmig/`: `plan.json`, `report.json`, `verify.jsonl`, the SQL files for the user
+//! `<dest>/fastmig/`: `plan.json`, `report.json`, `verify.jsonl` (with `--verify`), the SQL files for the user
 //! (`deferred-indexes.sql`, `recompile-plcsql.sql`, `update-statistics.sql`), `lob-manifest`, `lob-outside-base`,
 //! `measured-classes` and `source-fingerprint` (read by finalize); then the target's `databases.txt` line. Progress
 //! (the phases in `PHASES`) goes to stderr. The source is only read; its active log is read-locked for the whole run.
-//! Order: the plan refuses before anything is written; the new log comes last of the writes; verify runs on the
-//! durable target; only a target with 0 migration defects is registered and loses its incomplete marker.
+//! Order: the plan refuses before anything is written; the new log comes last of the writes; with `--verify` the
+//! verifier runs on the durable target and only a target with 0 migration defects is registered and loses its
+//! incomplete marker; without it every finished run is registered (ADR 0015) and `verify.jsonl` is not written.
 //! Between the copy and the new log: page treatment, index rebuild and catalog regeneration (workspace#503, #504);
 //! a target out of space grows like the engine, and added volumes join `_vinf`, the marker and the fsync pass (#508).
-//! Source: decisions G1 workspace#481 (command surface, plan, registration after verify, marker), G4 workspace#485
+//! Source: decisions G1 workspace#481 (command surface, plan, marker; verify opt-in per ADR 0015), G4 workspace#485
 //! (new log), G6 workspace#488 (LOB and Java assets), workspace#495 (verify), workspace#505 (this wiring).
 
 use std::collections::BTreeSet;
@@ -65,6 +67,9 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
   --spill-dir <dir>              where stages over the memory limit spill (default: <dest>/fastmig/spill)
   --db-volume-size <size>        the target server's db_volume_size: size cap of a volume the run adds when the
                                  target runs out of space, e.g. 512M (default: 512M, the engine default)
+  --verify                       run the verifier on target and source after the writes; register and remove
+                                 FASTMIG_INCOMPLETE only with 0 migration defects (default: not run; finalize
+                                 refuses a target without a passing verify)
   --no-clone                     byte-copy even where the filesystem could clone (measures the byte copy where clone would be chosen)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
@@ -100,7 +105,7 @@ const PAGE_TREATMENT: usize = 4;
 const INDEX_BUILD: usize = 5;
 const DURABLE_SYNC: usize = 9;
 
-const SWITCHES: &[&str] = &["--help"];
+const SWITCHES: &[&str] = &["--help", "--verify"];
 
 struct Options {
     plan: PlanOptions,
@@ -108,6 +113,8 @@ struct Options {
     worker_limit: usize,
     lob_dir: PathBuf,
     limits: Limits,
+    /// `--verify`: run the verifier after the writes and register only a target with 0 migration defects (ADR 0015).
+    verify: bool,
     /// The target server's `db_volume_size` in bytes: size cap of an added volume (ADR 0013).
     db_volume_size: u64,
 }
@@ -145,6 +152,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
                 .ok_or_else(|| CliError::Usage(format!("bad --db-volume-size {v}")))?,
             None => 512 << 20,
         },
+        verify: p.switch("--verify"),
         plan,
     };
     // the copy engine streams every volume through one fixed buffer per worker
@@ -383,7 +391,8 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     durable::sync_created(&marker, o.worker_limit, rep.progress.meter(DURABLE_SYNC))?;
     rep.lap("fsync");
 
-    // verify: target rules on the target, source rules on the source; the source log is not reopened (its lock)
+    // verify only on request (user decision 2026-10-30, ADR 0015): target rules on the target, source rules on the
+    // source; the source log is not reopened (its lock)
     let measured_text: String = measured
         .iter()
         .map(|c| format!("{}|{}|{}\n", c.volid, c.pageid, c.slotid))
@@ -393,33 +402,39 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         &fastmig_dir.join("measured-classes"),
         &measured_text,
     )?;
-    marker.create_dir_all(&o.limits.spill_dir)?;
     let verify_report = fastmig_dir.join("verify.jsonl");
-    marker.record(&verify_report)?;
-    let (code, summary) = run_verifier(
-        &DbArg {
-            first_volume: targets[0].clone(),
-            locate: Locate::Recorded,
-            log: lgat.clone(),
-            log_header: None,
-            lob_base: Some(o.lob_dir.clone()),
-        },
-        Some(&DbArg {
-            first_volume: src.entry.first_volume(),
-            locate: po.locate,
-            log: src.lgat_path.clone(),
-            log_header: Some(src.log.clone()),
-            lob_base: src_lob_base.clone(),
-        }),
-        Role::Target,
-        &measured,
-        o.worker_limit,
-        &o.limits,
-        &verify_report,
-    )?;
+    let (passed, summary) = if o.verify {
+        marker.create_dir_all(&o.limits.spill_dir)?;
+        marker.record(&verify_report)?;
+        let (code, summary) = run_verifier(
+            &DbArg {
+                first_volume: targets[0].clone(),
+                locate: Locate::Recorded,
+                log: lgat.clone(),
+                log_header: None,
+                lob_base: Some(o.lob_dir.clone()),
+            },
+            Some(&DbArg {
+                first_volume: src.entry.first_volume(),
+                locate: po.locate,
+                log: src.lgat_path.clone(),
+                log_header: Some(src.log.clone()),
+                lob_base: src_lob_base.clone(),
+            }),
+            Role::Target,
+            &measured,
+            o.worker_limit,
+            &o.limits,
+            &verify_report,
+        )?;
+        (code == 0, summary)
+    } else {
+        rep.progress
+            .warn("verify: not run (pass --verify); finalize needs a passing verify".into());
+        (true, "null".into())
+    };
     rep.lap("verify");
 
-    let passed = code == 0;
     if passed {
         register_db::register(
             &po.target_dbtxt,

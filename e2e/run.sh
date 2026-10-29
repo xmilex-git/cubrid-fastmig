@@ -83,8 +83,8 @@ step plan 0 "$BIN" plan "$DB" "${common[@]}" --json
 cp "$OUT/log/plan.log" "$OUT/plan.json"
 [ "$(awk '$1 == "plan" { print $3 }' "$OUT/steps.tsv")" = 0 ] || { echo "plan refused: see log/plan.log" >&2; exit 1; }
 
-# 3. migrate (verifies at its end and registers only a target with 0 migration defects)
-step migrate 0 "${T[@]}" "$BIN" migrate "$DB" "${common[@]}" --workers "$W" --progress plain
+# 3. migrate --verify (verify is opt-in, ADR 0015: verifies at its end and registers only a target with 0 migration defects)
+step migrate 0 "${T[@]}" "$BIN" migrate "$DB" "${common[@]}" --workers "$W" --verify --progress plain
 [ -f "$TGT/fastmig/report.json" ] && cp "$TGT/fastmig/report.json" "$OUT/report.json"
 
 # 4. verify the target against the source, and the source alone

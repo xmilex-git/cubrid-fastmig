@@ -4,7 +4,8 @@
 //! Input: the target directory of a finished migrate (`<dest>/fastmig/` holds the source fingerprint, the LOB
 //! manifests and the verify report). Output: the source's files removed, its databases.txt line removed, and
 //! `<dest>/fastmig/finalize.json` listing what was deleted and the LOB files kept.
-//! Guards: no incomplete marker in the target; the verify report's summary has 0 migration defects; the source
+//! Guards: no incomplete marker in the target; a verify report (`migrate --verify` or a later `verify` run, ADR 0015)
+//! whose summary has 0 migration defects; the source
 //! fingerprint (log header append_lsa and db_creation read under the read lock, every volume's size, every
 //! referenced LOB file's size) equals the one migrate recorded.
 //! Deleted: the recorded volumes; `<db>_lgat`, `<db>_lgar*`, `<db>_lginf`, `<db>_vinf`, `<db>_dwb` of the log
@@ -61,9 +62,12 @@ fn current(f: &SourceFingerprint) -> io::Result<SourceFingerprint> {
     })
 }
 
-/// The last line of the verify report says 0 migration defects (`report::summary_line`).
+/// The last line of the verify report says 0 migration defects (`report::summary_line`); no report is no pass.
 fn verify_passed(report: &Path) -> io::Result<bool> {
-    let text = fs::read_to_string(report)?;
+    let text = match fs::read_to_string(report) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        r => r?,
+    };
     Ok(text
         .lines()
         .last()
@@ -172,14 +176,16 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     // guards, all before the first deletion
     if dir.join(MARKER_NAME).exists() {
         return Err(refuse(format!(
-            "{} holds {MARKER_NAME}: the migration did not verify",
+            "{} holds {MARKER_NAME}: the migration did not finish",
             dir.display()
         )));
     }
     if !verify_passed(&fm.join("verify.jsonl"))? {
-        return Err(refuse(
-            "the verify report does not say 0 migration defects".into(),
-        ));
+        return Err(refuse(format!(
+            "{} does not say 0 migration defects: run verify first (`migrate --verify`, or `cubrid-fastmig verify <target> --source <source> --measured-classes {}`; ADR 0015)",
+            fm.join("verify.jsonl").display(),
+            fm.join("measured-classes").display()
+        )));
     }
     let recorded = SourceFingerprint::read(&fm.join(source_fingerprint::FILE_NAME))?;
     let changes = recorded.changes(&current(&recorded)?);
