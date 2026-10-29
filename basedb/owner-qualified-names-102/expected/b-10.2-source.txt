@@ -1,0 +1,36 @@
+  '#class'              class_name            owner.name             class_type
+  '#class'              't1'                  'U1'                            0
+  '#class'              't1_auto_increment_with_a_rather_long_table_name_for_the_ai_serial_x'  'U1'                            0
+  '#class'              't2'                  'U2'                            0
+  '#class'              't2_log'              'U2'                            0
+  '#class'              'td'                  'DBA'                           0
+  '#class'              'tdp'                 'DBA'                           0
+  '#class'              'tdp__p__p0'          'DBA'                           0
+  '#class'              'tdp__p__p1'          'DBA'                           0
+  '#class'              'v1_join'             'U1'                            1
+  '#class'              'v1_part'             'U1'                            1
+  '#class'              'v1_sp'               'U1'                            1
+  '#class'              'v1_sub'              'U1'                            1
+  '#class'              'v1_t2'               'U1'                            1
+  '#class'              'v1_view'             'U1'                            1
+  '#query_spec'         class_of.class_name   spec
+  '#query_spec'         'v1_join'             'select [t1].[a], [t2].[b], [td].[v] from [t1] [t1], [t2] [t2], [td] [td] where [t1].[a]=[t2].[a] and [td].[k]=[t1].[a]'
+  '#query_spec'         'v1_part'             'select [p].[id], [p].[d], [t1].[b] from [tdp] [p], [t1] [t1] where [p].[id]=[t1].[a]'
+  '#query_spec'         'v1_sp'               'select [t2].[a], [sp2]([t2].[b]) from [t2] [t2]'
+  '#query_spec'         'v1_sub'              'select [t1].[a] from [t1] [t1] where [t1].[a] in (select distinct [t2].[a] from [t2] [t2])'
+  '#query_spec'         'v1_t2'               'select [t2].[a], [t2].[b] from [t2] [t2] where [t2].[a]>0'
+  '#query_spec'         'v1_view'             'select [v1_t2].[a], [v1_t2].[b] from [v1_t2] [v1_t2]'
+  '#trigger'            name                  owner.name            condition             action_definition
+  '#trigger'            'trg1_ai'             'U1'                  NULL                  'insert into [t2_log] ([msg]) values ('t1 '|| cast(serial_next_value([s2], 1) as varchar(20)))'
+  '#trigger'            'trg1_upd'            'U1'                  '[obj].[a] in (select [a] from [t2]) and [obj].[a]<=(select count(*) from [td])'  'update [t2] set [b]=sp2([t2].[b]) where [t2].[a]=[obj].[a]'
+  '#trig_target'        trigger_name          target_class_name
+  '#trig_target'        'trg1_ai'             't1'
+  '#trig_target'        'trg1_upd'            't1'
+  '#partition'          class_of.class_name   pname                 pexpr
+  '#partition'          'tdp'                 NULL                  'SELECT  year([d]) FROM [tdp]'
+  '#serial'             name                  owner.name            class_name            att_name
+  '#serial'             's2'                  'U2'                  NULL                  NULL
+  '#serial'             't1_auto_increment_with_a_rather_long_table_name_for_the_ai_serial_x_ai_id_column_with_a_long_name_for_the_auto_increment_serial'  'U1'                  't1_auto_increment_with_a_rather_long_table_name_for_the_ai_serial_x'  'id_column_with_a_long_name_for_the_auto_increment_serial'
+  '#serial'             't2_log_ai_id'        'U2'                  't2_log'              'id'
+  '#sp'                 sp_name               owner.name            target
+  '#sp'                 'sp2'                 'U2'                  'FmHello.hello(java.lang.String) return java.lang.String'

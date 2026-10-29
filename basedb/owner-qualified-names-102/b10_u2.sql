@@ -1,0 +1,8 @@
+-- fixture B, run as u2: objects u1 refers to
+CREATE TABLE t2 (a INT PRIMARY KEY, b VARCHAR(40));
+INSERT INTO t2 VALUES (1, 'one'), (2, 'two'), (3, 'three');
+CREATE TABLE t2_log (id INT AUTO_INCREMENT PRIMARY KEY, msg VARCHAR(100));
+CREATE SERIAL s2 START WITH 100;
+CREATE FUNCTION sp2 (s VARCHAR) RETURN VARCHAR AS LANGUAGE JAVA NAME 'FmHello.hello(java.lang.String) return java.lang.String';
+GRANT SELECT, INSERT, UPDATE ON t2 TO u1;
+GRANT SELECT, INSERT ON t2_log TO u1;

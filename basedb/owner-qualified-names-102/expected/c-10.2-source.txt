@@ -1,0 +1,13 @@
+  '#class'              class_name            owner.name             class_type
+  '#class'              't1'                  'U1'                            0
+  '#class'              't1_log'              'U1'                            0
+  '#trigger'            name                  owner.name            condition             action_definition
+  '#trigger'            'trg_c'               'U1'                  NULL                  'insert into [t1_log] values (serial_next_value([s1], 1), serial_next_value([s2], 1), serial_next_value([sd], 1))'
+  '#trigger'            'trg_c_own'           'U1'                  '[new].[a]<serial_current_value([s1])+1000'  NULL
+  '#trig_target'        trigger_name          target_class_name
+  '#trig_target'        'trg_c'               't1'
+  '#trig_target'        'trg_c_own'           't1'
+  '#serial'             name                  owner.name            class_name            att_name
+  '#serial'             's1'                  'U1'                  NULL                  NULL
+  '#serial'             's2'                  'U2'                  NULL                  NULL
+  '#serial'             'sd'                  'DBA'                 NULL                  NULL

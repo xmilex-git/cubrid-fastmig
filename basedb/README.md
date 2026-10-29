@@ -106,3 +106,11 @@ that release rejects, and its header says what it drops:
 | 11.2, 11.3 | `30_objects`, `31_dba_objects`, `40_post` | no PL/CSQL function/procedure and their calls (11.4+), no `GRANT EXECUTE ON PROCEDURE` (11.4+), Java SP called unqualified (`fm_hello`, no owner prefix before 11.4) |
 
 Catalog counts differ from 11.4 accordingly (auths 33/34/36/36 for 10.2/11.0/11.2/11.3 vs 38); data counts equal T1.
+
+### Engine path for 10.2 references across owners (T6, workspace#516)
+
+[`owner-qualified-names-102/`](owner-qualified-names-102/README.md) holds small 10.2 fixtures with views and triggers
+that name other owners' tables, serials and SPs, run through 10.2 `unloaddb` → develop `loaddb --no-user-specified-name`.
+It is not a baseline DB. Its `expected/` dumps are the engine's result: the stored texts, and how the views and
+triggers behave. G8 (workspace#517) compares its text qualification with them. The T4 10.2 DBs fail on this path at
+their first partitioned table owned by APP_OWNER.

@@ -1,0 +1,36 @@
+### fixture a (10.2 unloaddb -> develop loaddb -u dba --no-user-specified-name)
+
+Start schema loading.
+In x102a_schema line 96,
+ERROR: before ' ;'
+Unknown class "dba.t2p". 
+
+Error occurred during schema loading.
+Aborting current transaction... done.
+
+Restart loaddb with '-s x102a_schema:1' option
+loaddb rc=3
+### T4 fm102_clean
+
+Start schema loading.
+In fm102_clean_schema line 133,
+ERROR: before ' ;'
+Unknown class "dba.event_log". 
+
+Error occurred during schema loading.
+Aborting current transaction... done.
+
+Restart loaddb with '-s fm102_clean_schema:1' option
+loaddb rc=3
+### T4 fm102_dirty
+
+Start schema loading.
+In fm102_dirty_schema line 133,
+ERROR: before ' ;'
+Unknown class "dba.event_log". 
+
+Error occurred during schema loading.
+Aborting current transaction... done.
+
+Restart loaddb with '-s fm102_dirty_schema:1' option
+loaddb rc=3

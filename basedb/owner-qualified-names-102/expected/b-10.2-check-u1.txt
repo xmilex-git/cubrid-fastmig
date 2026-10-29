@@ -1,0 +1,47 @@
+=== <Result of SELECT Command in Line 2> ===
+            a  b
+            1  'one'
+            2  'two'
+            3  'three'
+3 rows selected.
+=== <Result of SELECT Command in Line 3> ===
+There are no results.
+0 row selected.
+=== <Result of SELECT Command in Line 4> ===
+            a  h
+            1  'hello one'
+            2  'hello two'
+            3  'hello three'
+3 rows selected.
+=== <Result of SELECT Command in Line 5> ===
+There are no results.
+0 row selected.
+=== <Result of SELECT Command in Line 6> ===
+            a  b
+            1  'one'
+            2  'two'
+            3  'three'
+3 rows selected.
+=== <Result of SELECT Command in Line 7> ===
+There are no results.
+0 row selected.
+2 rows affected.
+=== <Result of SELECT Command in Line 9> ===
+            a  b
+            1  'hello one'
+            2  'two'
+            3  'three'
+3 rows selected.
+=== <Result of SELECT Command in Line 10> ===
+           id  msg
+            1  't1 100'
+            2  't1 101'
+2 rows selected.
+=== <Result of SELECT Command in Line 11> ===
+            a  b                     v
+            1  'hello one'           'd1'
+1 row selected.
+=== <Result of SELECT Command in Line 12> ===
+            a
+            1
+1 row selected.

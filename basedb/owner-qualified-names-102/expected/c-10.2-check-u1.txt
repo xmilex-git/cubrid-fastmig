@@ -1,0 +1,5 @@
+1 row affected.
+=== <Result of SELECT Command in Line 3> ===
+           n1           n2           nd
+           10          100          500
+1 row selected.

@@ -1,0 +1,7 @@
+In the command from line 2,
+ERROR: Error evaluating condition for "u1.trg_c_own": Semantic: before ' +1000 )  FROM ON  [u1.t1] new;'
+Serial 'dba.s1' not defined.
+=== <Result of SELECT Command in Line 3> ===
+           n1           n2           nd
+           10          100          500
+1 row selected.

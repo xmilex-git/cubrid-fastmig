@@ -1,0 +1,55 @@
+### b41_develop_u1
+ERROR: EXECUTE authorization failure.
+=== <Result of SELECT Command in Line 3> ===
+  serial_next_value(u2.s2, 1)
+  102
+1 row selected.
+### b42_develop_dba
+=== <Result of SELECT Command in Line 2> ===
+            a  h
+            1  'hello hello one'
+            2  'hello two'
+            3  'hello three'
+3 rows selected.
+Execute OK.
+### b43_develop_u1
+In the command from line 2,
+ERROR: Error evaluating action for "u1.trg1_upd", Semantic: EXECUTE authorization failure.
+=== <Result of SELECT Command in Line 3> ===
+            a  b
+            1  'hello one'
+            2  'two'
+            3  'three'
+3 rows selected.
+### b44_develop_u2
+Execute OK.
+### b45_develop_u1
+=== <Result of SELECT Command in Line 2> ===
+            a  h
+            1  'hello hello one'
+            2  'hello two'
+            3  'hello three'
+3 rows selected.
+1 row affected.
+=== <Result of SELECT Command in Line 4> ===
+            a  b
+            1  'hello one'
+            2  'hello two'
+            3  'three'
+3 rows selected.
+=== <Result of SELECT Command in Line 5> ===
+            a  b                     v
+            1  'hello one'           'd1'
+            2  'hello two'           'd2'
+2 rows selected.
+### b46_develop_dba
+Execute OK.
+### b47_develop_u1
+In the command from line 2,
+ERROR: Error evaluating action for "u1.trg1_ai", Execute: before ' ) FROM ON  [u1.t1] obj;'
+Serial 'dba.s2' not defined.
+=== <Result of SELECT Command in Line 3> ===
+           id  msg
+            1  't1 100'
+            2  't1 101'
+2 rows selected.

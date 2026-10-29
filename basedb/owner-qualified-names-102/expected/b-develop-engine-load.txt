@@ -1,0 +1,33 @@
+  '#class'              unique_name           class_name            owner.name             class_type
+  '#class'              'dba.td'              'td'                  'DBA'                           0
+  '#class'              'dba.tdp'             'tdp'                 'DBA'                           0
+  '#class'              'dba.tdp__p__p0'      'tdp__p__p0'          'DBA'                           0
+  '#class'              'dba.tdp__p__p1'      'tdp__p__p1'          'DBA'                           0
+  '#class'              'u1.t1'               't1'                  'U1'                            0
+  '#class'              'u1.t1_auto_increment_with_a_rather_long_table_name_for_the_ai_serial_x'  't1_auto_increment_with_a_rather_long_table_name_for_the_ai_serial_x'  'U1'                            0
+  '#class'              'u1.v1_join'          'v1_join'             'U1'                            1
+  '#class'              'u1.v1_part'          'v1_part'             'U1'                            1
+  '#class'              'u1.v1_sp'            'v1_sp'               'U1'                            1
+  '#class'              'u1.v1_sub'           'v1_sub'              'U1'                            1
+  '#class'              'u1.v1_t2'            'v1_t2'               'U1'                            1
+  '#class'              'u1.v1_view'          'v1_view'             'U1'                            1
+  '#class'              'u2.t2'               't2'                  'U2'                            0
+  '#class'              'u2.t2_log'           't2_log'              'U2'                            0
+  '#query_spec'         class_of.unique_name  spec
+  '#query_spec'         'u1.v1_join'          'select [t1].[a], [t2].[b], [td].[v] from [u1.t1] [t1], [u2.t2] [t2], [dba.td] [td] where [t1].[a]=[t2].[a] and [td].[k]=[t1].[a]'
+  '#query_spec'         'u1.v1_part'          'select [p].[id], [p].[d], [t1].[b] from [dba.tdp] [p], [u1.t1] [t1] where [p].[id]=[t1].[a]'
+  '#query_spec'         'u1.v1_sp'            'select [t2].[a],  cast([u2.sp2]([t2].[b]) as varchar) from [u2.t2] [t2]'
+  '#query_spec'         'u1.v1_sub'           'select [t1].[a] from [u1.t1] [t1] where [t1].[a] in (select distinct [t2].[a] from [u2.t2] [t2])'
+  '#query_spec'         'u1.v1_t2'            'select [t2].[a], [t2].[b] from [u2.t2] [t2] where [t2].[a]>0'
+  '#query_spec'         'u1.v1_view'          'select [v1_t2].[a], [v1_t2].[b] from [u1.v1_t2] [v1_t2]'
+  '#trigger'            unique_name           name                  owner.name            condition             action_definition
+  '#trigger'            'u1.trg1_ai'          'trg1_ai'             'U1'                  NULL                  'insert into [u2.t2_log] ([msg]) values ('t1 '||serial_next_value([dba.s2], 1))'
+  '#trigger'            'u1.trg1_upd'         'trg1_upd'            'U1'                  '[obj].[a] in (select distinct [u2.t2].[a] from [u2.t2] [u2.t2]) and [obj].[a]<=(select count(*) from [dba.td] [dba.td])'  'update [u2.t2] [u2.t2] set [u2.t2].[b]=[u2.sp2]([u2.t2].[b]) where [u2.t2].[a]=[obj].[a]'
+  '#partition'          class_of.unique_name  pname                 pexpr
+  '#partition'          'dba.tdp'             NULL                  'SELECT  year([d]) FROM [dba.tdp]'
+  '#serial'             unique_name           name                  owner.name            class_name            attr_name
+  '#serial'             'u1.t1_auto_increment_with_a_rather_long_table_name_for_the_ai_serial_x_ai_id_column_with_a_long_name_for_the_auto_increment_serial'  't1_auto_increment_with_a_rather_long_table_name_for_the_ai_serial_x_ai_id_column_with_a_long_name_for_the_auto_increment_serial'  'U1'                  't1_auto_increment_with_a_rather_long_table_name_for_the_ai_serial_x'  'id_column_with_a_long_name_for_the_auto_increment_serial'
+  '#serial'             'u2.s2'               's2'                  'U2'                  NULL                  NULL
+  '#serial'             'u2.t2_log_ai_id'     't2_log_ai_id'        'U2'                  't2_log'              'id'
+  '#sp'                 unique_name           sp_name               owner.name            target_class          target_method
+  '#sp'                 'u2.sp2'              'sp2'                 'U2'                  'FmHello'             'hello(java.lang.String) return java.lang.String'
