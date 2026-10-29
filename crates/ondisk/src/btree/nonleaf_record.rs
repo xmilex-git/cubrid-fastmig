@@ -7,10 +7,10 @@
 //! Layout (big-endian): child pageid i32 · child volid i16 · key_len i16 (-1 = overflow key) · key image
 //! or overflow key VPID (6 B) · zero pad to 4.
 
-use super::DISK_VPID_SIZE;
-use super::be_field::{get_disk_vpid, pad_to_4, put_disk_vpid};
+use super::be_field::{pad_to_4, put_disk_vpid, read_disk_vpid};
 use super::leaf_record::KeyRef;
 use crate::ids::Vpid;
+use crate::value::OrReader;
 
 #[derive(Clone, Copy, Debug)]
 pub struct NonLeafRecord<'a> {
@@ -19,22 +19,19 @@ pub struct NonLeafRecord<'a> {
 }
 
 pub fn read_nonleaf_record(b: &[u8]) -> Result<NonLeafRecord<'_>, &'static str> {
-    if b.len() < 8 {
-        return Err("non-leaf record shorter than its fixed part");
-    }
-    let child = get_disk_vpid(b, 0);
-    let key_len = i16::from_be_bytes([b[6], b[7]]);
+    let mut r = OrReader::new(b);
+    let short = |_| "non-leaf record shorter than its fixed part";
+    let child = read_disk_vpid(&mut r).map_err(short)?;
+    let key_len = r.i16().map_err(short)?;
     let key = if key_len < 0 {
-        if b.len() < 8 + DISK_VPID_SIZE {
-            return Err("overflow key link runs past the record");
-        }
-        KeyRef::Overflow(get_disk_vpid(b, 8))
+        KeyRef::Overflow(
+            read_disk_vpid(&mut r).map_err(|_| "overflow key link runs past the record")?,
+        )
     } else {
-        let end = 8 + key_len as usize;
-        if end > b.len() {
-            return Err("key image runs past the record");
-        }
-        KeyRef::Inline(&b[8..end])
+        KeyRef::Inline(
+            r.bytes(key_len as usize)
+                .map_err(|_| "key image runs past the record")?,
+        )
     };
     Ok(NonLeafRecord { child, key })
 }

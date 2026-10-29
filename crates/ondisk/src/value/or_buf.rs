@@ -66,6 +66,15 @@ impl<'a> OrReader<'a> {
         Ok(s)
     }
 
+    /// The next `N` bytes as an array (fixed-size fields).
+    pub fn array<const N: usize>(&mut self) -> DecodeResult<[u8; N]> {
+        let a = *self.buf[self.pos..]
+            .first_chunk::<N>()
+            .ok_or_else(|| self.error(format!("need {N} bytes, {} left", self.remaining())))?;
+        self.pos += N;
+        Ok(a)
+    }
+
     pub fn skip(&mut self, n: usize) -> DecodeResult<()> {
         self.bytes(n).map(|_| ())
     }
@@ -82,23 +91,23 @@ impl<'a> OrReader<'a> {
     }
 
     pub fn i16(&mut self) -> DecodeResult<i16> {
-        Ok(i16::from_be_bytes(self.bytes(2)?.try_into().unwrap()))
+        Ok(i16::from_be_bytes(self.array()?))
     }
 
     pub fn u16(&mut self) -> DecodeResult<u16> {
-        Ok(u16::from_be_bytes(self.bytes(2)?.try_into().unwrap()))
+        Ok(u16::from_be_bytes(self.array()?))
     }
 
     pub fn i32(&mut self) -> DecodeResult<i32> {
-        Ok(i32::from_be_bytes(self.bytes(4)?.try_into().unwrap()))
+        Ok(i32::from_be_bytes(self.array()?))
     }
 
     pub fn u32(&mut self) -> DecodeResult<u32> {
-        Ok(u32::from_be_bytes(self.bytes(4)?.try_into().unwrap()))
+        Ok(u32::from_be_bytes(self.array()?))
     }
 
     pub fn i64(&mut self) -> DecodeResult<i64> {
-        Ok(i64::from_be_bytes(self.bytes(8)?.try_into().unwrap()))
+        Ok(i64::from_be_bytes(self.array()?))
     }
 
     /// Engine `or_get_align32`: skip to the next multiple of 4 from the slice start.

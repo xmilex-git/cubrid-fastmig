@@ -24,6 +24,10 @@ use std::cmp::Ordering;
 
 use crate::Oid;
 use crate::VersionLine;
+use crate::le_field::{
+    get_f32, get_f64, get_i16, get_i32, get_i64, get_u16, get_u32, try_get_f64, try_get_i16,
+    try_get_i64, try_get_u16, try_get_u32,
+};
 use crate::value::db_type::DbType;
 use crate::value::db_value::Value;
 use crate::value::domain::{Domain, FLOATING_PRECISION};
@@ -280,10 +284,6 @@ fn err(at: usize, what: String) -> DecodeError {
     DecodeError { at, what }
 }
 
-fn le_u32(b: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
-}
-
 /// Develop CHAR and every VARCHAR image: header length and payload length.
 fn string_header(b: &[u8]) -> DecodeResult<(usize, usize, usize, usize)> {
     let first = *b
@@ -295,8 +295,9 @@ fn string_header(b: &[u8]) -> DecodeResult<(usize, usize, usize, usize)> {
     if b.len() < 9 {
         return Err(err(0, "short compressed string header".into()));
     }
-    let clen = i32::from_be_bytes(b[1..5].try_into().unwrap()).max(0) as usize;
-    let len = i32::from_be_bytes(b[5..9].try_into().unwrap()).max(0) as usize;
+    let mut r = OrReader::new(&b[1..]);
+    let clen = r.i32()?.max(0) as usize;
+    let len = r.i32()?.max(0) as usize;
     Ok((9, if clen > 0 { clen } else { len }, clen, len))
 }
 
@@ -334,7 +335,7 @@ pub fn image_len(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<usi
         }
         T::Char | T::Nchar if fixed_char_11_4(version, d) => {
             if d.precision == FLOATING_PRECISION {
-                4 + le_u32(b, 0) as usize
+                4 + try_get_u32(b, 0)? as usize
             } else {
                 str_size(d.precision, d.codeset)
             }
@@ -345,7 +346,7 @@ pub fn image_len(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<usi
         }
         T::Bit => {
             if d.precision == FLOATING_PRECISION {
-                4 + (le_u32(b, 0) as usize).div_ceil(8)
+                4 + (try_get_u32(b, 0)? as usize).div_ceil(8)
             } else {
                 str_size(d.precision, d.codeset)
             }
@@ -357,7 +358,7 @@ pub fn image_len(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<usi
             if first < 0xFF {
                 1 + (first as usize).div_ceil(8)
             } else {
-                5 + (i32::from_be_bytes(b[1..5].try_into().unwrap()).max(0) as usize).div_ceil(8)
+                5 + (OrReader::new(&b[1..]).i32()?.max(0) as usize).div_ceil(8)
             }
         }
         t => return Err(err(0, format!("{t:?} cannot be a key column"))),
@@ -371,51 +372,47 @@ pub fn decode_image(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<
     let b = b
         .get(..len)
         .ok_or_else(|| err(0, format!("{:?} image needs {len} bytes", d.ty)))?;
-    let u32_at = |at: usize| le_u32(b, at);
+    let u32_at = |at: usize| try_get_u32(b, at);
     Ok(match d.ty {
-        T::Integer => Value::Integer(u32_at(0) as i32),
-        T::Short => Value::Short(i16::from_le_bytes([b[0], b[1]])),
-        T::Bigint => Value::Bigint(i64::from_le_bytes(b.try_into().unwrap())),
-        T::Float => Value::Float(f32::from_bits(u32_at(0))),
-        T::Double => Value::Double(f64::from_le_bytes(b.try_into().unwrap())),
+        T::Integer => Value::Integer(u32_at(0)? as i32),
+        T::Short => Value::Short(try_get_i16(b, 0)?),
+        T::Bigint => Value::Bigint(try_get_i64(b, 0)?),
+        T::Float => Value::Float(f32::from_bits(u32_at(0)?)),
+        T::Double => Value::Double(try_get_f64(b, 0)?),
         T::Monetary => Value::Monetary {
-            currency: u32_at(0) as i32,
-            amount: f64::from_le_bytes(b[4..12].try_into().unwrap()),
+            currency: u32_at(0)? as i32,
+            amount: try_get_f64(b, 4)?,
         },
-        T::Date => Value::Date(u32_at(0)),
-        T::Time => Value::Time(u32_at(0)),
-        T::Timestamp => Value::Timestamp(u32_at(0)),
-        T::Timestampltz => Value::Timestampltz(u32_at(0)),
+        T::Date => Value::Date(u32_at(0)?),
+        T::Time => Value::Time(u32_at(0)?),
+        T::Timestamp => Value::Timestamp(u32_at(0)?),
+        T::Timestampltz => Value::Timestampltz(u32_at(0)?),
         T::Timestamptz => Value::Timestamptz {
-            timestamp: u32_at(0),
-            tz_id: u32_at(4),
+            timestamp: u32_at(0)?,
+            tz_id: u32_at(4)?,
         },
         T::Datetime => Value::Datetime {
-            date: u32_at(0),
-            time: u32_at(4),
+            date: u32_at(0)?,
+            time: u32_at(4)?,
         },
         T::Datetimeltz => Value::Datetimeltz {
-            date: u32_at(0),
-            time: u32_at(4),
+            date: u32_at(0)?,
+            time: u32_at(4)?,
         },
         T::Datetimetz => Value::Datetimetz {
-            date: u32_at(0),
-            time: u32_at(4),
-            tz_id: u32_at(8),
+            date: u32_at(0)?,
+            time: u32_at(4)?,
+            tz_id: u32_at(8)?,
         },
         T::Object | T::Oid => {
-            let o = Oid::new(
-                i16::from_le_bytes([b[6], b[7]]),
-                u32_at(0) as i32,
-                i16::from_le_bytes([b[4], b[5]]),
-            );
+            let o = Oid::new(try_get_i16(b, 6)?, u32_at(0)? as i32, try_get_i16(b, 4)?);
             if d.ty == T::Object {
                 Value::Object(o)
             } else {
                 Value::Oid(o)
             }
         }
-        T::Enumeration => Value::Enumeration(u16::from_le_bytes([b[0], b[1]])),
+        T::Enumeration => Value::Enumeration(try_get_u16(b, 0)?),
         T::Numeric => Value::Numeric(match version {
             VersionLine::V11_4 => read_numeric_11_4(&mut OrReader::new(b), d.precision, d.scale)?,
             VersionLine::Develop => read_numeric_develop(&mut OrReader::new(b), d.precision)?,
@@ -442,7 +439,7 @@ pub fn decode_image(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<
         T::Bit => {
             if d.precision == FLOATING_PRECISION {
                 Value::Bit {
-                    bits: u32_at(0),
+                    bits: u32_at(0)?,
                     bytes: b[4..].to_vec(),
                 }
             } else {
@@ -453,13 +450,10 @@ pub fn decode_image(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<
             }
         }
         T::Varbit => {
-            let (h, bits) = if b[0] < 0xFF {
-                (1, b[0] as u32)
-            } else {
-                (
-                    5,
-                    i32::from_be_bytes(b[1..5].try_into().unwrap()).max(0) as u32,
-                )
+            let mut r = OrReader::new(b);
+            let (h, bits) = match r.u8()? {
+                0xFF => (5, r.i32()?.max(0) as u32),
+                n => (1, n as u32),
             };
             Value::Varbit {
                 bits,
@@ -597,7 +591,8 @@ fn magnitude_cmp(a: &Numeric, b: &Numeric) -> Ordering {
 }
 
 /// Order of two non-NULL images of one column (ascending; the caller flips DESC). `coll` is the column's collation
-/// for string types.
+/// for string types. Invariant: both images passed `image_len` for `d` (a split key column), so every fixed field
+/// read below lies inside them.
 pub fn compare_images(
     version: VersionLine,
     d: &Domain,
@@ -606,36 +601,28 @@ pub fn compare_images(
     b: &[u8],
 ) -> Ordering {
     use DbType as T;
-    let i32_at = |x: &[u8], at: usize| i32::from_le_bytes(x[at..at + 4].try_into().unwrap());
     match d.ty {
-        T::Integer => i32_at(a, 0).cmp(&i32_at(b, 0)),
-        T::Short => i16::from_le_bytes([a[0], a[1]]).cmp(&i16::from_le_bytes([b[0], b[1]])),
-        T::Bigint => i64::from_le_bytes(a[..8].try_into().unwrap())
-            .cmp(&i64::from_le_bytes(b[..8].try_into().unwrap())),
-        T::Float => f32::from_le_bytes(a[..4].try_into().unwrap())
-            .partial_cmp(&f32::from_le_bytes(b[..4].try_into().unwrap()))
+        T::Integer => get_i32(a, 0).cmp(&get_i32(b, 0)),
+        T::Short => get_i16(a, 0).cmp(&get_i16(b, 0)),
+        T::Bigint => get_i64(a, 0).cmp(&get_i64(b, 0)),
+        T::Float => get_f32(a, 0)
+            .partial_cmp(&get_f32(b, 0))
             .unwrap_or(Ordering::Equal),
-        T::Double => f64::from_le_bytes(a[..8].try_into().unwrap())
-            .partial_cmp(&f64::from_le_bytes(b[..8].try_into().unwrap()))
+        T::Double => get_f64(a, 0)
+            .partial_cmp(&get_f64(b, 0))
             .unwrap_or(Ordering::Equal),
-        T::Monetary => f64::from_le_bytes(a[4..12].try_into().unwrap())
-            .partial_cmp(&f64::from_le_bytes(b[4..12].try_into().unwrap()))
+        T::Monetary => get_f64(a, 4)
+            .partial_cmp(&get_f64(b, 4))
             .unwrap_or(Ordering::Equal),
         T::Date | T::Time | T::Timestamp | T::Timestampltz | T::Timestamptz => {
-            le_u32(a, 0).cmp(&le_u32(b, 0))
+            get_u32(a, 0).cmp(&get_u32(b, 0))
         }
         T::Datetime | T::Datetimeltz | T::Datetimetz => {
-            (le_u32(a, 0), le_u32(a, 4)).cmp(&(le_u32(b, 0), le_u32(b, 4)))
+            (get_u32(a, 0), get_u32(a, 4)).cmp(&(get_u32(b, 0), get_u32(b, 4)))
         }
-        T::Enumeration => u16::from_le_bytes([a[0], a[1]]).cmp(&u16::from_le_bytes([b[0], b[1]])),
+        T::Enumeration => get_u16(a, 0).cmp(&get_u16(b, 0)),
         T::Object | T::Oid => {
-            let k = |x: &[u8]| {
-                (
-                    i16::from_le_bytes([x[6], x[7]]),
-                    i32_at(x, 0),
-                    i16::from_le_bytes([x[4], x[5]]),
-                )
-            };
+            let k = |x: &[u8]| (get_i16(x, 6), get_i32(x, 0), get_i16(x, 4));
             k(a).cmp(&k(b))
         }
         T::Numeric => match (decode_image(version, d, a), decode_image(version, d, b)) {

@@ -45,12 +45,15 @@ fn bound_bytes(n_fixed: usize) -> usize {
     n_fixed.div_ceil(32) * 4
 }
 
-fn read_offset(rec: &[u8], at: usize, size: usize) -> usize {
-    match size {
-        1 => rec[at] as usize,
-        2 => i16::from_be_bytes([rec[at], rec[at + 1]]).max(0) as usize,
-        _ => i32::from_be_bytes(rec[at..at + 4].try_into().unwrap()).max(0) as usize,
-    }
+/// Entry `at` of the variable offset table: an `size`-byte big-endian offset, negative read as 0.
+fn read_offset(rec: &[u8], at: usize, size: usize) -> DecodeResult<usize> {
+    let mut r = OrReader::new(rec);
+    r.skip(at)?;
+    Ok(match size {
+        1 => r.u8()? as usize,
+        2 => r.i16()?.max(0) as usize,
+        _ => r.i32()?.max(0) as usize,
+    })
 }
 
 /// Decodes `rec` under `layout` as written by `version`.
@@ -91,8 +94,8 @@ pub fn decode_record(
         )?);
     }
     for (j, a) in layout.attrs[layout.n_fixed..].iter().enumerate() {
-        let start = hs + read_offset(rec, hs + j * os, os);
-        let end = hs + read_offset(rec, hs + (j + 1) * os, os);
+        let start = hs + read_offset(rec, hs + j * os, os)?;
+        let end = hs + read_offset(rec, hs + (j + 1) * os, os)?;
         if end < start || end > rec.len() {
             return Err(r.error(format!(
                 "variable attribute {} spans {start}..{end} of {}",

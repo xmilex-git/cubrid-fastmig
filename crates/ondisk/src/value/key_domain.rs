@@ -137,7 +137,7 @@ impl KeyDomain {
         Ok((out, pos))
     }
 
-    /// Fallible [`KeyImage::image_len`].
+    /// Length of the image at the start of `img`, every column checked ([`KeyImage::image_len`]).
     pub fn try_image_len(&self, img: &[u8]) -> DecodeResult<usize> {
         Ok(self.split(img)?.1)
     }
@@ -210,10 +210,13 @@ impl KeyDomain {
         if c.domain.is_desc { o.reverse() } else { o }
     }
 
-    /// Key order (engine `pr_midxkey_compare` / `index_cmpdisk`). Panics on an image that does not split.
+    /// Key order (engine `pr_midxkey_compare` / `index_cmpdisk`).
+    /// Invariant: both images split. Keys read from a volume reach here only after `KeyImage::image_len` or
+    /// `try_image_len` accepted them (leaf record reader, verify `key_of`); the index builder compares images it
+    /// encoded itself. A sort comparator cannot return an error, so a broken invariant panics.
     pub fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
-        let (ca, _) = self.split(a).expect("key image");
-        let (cb, _) = self.split(b).expect("key image");
+        let (ca, _) = self.split(a).expect("key image checked before comparing");
+        let (cb, _) = self.split(b).expect("key image checked before comparing");
         for i in 0..self.columns.len() {
             let o = self.compare_column(i, ca[i], cb[i]);
             if o != Ordering::Equal {
@@ -225,14 +228,16 @@ impl KeyDomain {
 
     /// Leading columns on which `a` and `b` are equal.
     pub fn common_columns(&self, a: &[u8], b: &[u8]) -> usize {
-        let (ca, _) = self.split(a).expect("key image");
-        let (cb, _) = self.split(b).expect("key image");
+        let (ca, _) = self.split(a).expect("key image checked before comparing");
+        let (cb, _) = self.split(b).expect("key image checked before comparing");
         (0..self.columns.len())
             .take_while(|&i| self.compare_column(i, ca[i], cb[i]) == Ordering::Equal)
             .count()
     }
 
-    /// Fallible [`KeyImage::restore_prefix`].
+    /// Full key of a leaf record on a page whose header has `common_prefix` = `ncols` > 0: the first `ncols`
+    /// MIDXKEY columns come from `fence` (the page's lower fence key, a full image) and the rest from `stored`
+    /// (prefix compression `btree_node_get_common_prefix`, `btree.c:16380-16449`, develop 5b1867174).
     pub fn try_restore_prefix(
         &self,
         fence: &[u8],
@@ -253,12 +258,7 @@ impl KeyDomain {
 }
 
 impl KeyImage for KeyDomain {
-    fn image_len(&self, bytes: &[u8]) -> usize {
-        self.try_image_len(bytes).expect("key image")
-    }
-
-    fn restore_prefix(&self, fence: &[u8], stored: &[u8], ncols: usize) -> Vec<u8> {
-        self.try_restore_prefix(fence, stored, ncols)
-            .expect("key image")
+    fn image_len(&self, bytes: &[u8]) -> DecodeResult<usize> {
+        self.try_image_len(bytes)
     }
 }

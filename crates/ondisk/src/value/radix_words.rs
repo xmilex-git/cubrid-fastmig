@@ -20,9 +20,11 @@
 //! 11.4 keys get no words (only develop indexes are built).
 
 use crate::VersionLine;
+use crate::le_field::{get_u16, get_u32, get_u64};
 use crate::value::db_type::DbType;
 use crate::value::index_image::Collation;
 use crate::value::key_domain::{KeyColumn, KeyDomain};
+use crate::value::or_buf::OrReader;
 use crate::value::string::codeset_mult;
 
 /// Most words a key gets.
@@ -119,49 +121,47 @@ fn column_words(c: &KeyColumn) -> Option<usize> {
     }
 }
 
-fn le32(b: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
-}
-
 /// Appends the words of one present column image; `n` is [`column_words`]. Returns false if the image does not
-/// fit the shape (then the caller stops).
+/// fit the shape (then the caller stops). `img` is a column of a split key (`KeyDomain::split`), so its fixed
+/// fields lie inside it.
 fn push_column(c: &KeyColumn, img: &[u8], n: usize, out: &mut Vec<u64>) -> bool {
     use DbType as T;
     let start = out.len();
     match c.domain.ty {
-        T::Short => out.push(((u16::from_le_bytes([img[0], img[1]]) ^ 0x8000) as u64) << 48),
-        T::Integer => out.push(((le32(img, 0) ^ 0x8000_0000) as u64) << 32),
-        T::Bigint => out.push(u64::from_le_bytes(img[..8].try_into().unwrap()) ^ (1 << 63)),
-        T::Float => out.push((ieee32(le32(img, 0)) as u64) << 32),
-        T::Double => out.push(ieee64(u64::from_le_bytes(img[..8].try_into().unwrap()))),
-        T::Monetary => out.push(ieee64(u64::from_le_bytes(img[4..12].try_into().unwrap()))),
+        T::Short => out.push(((get_u16(img, 0) ^ 0x8000) as u64) << 48),
+        T::Integer => out.push(((get_u32(img, 0) ^ 0x8000_0000) as u64) << 32),
+        T::Bigint => out.push(get_u64(img, 0) ^ (1 << 63)),
+        T::Float => out.push((ieee32(get_u32(img, 0)) as u64) << 32),
+        T::Double => out.push(ieee64(get_u64(img, 0))),
+        T::Monetary => out.push(ieee64(get_u64(img, 4))),
         T::Date | T::Time | T::Timestamp | T::Timestampltz | T::Timestamptz => {
-            out.push((le32(img, 0) as u64) << 32)
+            out.push((get_u32(img, 0) as u64) << 32)
         }
         T::Datetime | T::Datetimeltz | T::Datetimetz => {
-            out.push(((le32(img, 0) as u64) << 32) | le32(img, 4) as u64)
+            out.push(((get_u32(img, 0) as u64) << 32) | get_u32(img, 4) as u64)
         }
         T::Object | T::Oid => {
-            let volid = u16::from_le_bytes([img[6], img[7]]) as u64;
-            let slotid = u16::from_le_bytes([img[4], img[5]]) as u64;
-            out.push((volid << 48) | ((le32(img, 0) as u64) << 16) | slotid);
+            let volid = get_u16(img, 6) as u64;
+            let slotid = get_u16(img, 4) as u64;
+            out.push((volid << 48) | ((get_u32(img, 0) as u64) << 16) | slotid);
         }
-        T::Enumeration => out.push((u16::from_le_bytes([img[0], img[1]]) as u64) << 48),
+        T::Enumeration => out.push((get_u16(img, 0) as u64) << 48),
         T::Bit => pack(img, n, out),
         T::Varbit => {
-            let (h, bits) = if img[0] < 0xFF {
-                (1, img[0] as usize)
-            } else {
-                (
-                    5,
-                    i32::from_be_bytes(img[1..5].try_into().unwrap()).max(0) as usize,
-                )
+            let mut r = OrReader::new(img);
+            let (h, bits) = match (r.u8(), r.i32()) {
+                (Ok(0xFF), Ok(bits)) => (5, bits.max(0) as usize),
+                (Ok(n), _) if n < 0xFF => (1, n as usize),
+                _ => return false,
             };
             let len = bits.div_ceil(8);
             if (len).div_ceil(8) > n - 1 {
                 return false;
             }
-            pack(&img[h..h + len], n - 1, out);
+            let Some(bytes) = img.get(h..h + len) else {
+                return false;
+            };
+            pack(bytes, n - 1, out);
             out.push(len as u64);
         }
         T::Char | T::Varchar => {
@@ -194,7 +194,9 @@ fn push_column(c: &KeyColumn, img: &[u8], n: usize, out: &mut Vec<u64>) -> bool 
             let key_len = m + 1;
             let size = (img[0] & 0x7F) as usize;
             let negative = img[0] & 0x80 != 0;
-            let mag = &img[3..size];
+            let Some(mag) = img.get(3..size) else {
+                return false;
+            };
             if mag.len() > m {
                 return false;
             }

@@ -98,18 +98,22 @@ impl<'a> IndexTree<'a> {
             .object(VpidText(at))
     }
 
-    /// A key as stored, overflow keys read from the overflow key file.
-    pub fn key_of(&self, k: KeyRef) -> Result<Vec<u8>, String> {
-        match k {
-            KeyRef::Inline(b) => Ok(b.to_vec()),
+    /// A key as stored, overflow keys read from the overflow key file. A key that does not reach the record
+    /// reader's `image_len` check (an overflow key, a non-leaf separator: `check_inline`) is checked here, so
+    /// every key later compared splits. Errors carry the defect code: `overflow-key` or `key-image`.
+    pub fn key_of(&self, k: KeyRef, check_inline: bool) -> Result<Vec<u8>, (&'static str, String)> {
+        let key = match k {
+            KeyRef::Inline(b) if !check_inline => return Ok(b.to_vec()),
+            KeyRef::Inline(b) => b.to_vec(),
             KeyRef::Overflow(first) => {
+                let ovf = |e: String| ("overflow-key", e);
                 let mut pages = Vec::new();
                 let mut at = first;
                 while !at.is_null() {
                     if pages.len() > 1 << 16 {
-                        return Err("overflow key chain does not end".into());
+                        return Err(ovf("overflow key chain does not end".into()));
                     }
-                    let p = self.db.vols.read_page(at).map_err(|e| e.to_string())?;
+                    let p = self.db.vols.read_page(at).map_err(|e| ovf(e.to_string()))?;
                     at = Vpid::read(page::db_area(&p), 0);
                     pages.push((at, p));
                 }
@@ -119,9 +123,13 @@ impl<'a> IndexTree<'a> {
                     i += 1;
                     a
                 })
-                .map_err(str::to_string)
+                .map_err(|e| ovf(e.to_string()))?
             }
-        }
+        };
+        self.kd
+            .try_image_len(&key)
+            .map_err(|e| ("key-image", e.to_string()))?;
+        Ok(key)
     }
 
     fn walk_upper(&mut self) {
@@ -179,10 +187,10 @@ impl<'a> IndexTree<'a> {
                                     .actual(h.max_key_len);
                                 self.defects.push(d);
                             }
-                            match self.key_of(r.key) {
+                            match self.key_of(r.key, true) {
                                 Ok(k) => next.push((r.child, Some(k))),
-                                Err(e) => {
-                                    let d = self.d("overflow-key", *v).actual(e);
+                                Err((code, e)) => {
+                                    let d = self.d(code, *v).actual(e);
                                     self.defects.push(d);
                                     next.push((r.child, None));
                                 }
@@ -378,14 +386,10 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                     .actual(h.max_key_len);
                 self.push(d);
             }
-            let mut key = match self.t.key_of(r.key) {
+            let mut key = match self.t.key_of(r.key, false) {
                 Ok(k) => k,
-                Err(e) => {
-                    let d = self
-                        .t
-                        .d("overflow-key", v)
-                        .at(format!("slot {slot}"))
-                        .actual(e);
+                Err((code, e)) => {
+                    let d = self.t.d(code, v).at(format!("slot {slot}")).actual(e);
                     self.push(d);
                     return false;
                 }

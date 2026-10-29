@@ -13,8 +13,9 @@
 
 use super::be_field::*;
 use super::key_image::KeyImage;
-use super::{DISK_VPID_ALIGNED_SIZE, DISK_VPID_SIZE, MVCCID_ALL_VISIBLE};
+use super::{DISK_VPID_ALIGNED_SIZE, MVCCID_ALL_VISIBLE};
 use crate::ids::{Oid, Vpid};
+use crate::value::OrReader;
 
 /// The key of a leaf or non-leaf record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +53,13 @@ impl LeafRecord<'_> {
     }
 }
 
+/// A reader over `b` positioned at `at`.
+fn reader_at(b: &[u8], at: usize) -> Result<OrReader<'_>, &'static str> {
+    let mut r = OrReader::new(b);
+    r.skip(at).map_err(|_| "field offset past the record")?;
+    Ok(r)
+}
+
 /// Reads one object at `off`; `class_oid` says whether a class OID follows the OID.
 /// Returns the object and the offset after it.
 pub fn read_object(
@@ -59,20 +67,11 @@ pub fn read_object(
     off: usize,
     class_oid: bool,
 ) -> Result<(BtObject, usize), &'static str> {
-    let need = |end: usize| {
-        if end <= b.len() {
-            Ok(())
-        } else {
-            Err("object runs past the record")
-        }
-    };
-    need(off + 8)?;
-    let f = get_flagged_oid(b, off);
-    let mut p = off + 8;
+    let short = |_| "object runs past the record";
+    let mut r = reader_at(b, off)?;
+    let f = read_flagged_oid(&mut r).map_err(short)?;
     let class = if class_oid {
-        need(p + 8)?;
-        p += 8;
-        Some(get_oid(b, p - 8))
+        Some(read_oid(&mut r).map_err(short)?)
     } else {
         None
     };
@@ -80,9 +79,7 @@ pub fn read_object(
         if f.mvcc_flags & flag == 0 {
             return Ok(None);
         }
-        need(p + 8)?;
-        p += 8;
-        Ok(Some(get_mvccid(b, p - 8)))
+        read_mvccid(&mut r).map(Some).map_err(short)
     };
     let insid = mvcc(OID_HAS_MVCC_INSID)?;
     let delid = mvcc(OID_HAS_MVCC_DELID)?;
@@ -93,7 +90,7 @@ pub fn read_object(
             insid,
             delid,
         },
-        p,
+        r.pos(),
     ))
 }
 
@@ -104,11 +101,9 @@ pub fn read_leaf_record<'a>(
     unique: bool,
     keys: &dyn KeyImage,
 ) -> Result<LeafRecord<'a>, &'static str> {
-    if b.len() < 8 {
-        return Err("leaf record shorter than an OID");
-    }
-    let first_oid = get_flagged_oid(b, 0);
-    let flags = first_oid.record_flags;
+    let flags = read_flagged_oid(&mut OrReader::new(b))
+        .map_err(|_| "leaf record shorter than an OID")?
+        .record_flags;
     let (first, mut p) = read_object(b, 0, flags & LEAF_RECORD_CLASS_OID != 0)?;
     let end = if flags & LEAF_RECORD_OVERFLOW_OIDS != 0 {
         b.len()
@@ -121,13 +116,14 @@ pub fn read_leaf_record<'a>(
         return Err("first object runs into the overflow OID link");
     }
     let key = if flags & LEAF_RECORD_OVERFLOW_KEY != 0 {
-        if p + DISK_VPID_SIZE > end {
-            return Err("overflow key link runs past the record");
-        }
-        p += DISK_VPID_SIZE;
-        KeyRef::Overflow(get_disk_vpid(b, p - DISK_VPID_SIZE))
+        let mut r = reader_at(&b[..end], p)?;
+        let v = read_disk_vpid(&mut r).map_err(|_| "overflow key link runs past the record")?;
+        p = r.pos();
+        KeyRef::Overflow(v)
     } else {
-        let n = keys.image_len(&b[p..end]);
+        let n = keys
+            .image_len(&b[p..end])
+            .map_err(|_| "key image does not decode")?;
         if p + n > end {
             return Err("key image runs past the record");
         }
@@ -141,7 +137,14 @@ pub fn read_leaf_record<'a>(
         others.push(o);
         p = next;
     }
-    let ovf_oids = (flags & LEAF_RECORD_OVERFLOW_OIDS != 0).then(|| get_disk_vpid(b, end));
+    let ovf_oids = if flags & LEAF_RECORD_OVERFLOW_OIDS != 0 {
+        Some(
+            read_disk_vpid(&mut reader_at(b, end)?)
+                .map_err(|_| "overflow OID link runs past the record")?,
+        )
+    } else {
+        None
+    };
     Ok(LeafRecord {
         flags,
         first,
