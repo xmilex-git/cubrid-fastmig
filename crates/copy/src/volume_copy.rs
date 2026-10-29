@@ -1,7 +1,7 @@
 //! Moves every source volume to its target path: clone when the filesystem allows it, otherwise a parallel byte
-//! copy in fixed-size chunks with the page hook applied inline. All work shares one thread cap.
+//! copy in fixed-size chunks with the page treatment applied inline. All work shares the worker limit.
 //!
-//! Input: one job per volume (its locked source handle and target path), the worker cap, the hook, and whether
+//! Input: one job per volume (its read-only source handle and target path), the worker limit, the page treatment, and whether
 //! clone is allowed. Output: per volume, the copy method used and the bytes moved. Target files are created new
 //! (an existing file is an error) and recorded in the incomplete marker before they are written; they are
 //! made durable later, with every other created file, by [`crate::durable`].
@@ -12,12 +12,12 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::byte_copy::{CopyRange, PageHook, copy_range};
+use crate::byte_copy::{CopyRange, PageTreatment, copy_range};
 use crate::clone_file::try_clone;
 use crate::incomplete_marker::IncompleteMarker;
 use crate::worker_pool;
 
-/// Bytes one copy task moves (the unit the workers slide over).
+/// Bytes one copy task moves (the unit the worker_limit slide over).
 const CHUNK_BYTES: u64 = 8 << 20;
 /// Each worker's I/O buffer, the copy engine's only per-worker memory. Small enough to stay in the CPU cache
 /// between the read and the write: copying 1 GiB took 0.35 s with 256 KiB blocks and 0.99 s with 8 MiB blocks on
@@ -46,19 +46,19 @@ pub struct VolumeOutcome {
 }
 
 /// Copies all `jobs` with at most `workers` threads. With `allow_clone` false every volume is byte-copied (used to
-/// measure copy mode on a filesystem that could clone). `hook` runs only on byte-copied volumes; a cloned volume is
+/// measure the byte copy on a filesystem that could clone). `treatment` runs only on byte-copied volumes; a cloned volume is
 /// treated in place by the caller.
 pub fn copy_volumes(
     jobs: &[VolumeJob],
-    workers: usize,
-    hook: &dyn PageHook,
+    worker_limit: usize,
+    treatment: &dyn PageTreatment,
     allow_clone: bool,
     marker: &IncompleteMarker,
 ) -> io::Result<Vec<VolumeOutcome>> {
     // Pass 1: create every target and try to clone it; a volume that cannot be cloned is split into copy chunks.
     let prepared: Vec<Mutex<Option<(File, CopyMethod, u64)>>> =
         jobs.iter().map(|_| Mutex::new(None)).collect();
-    worker_pool::run(jobs.len(), workers, |i| {
+    worker_pool::run(jobs.len(), worker_limit, |i| {
         let job = &jobs[i];
         let size = job.source.metadata()?.len();
         if !size.is_multiple_of(job.io_pagesize as u64) {
@@ -95,10 +95,10 @@ pub fn copy_volumes(
             }
         }
     }
-    let bufs: Vec<Mutex<Vec<u8>>> = (0..workers.clamp(1, chunks.len().max(1)))
+    let bufs: Vec<Mutex<Vec<u8>>> = (0..worker_limit.clamp(1, chunks.len().max(1)))
         .map(|_| Mutex::new(vec![0u8; IO_BUF_BYTES]))
         .collect();
-    worker_pool::run(chunks.len(), workers, |c| {
+    worker_pool::run(chunks.len(), worker_limit, |c| {
         let (i, start, end) = chunks[c];
         let range = CopyRange {
             src: &jobs[i].source,
@@ -113,7 +113,7 @@ pub fn copy_volumes(
             .iter()
             .find_map(|b| b.try_lock().ok())
             .expect("one buffer per worker");
-        copy_range(&range, &mut buf, hook)
+        copy_range(&range, &mut buf, treatment)
     })?;
 
     Ok(jobs

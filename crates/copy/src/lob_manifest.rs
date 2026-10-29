@@ -10,13 +10,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LobEntry {
+pub struct ReferencedLobFile {
     pub size: u64,
     /// Relative to the lob-base-path, e.g. `ces_014/<meta>.<20 digits>_<4 digits>`.
     pub rel_path: PathBuf,
 }
 
-pub fn write(path: &Path, entries: &[LobEntry]) -> io::Result<()> {
+pub fn write(path: &Path, entries: &[ReferencedLobFile]) -> io::Result<()> {
     let mut text = String::new();
     for e in entries {
         let rel = e
@@ -30,7 +30,7 @@ pub fn write(path: &Path, entries: &[LobEntry]) -> io::Result<()> {
     fs::write(path, text)
 }
 
-pub fn read(path: &Path) -> io::Result<Vec<LobEntry>> {
+pub fn read(path: &Path) -> io::Result<Vec<ReferencedLobFile>> {
     let mut out = Vec::new();
     for line in fs::read_to_string(path)?.lines() {
         let (size, rel) = line.split_once('\t').ok_or_else(|| {
@@ -39,7 +39,7 @@ pub fn read(path: &Path) -> io::Result<Vec<LobEntry>> {
         let size = size
             .parse()
             .map_err(|_| io::Error::other(format!("{}: bad size: {line}", path.display())))?;
-        out.push(LobEntry {
+        out.push(ReferencedLobFile {
             size,
             rel_path: PathBuf::from(rel),
         });

@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use crate::clone_file::try_clone;
 use crate::incomplete_marker::IncompleteMarker;
-use crate::lob_manifest::LobEntry;
+use crate::lob_manifest::ReferencedLobFile;
 use crate::volume_copy::CopyMethod;
 use crate::worker_pool;
 
@@ -29,11 +29,11 @@ pub struct AssetOutcome {
 }
 
 /// Copies the manifest's files from `src_base` to `dst_base`, keeping each relative path.
-pub fn copy_lob_files(
+pub fn copy_referenced_lob_files(
     src_base: &Path,
     dst_base: &Path,
-    entries: &[LobEntry],
-    workers: usize,
+    entries: &[ReferencedLobFile],
+    worker_limit: usize,
     marker: &IncompleteMarker,
 ) -> io::Result<AssetOutcome> {
     for e in entries {
@@ -54,14 +54,14 @@ pub fn copy_lob_files(
     }
     marker.create_dir_all(dst_base)?;
     let files: Vec<PathBuf> = entries.iter().map(|e| e.rel_path.clone()).collect();
-    copy_files(src_base, dst_base, &files, workers, marker, true)
+    copy_files(src_base, dst_base, &files, worker_limit, marker, true)
 }
 
 /// Copies directory `src` to `dst` with everything below it; a missing `src` copies nothing.
 pub fn copy_dir_tree(
     src: &Path,
     dst: &Path,
-    workers: usize,
+    worker_limit: usize,
     marker: &IncompleteMarker,
 ) -> io::Result<AssetOutcome> {
     if !src.is_dir() {
@@ -69,7 +69,7 @@ pub fn copy_dir_tree(
     }
     let mut files = Vec::new();
     walk(src, Path::new(""), dst, marker, &mut files)?;
-    copy_files(src, dst, &files, workers, marker, false)
+    copy_files(src, dst, &files, worker_limit, marker, false)
 }
 
 fn walk(
@@ -102,12 +102,12 @@ fn copy_files(
     src_root: &Path,
     dst_root: &Path,
     files: &[PathBuf],
-    workers: usize,
+    worker_limit: usize,
     marker: &IncompleteMarker,
     missing_ok: bool,
 ) -> io::Result<AssetOutcome> {
     let out = Mutex::new(AssetOutcome::default());
-    worker_pool::run(files.len(), workers, |i| {
+    worker_pool::run(files.len(), worker_limit, |i| {
         let src = src_root.join(&files[i]);
         let src_file = match File::open(&src) {
             Ok(f) => f,

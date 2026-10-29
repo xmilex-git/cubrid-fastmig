@@ -14,11 +14,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use fastmig_copy::asset_copy::{self, AssetOutcome};
+use fastmig_copy::out_of_volume_asset::{self, AssetOutcome};
 use fastmig_copy::volume_copy::IO_BUF_BYTES;
 use fastmig_copy::{
-    IncompleteMarker, NoPatch, VolumeJob, VolumeOutcome, copy_volumes, durable, lob_manifest,
-    new_log, new_log_start, open_locked_log, open_source, register_db, volinfo, volume_paths,
+    AsIs, IncompleteMarker, VolumeJob, VolumeOutcome, copy_volumes, durable, lob_manifest, new_log,
+    new_log_start, open_locked_log, open_source, register_db, volinfo, volume_paths,
 };
 use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::boot_parm::BootDbParm;
@@ -33,7 +33,7 @@ const HELP: &str = "\
 cubrid-fastmig migrate <db> --dest <dir> [options]
   --dest <dir>                   target directory for the volumes (must be empty or hold FASTMIG_INCOMPLETE)
   --log-dir <dir>                target log directory (default: --dest)
-  --workers <n>                  thread cap for the whole run (default: CPUs / 2)
+  --workers <n>                  worker limit: thread cap for the whole run (default: CPUs / 2)
   --target-name <name>           target DB name (default: <db>)
   --source-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --target-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
@@ -42,7 +42,7 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
                                  file is copied (the locator scan that builds it comes with workspace#484)
   --mem <size>                   memory cap for the whole run, e.g. 16G (default: physical memory / 4)
   --spill-dir <dir>              where stages over the cap spill (default: <dest>/fastmig/spill)
-  --no-clone                     byte-copy even where the filesystem could clone (copy-mode measurement)
+  --no-clone                     byte-copy even where the filesystem could clone (measures the byte copy where clone would be chosen)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
 
@@ -62,7 +62,7 @@ struct Options {
     db: String,
     dest: PathBuf,
     log_dir: PathBuf,
-    workers: usize,
+    worker_limit: usize,
     target_name: String,
     source_dbtxt: PathBuf,
     target_dbtxt: PathBuf,
@@ -95,7 +95,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         })?;
         Ok(PathBuf::from(dir).join("databases.txt"))
     };
-    let workers = match p.value("--workers") {
+    let worker_limit = match p.value("--workers") {
         Some(w) => w
             .parse()
             .ok()
@@ -110,7 +110,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             .map(absolute)
             .transpose()?
             .unwrap_or_else(|| dest.clone()),
-        workers,
+        worker_limit,
         target_name: p.value("--target-name").unwrap_or(db).to_string(),
         source_dbtxt: p
             .value("--source-databases-txt")
@@ -135,11 +135,11 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         dest,
     };
     // the copy engine streams every volume through one fixed buffer per worker
-    if (o.workers as u64).saturating_mul(IO_BUF_BYTES as u64) > o.limits.mem_bytes {
+    if (o.worker_limit as u64).saturating_mul(IO_BUF_BYTES as u64) > o.limits.memory_limit_bytes {
         return Err(CliError::Usage(format!(
             "--workers {} needs {} KiB of copy buffers, over --mem",
-            o.workers,
-            (o.workers * IO_BUF_BYTES) >> 10
+            o.worker_limit,
+            (o.worker_limit * IO_BUF_BYTES) >> 10
         )));
     }
     migrate(&o).map_err(CliError::Failed)
@@ -207,25 +207,25 @@ fn migrate(o: &Options) -> io::Result<()> {
     marker.create_dir_all(&o.log_dir)?;
     rep.lap("open_sources");
 
-    let outcomes = copy_volumes(&jobs, o.workers, &NoPatch, o.allow_clone, &marker)?;
+    let outcomes = copy_volumes(&jobs, o.worker_limit, &AsIs, o.allow_clone, &marker)?;
     rep.lap("volumes");
     let targets: Vec<PathBuf> = jobs.iter().map(|j| j.target.clone()).collect();
     volume_paths::rewrite(&targets, vols.io_pagesize())?;
     rep.lap("volume_paths");
 
-    let java = asset_copy::copy_dir_tree(
+    let java = out_of_volume_asset::copy_dir_tree(
         &src.vol_path.join("java"),
         &o.dest.join("java"),
-        o.workers,
+        o.worker_limit,
         &marker,
     )?;
-    let java_static = asset_copy::copy_dir_tree(
+    let java_static = out_of_volume_asset::copy_dir_tree(
         &src.vol_path.join("java_static"),
         &o.dest.join("java_static"),
-        o.workers,
+        o.worker_limit,
         &marker,
     )?;
-    let keys = asset_copy::copy_one(
+    let keys = out_of_volume_asset::copy_one(
         &src.vol_path.join(format!("{}_keys", o.db)),
         &o.dest.join(format!("{}_keys", o.target_name)),
         &marker,
@@ -245,7 +245,7 @@ fn migrate(o: &Options) -> io::Result<()> {
     marker.record(&volinfo::log_dir_file(&o.log_dir, &o.target_name, "_vinf"))?;
     volinfo::write(&o.log_dir, &o.target_name, &targets)?;
     rep.lap("new_log");
-    durable::sync_created(&marker, o.workers)?;
+    durable::sync_created(&marker, o.worker_limit)?;
     rep.lap("fsync");
 
     register_db::register(
@@ -342,7 +342,13 @@ fn copy_lobs(
         io::Error::other("--lob-manifest given but the source has no lob-base-path")
     })?;
     let entries = lob_manifest::read(manifest)?;
-    let out = asset_copy::copy_lob_files(src_base, &o.lob_dir, &entries, o.workers, marker)?;
+    let out = out_of_volume_asset::copy_referenced_lob_files(
+        src_base,
+        &o.lob_dir,
+        &entries,
+        o.worker_limit,
+        marker,
+    )?;
     let target_manifest = fastmig_dir.join("lob-manifest");
     marker.record(&target_manifest)?;
     lob_manifest::write(&target_manifest, &entries)?;
@@ -385,9 +391,9 @@ fn report_json(
         )
     };
     format!(
-        "{{\n  \"workers\": {},\n  \"mem_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid}\n}}",
-        o.workers,
-        o.limits.mem_bytes,
+        "{{\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid}\n}}",
+        o.worker_limit,
+        o.limits.memory_limit_bytes,
         o.limits.spill_dir,
         steps.join(", "),
         vols.join(", "),

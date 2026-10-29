@@ -15,13 +15,13 @@ use crate::args::{CliError, Parsed};
 pub const FLAGS: &[&str] = &["--mem", "--spill-dir"];
 
 pub struct Limits {
-    pub mem_bytes: u64,
+    pub memory_limit_bytes: u64,
     pub spill_dir: PathBuf,
 }
 
 impl Limits {
     pub fn from(p: &Parsed, dest: &Path) -> Result<Limits, CliError> {
-        let mem_bytes = match p.value("--mem") {
+        let memory_limit_bytes = match p.value("--mem") {
             Some(v) => parse_size(v).ok_or_else(|| CliError::Usage(format!("bad --mem {v}")))?,
             None => physical_memory()? / 4,
         };
@@ -30,7 +30,7 @@ impl Limits {
             None => dest.join("fastmig").join("spill"),
         };
         Ok(Limits {
-            mem_bytes,
+            memory_limit_bytes,
             spill_dir,
         })
     }

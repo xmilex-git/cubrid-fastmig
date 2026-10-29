@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use crate::incomplete_marker::IncompleteMarker;
 use crate::worker_pool;
 
-pub fn sync_created(marker: &IncompleteMarker, workers: usize) -> io::Result<()> {
+pub fn sync_created(marker: &IncompleteMarker, worker_limit: usize) -> io::Result<()> {
     // parents too: a directory the tool did not create (the target dir itself) still gained entries
     let mut set = BTreeSet::new();
     for p in marker.created()? {
@@ -28,7 +28,7 @@ pub fn sync_created(marker: &IncompleteMarker, workers: usize) -> io::Result<()>
         set.insert(p);
     }
     let paths: Vec<PathBuf> = set.into_iter().collect();
-    worker_pool::run(paths.len(), workers, |i| match File::open(&paths[i]) {
+    worker_pool::run(paths.len(), worker_limit, |i| match File::open(&paths[i]) {
         Ok(f) => f.sync_all(),
         // a listed path the run did not get to create (create failed after recording) has nothing to flush
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
