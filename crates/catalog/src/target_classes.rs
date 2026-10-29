@@ -44,8 +44,10 @@ pub struct Placement<'a> {
     pub new_heap: &'a mut dyn FnMut(Oid, &[u8]) -> Hfid,
     /// Representation directory of a target class.
     pub rep_dir: &'a dyn Fn(Oid) -> Oid,
-    /// New BTID by old BTID (source or template); `None` writes the NULL BTID.
-    pub new_btid: &'a dyn Fn(Btid) -> Option<Btid>,
+    /// New BTID of a source user class index by its source BTID; `None` writes the NULL BTID.
+    pub source_btid: &'a dyn Fn(Btid) -> Option<Btid>,
+    /// New BTID of a template system class index by its template BTID (the two BTID spaces overlap).
+    pub template_btid: &'a dyn Fn(Btid) -> Option<Btid>,
     /// Target user row for a template user row (DBA → the source's DBA row, INFORMATION_SCHEMA → its new row).
     pub user: &'a dyn Fn(Oid) -> Oid,
 }
@@ -72,7 +74,7 @@ pub fn target_classes(
                     plan,
                     &RewriteInputs {
                         rep_dir: (p.rep_dir)(c.oid),
-                        new_btid: p.new_btid,
+                        new_btid: p.source_btid,
                     },
                 )?,
                 origin: Origin::User,
@@ -126,7 +128,7 @@ pub fn target_classes(
                 heap,
                 rep_dir: (p.rep_dir)(oid),
                 owner: p.user,
-                new_btid: p.new_btid,
+                new_btid: p.template_btid,
             },
         )?;
         out.push(TargetClass { oid, class, origin });

@@ -7,4 +7,5 @@ repository.workspace = true
 
 [dependencies]
 fastmig-ondisk = { path = "../ondisk" }
+fastmig-progress = { path = "../progress" }
 md-5 = "0.10"
