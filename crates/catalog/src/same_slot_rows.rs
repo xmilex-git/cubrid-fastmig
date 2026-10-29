@@ -108,7 +108,7 @@ pub(crate) fn rewrite(
     let mut values = HashMap::new();
     for n in &names {
         let v = match r.values.get(n) {
-            Some(v) => value_to_develop(v),
+            Some(v) => value_to_develop(v.clone()),
             None => new_column(table, n, &r.values, now)?,
         };
         values.insert(n.clone(), v);

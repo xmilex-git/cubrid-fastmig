@@ -28,24 +28,25 @@ pub fn domain_to_develop(d: &Domain) -> Domain {
     out
 }
 
-/// The develop value for an 11.4 value (NCHAR/VARNCHAR variants renamed, set domains and tags mapped).
-pub fn value_to_develop(v: &Value) -> Value {
+/// The develop value for an 11.4 value (NCHAR/VARNCHAR variants renamed, set domains and tags mapped). Takes the
+/// value so the bytes move instead of being copied (once per column of every re-encoded row, workspace#536).
+pub fn value_to_develop(v: Value) -> Value {
     match v {
-        Value::Nchar(s) => Value::Char(s.clone()),
-        Value::Varnchar(s) => Value::Varchar(s.clone()),
+        Value::Nchar(s) => Value::Char(s),
+        Value::Varnchar(s) => Value::Varchar(s),
         Value::Set(s) => Value::Set(SetValue {
             ty: s.ty,
             domain: s.domain.as_ref().map(domain_to_develop),
             elements: s
                 .elements
-                .iter()
+                .into_iter()
                 .map(|e| SetElement {
                     tag: e.tag.as_ref().map(domain_to_develop),
-                    value: value_to_develop(&e.value),
+                    value: value_to_develop(e.value),
                 })
                 .collect(),
         }),
-        other => other.clone(),
+        other => other,
     }
 }
 

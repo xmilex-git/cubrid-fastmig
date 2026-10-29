@@ -85,7 +85,7 @@ fn map_packed_value(from: VersionLine, packed: &[u8]) -> DecodeResult<Vec<u8>> {
     }
     let (tag, v) = decode_tagged(from, &mut OrReader::new(packed), Some(packed.len()))?;
     let mut w = OrWriter::new();
-    encode_tagged(TO, &mut w, &domain_to_develop(&tag), &value_to_develop(&v));
+    encode_tagged(TO, &mut w, &domain_to_develop(&tag), &value_to_develop(v));
     Ok(w.buf)
 }
 
@@ -283,7 +283,7 @@ fn map_pvalues(from: VersionLine, packed: &[u8], master: bool) -> DecodeResult<V
         return Ok(Vec::new());
     }
     let (tag, v) = decode_tagged(from, &mut OrReader::new(packed), Some(packed.len()))?;
-    let mut v = value_to_develop(&v);
+    let mut v = value_to_develop(v);
     if master
         && let Value::Set(s) = &mut v
         && s.elements.len() > 2

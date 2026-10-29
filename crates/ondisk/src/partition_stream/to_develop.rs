@@ -47,7 +47,7 @@ fn regu_value(v: &mut ReguValue) {
     match v {
         ReguValue::DbVal { tag, value } => {
             *tag = domain(tag);
-            *value = value_to_develop(value);
+            *value = value_to_develop(std::mem::replace(value, Value::Null));
         }
         ReguValue::Attr { db_type: t, .. } => *t = db_type(*t),
         ReguValue::ValList(items) => items.iter_mut().for_each(|(_, i)| regu_value(i)),
@@ -95,7 +95,7 @@ pub fn map_tree(from: VersionLine, tree: &mut StreamTree) -> DecodeResult<()> {
             }
             Node::DbValue { tag, value } => {
                 *tag = domain(tag);
-                *value = value_to_develop(value);
+                *value = value_to_develop(std::mem::replace(value, Value::Null));
             }
             Node::Arith {
                 domain: d,

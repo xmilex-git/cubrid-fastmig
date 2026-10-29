@@ -39,13 +39,23 @@ pub fn mvcc_disabled_class(name: &[u8]) -> bool {
     matches!(name, b"db_serial" | b"_db_collation" | b"db_ha_apply_info")
 }
 
+/// One representation records may be written under: its layout and, per attribute of the target layout, that
+/// attribute's position in it (`None`: the attribute is newer than the representation). Resolved once per class so
+/// the row loop does no lookup by attribute id (BR-04, workspace#536).
+struct SourceRepr {
+    layout: RecordLayout,
+    positions: Vec<Option<usize>>,
+}
+
 pub struct ClassReEncoder {
     /// The source line records are decoded with.
     line: VersionLine,
-    source: HashMap<u32, RecordLayout>,
+    /// The current representation first; a class has a handful.
+    source: Vec<SourceRepr>,
     target: RecordLayout,
-    /// Original default value of each current attribute (`Value::Null` when it has none), develop form.
-    defaults: HashMap<i32, Value>,
+    /// Original default value of each target attribute, in target order (`Value::Null` when it has none), develop
+    /// form.
+    defaults: Vec<Value>,
     mvcc: bool,
     /// The class heap and the source lob-base-path, when LOB locators move to develop's per-attribute directories.
     lob_dirs: Option<(Hfid, Option<PathBuf>)>,
@@ -55,12 +65,20 @@ impl ClassReEncoder {
     /// Prepares the layouts of every representation of `class`, a class object of source line `line` (10.2 or 11.4).
     pub fn new(class: &ClassObject, line: VersionLine, mvcc: bool) -> DecodeResult<ClassReEncoder> {
         let current = RecordLayout::for_repid(line, class, class.repid as u32)?;
-        let mut source = HashMap::new();
+        let target = current.to_develop();
+        let repr = |layout: RecordLayout| SourceRepr {
+            positions: target
+                .attrs
+                .iter()
+                .map(|t| layout.attrs.iter().position(|a| a.id == t.id))
+                .collect(),
+            layout,
+        };
+        let mut source = vec![repr(current)];
         for r in &class.representations {
-            source.insert(
-                r.id as u32,
-                RecordLayout::for_repid(line, class, r.id as u32)?,
-            );
+            if r.id as u32 != source[0].layout.repid {
+                source.push(repr(RecordLayout::for_repid(line, class, r.id as u32)?));
+            }
         }
         let mut defaults = HashMap::new();
         for a in &class.attributes {
@@ -68,12 +86,15 @@ impl ClassReEncoder {
                 Value::Null
             } else {
                 let mut r = OrReader::new(&a.original_value);
-                value_to_develop(&decode_tagged(line, &mut r, Some(a.original_value.len()))?.1)
+                value_to_develop(decode_tagged(line, &mut r, Some(a.original_value.len()))?.1)
             };
             defaults.insert(a.id, v);
         }
-        let target = current.to_develop();
-        source.insert(current.repid, current);
+        let defaults = target
+            .attrs
+            .iter()
+            .map(|a| defaults.remove(&a.id).unwrap_or(Value::Null))
+            .collect();
         Ok(ClassReEncoder {
             line,
             source,
@@ -114,24 +135,33 @@ impl ClassReEncoder {
 impl ReEncode for ClassReEncoder {
     fn re_encode(&self, _oid: Oid, rec: &[u8]) -> DecodeResult<Vec<u8>> {
         let h = RecordHeader::read(rec)?;
-        let layout = self.source.get(&h.repid).ok_or_else(|| DecodeError {
-            at: 0,
-            what: format!(
-                "record of representation {} the class does not have",
-                h.repid
-            ),
-        })?;
-        let d = decode_record(self.line, layout, rec)?;
-        let by_id: HashMap<i32, &Value> =
-            layout.attrs.iter().map(|a| a.id).zip(&d.values).collect();
+        let src = self
+            .source
+            .iter()
+            .find(|s| s.layout.repid == h.repid)
+            .ok_or_else(|| DecodeError {
+                at: 0,
+                what: format!(
+                    "record of representation {} the class does not have",
+                    h.repid
+                ),
+            })?;
+        let mut d = decode_record(self.line, &src.layout, rec)?;
         let values: Vec<Value> = self
             .target
             .attrs
             .iter()
-            .map(|a| match by_id.get(&a.id) {
-                Some(v) => self.relocate_lob(a.id, value_to_develop(v)),
-                None => self.defaults.get(&a.id).cloned().unwrap_or(Value::Null),
-            })
+            .zip(&src.positions)
+            .zip(&self.defaults)
+            .map(
+                |((a, p), default)| match p.and_then(|j| d.values.get_mut(j)) {
+                    // moved, not copied: the decoded record is dropped after this
+                    Some(v) => {
+                        self.relocate_lob(a.id, value_to_develop(std::mem::replace(v, Value::Null)))
+                    }
+                    None => default.clone(),
+                },
+            )
             .collect();
         let header = RecordHeader {
             repid: self.target.repid,

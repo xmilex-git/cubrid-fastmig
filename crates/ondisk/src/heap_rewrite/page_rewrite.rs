@@ -173,13 +173,11 @@ fn re_encode_object(
     re: &dyn ReEncode,
     c: &mut PageCounts,
 ) -> io::Result<()> {
-    let (deleted, rec) = match &target {
-        Target::Home(rec) | Target::Relocated(_, rec) => {
-            (header_of(oid, rec)?.is_deleted(), rec.clone())
-        }
+    let (deleted, rec) = match target {
+        Target::Home(rec) | Target::Relocated(_, rec) => (header_of(oid, &rec)?.is_deleted(), rec),
         Target::Big(first) => {
             st.reach_other_page()?;
-            let rec = read_overflow(st.vs(), *first)?;
+            let rec = read_overflow(st.vs(), first)?;
             (header_of(oid, &rec)?.is_deleted(), rec)
         }
     };
