@@ -6,12 +6,14 @@
 //! develop @5b1867174); R2 § 1.
 
 pub mod develop_layout;
+pub mod extract_key;
 pub mod heap_chain;
 pub mod heap_scan;
 pub mod layout;
 pub mod mvcc_header;
 pub mod record_codec;
 
+pub use extract_key::{ExtractedKey, extract_key};
 pub use heap_chain::HeapChain;
 pub use heap_scan::{HeapRecord, HeapScan, HomeKind, heap_records};
 pub use layout::{LayoutAttr, RecordLayout, schema_domain};
