@@ -141,6 +141,7 @@ fn patch_object(
             }
         }
         Target::Big(first) => {
+            st.reach_other_page()?;
             let vs = st.vs();
             let mut p = vs.read_page(first)?;
             let h = header_of(oid, &db_area(&p)[OVERFLOW_FIRST_DATA..])?;
@@ -177,6 +178,7 @@ fn re_encode_object(
             (header_of(oid, rec)?.is_deleted(), rec.clone())
         }
         Target::Big(first) => {
+            st.reach_other_page()?;
             let rec = read_overflow(st.vs(), *first)?;
             (header_of(oid, &rec)?.is_deleted(), rec)
         }

@@ -1,6 +1,7 @@
 //! The page treatment of the user heaps on the 11.4 → develop path: every heap gets develop's header and bestspace
 //! pages; a re-encoded class has every record rewritten (transform), any other class only its patch target pages
-//! (patch). Heaps run in parallel, one heap per worker at a time.
+//! (patch). Two passes (workspace#536): the isolated pages of every heap in parallel, sector ranges of all heaps in
+//! one queue (`rewrite_isolated_pages`); then each heap's chain walk for the rest, one heap per worker at a time.
 //!
 //! Input: the target's [`SpaceManager`], the [`SourceCatalog`], the source's [`VacuumHorizon`], the worker limit and
 //! the meter of the page-treatment phase (unit: pages of the walked heaps, workspace#508). Output: one [`HeapReport`] per user
@@ -19,6 +20,7 @@ use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::heap_rewrite::{
     ClassReEncoder, HeapJob, HeapReport, ReEncode, VacuumHorizon, rewrite_heap,
+    rewrite_isolated_pages,
 };
 use fastmig_ondisk::page::{self, PageType};
 use fastmig_ondisk::record::heap_chain::HeapChain;
@@ -44,11 +46,32 @@ pub fn treat_user_heaps(
     worker_limit: usize,
     meter: Meter,
 ) -> io::Result<Vec<HeapReport>> {
-    let jobs: Vec<usize> = (0..source.classes.len())
+    let classes: Vec<usize> = (0..source.classes.len())
         .filter(|&i| {
             source.plans[i].kind == ClassKind::User && !source.classes[i].class.heap.is_null()
         })
         .collect();
+    let re_encoders = classes
+        .iter()
+        .map(|&i| encoder_of(source, lob_base, i))
+        .collect::<io::Result<Vec<_>>>()?;
+    let pages_walked = |n| meter.add(n);
+    let mut jobs: Vec<HeapJob> = classes
+        .iter()
+        .zip(&re_encoders)
+        .map(|(&i, r)| HeapJob {
+            hfid: source.classes[i].class.heap,
+            source_line: source.line,
+            re_encode: r.as_ref().map(|r| r as _),
+            root: false,
+            pages_walked: Some(&pages_walked),
+            isolated: None,
+        })
+        .collect();
+    let isolated = rewrite_isolated_pages(space, horizon, &jobs, worker_limit)?;
+    for (i, j) in jobs.iter_mut().enumerate() {
+        j.isolated = Some(isolated.heap(i));
+    }
     let next = AtomicUsize::new(0);
     let reports: Mutex<Vec<Option<io::Result<HeapReport>>>> =
         Mutex::new((0..jobs.len()).map(|_| None).collect());
@@ -57,8 +80,10 @@ pub fn treat_user_heaps(
             s.spawn(|| {
                 loop {
                     let j = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&i) = jobs.get(j) else { break };
-                    let r = treat_one(space, source, horizon, lob_base, i, meter);
+                    let Some(job) = jobs.get(j) else { break };
+                    let r = rewrite_heap(space, horizon, job).map_err(|e| {
+                        invalid(format!("{} heap: {e}", source.plans[classes[j]].name))
+                    });
                     reports.lock().unwrap()[j] = Some(r);
                 }
             });
@@ -70,31 +95,6 @@ pub fn treat_user_heaps(
         .into_iter()
         .map(|r| r.unwrap_or_else(|| Err(invalid("heap not treated".into()))))
         .collect()
-}
-
-fn treat_one(
-    space: &SpaceManager,
-    source: &SourceCatalog,
-    horizon: &VacuumHorizon,
-    lob_base: Option<&Path>,
-    i: usize,
-    meter: Meter,
-) -> io::Result<HeapReport> {
-    let c = &source.classes[i];
-    let plan = &source.plans[i];
-    let re_encoder = encoder_of(source, lob_base, i)?;
-    rewrite_heap(
-        space,
-        horizon,
-        &HeapJob {
-            hfid: c.class.heap,
-            source_line: source.line,
-            re_encode: re_encoder.as_ref().map(|r| r as _),
-            root: false,
-            pages_walked: Some(&|n| meter.add(n)),
-        },
-    )
-    .map_err(|e| invalid(format!("{} heap: {e}", plan.name)))
 }
 
 /// The encoder of class `i` when it is re-encoded: user classes are MVCC classes; LOB locators move to develop's

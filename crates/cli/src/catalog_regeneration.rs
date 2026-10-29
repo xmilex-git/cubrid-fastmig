@@ -49,6 +49,9 @@ pub struct CatalogOutcome {
     pub measured_heaps: usize,
     /// Pages the page treatment appended to the heaps (workspace#526: against `appended_pages_bound`).
     pub appended_pages: u64,
+    /// User heap pages rewritten, and of those the isolated pages the parallel first pass wrote (workspace#536).
+    pub rewritten_pages: u64,
+    pub isolated_pages: u64,
     pub rows_written: BTreeMap<&'static str, usize>,
     pub new_slots: usize,
     pub new_heaps: usize,
@@ -65,11 +68,13 @@ impl CatalogOutcome {
             .map(|(t, n)| format!("\"{t}\": {n}"))
             .collect();
         format!(
-            "{{\"freed_files\": {}, \"user_heaps\": {}, \"measured_heaps\": {}, \"appended_pages\": {}, \"new_slots\": {}, \"new_heaps\": {}, \"deleted_classes\": {}, \"catalog_pages\": {}, \"indexes_built\": {}, \"rows_written\": {{{}}}}}",
+            "{{\"freed_files\": {}, \"user_heaps\": {}, \"measured_heaps\": {}, \"appended_pages\": {}, \"rewritten_pages\": {}, \"isolated_pages\": {}, \"new_slots\": {}, \"new_heaps\": {}, \"deleted_classes\": {}, \"catalog_pages\": {}, \"indexes_built\": {}, \"rows_written\": {{{}}}}}",
             self.freed_files,
             self.user_heaps,
             self.measured_heaps,
             self.appended_pages,
+            self.rewritten_pages,
+            self.isolated_pages,
             self.new_slots,
             self.new_heaps,
             self.deleted_classes,
@@ -224,6 +229,8 @@ pub fn finish(
         user_heaps: p.reports.len(),
         measured_heaps: p.reports.iter().filter(|r| r.measured).count(),
         appended_pages: p.reports.iter().map(|r| r.appended_pages).sum(),
+        rewritten_pages: p.reports.iter().map(|r| r.pages_rewritten).sum(),
+        isolated_pages: p.reports.iter().map(|r| r.isolated_pages).sum(),
         rows_written: p.layout.rows_written.clone(),
         new_slots: p.layout.new_slots.len(),
         new_heaps: p.layout.new_heaps.len(),
@@ -349,6 +356,8 @@ pub fn same_version_finish(
         user_heaps: p.reports.len(),
         measured_heaps: p.reports.iter().filter(|r| r.measured).count(),
         appended_pages: p.reports.iter().map(|r| r.appended_pages).sum(),
+        rewritten_pages: p.reports.iter().map(|r| r.pages_rewritten).sum(),
+        isolated_pages: p.reports.iter().map(|r| r.isolated_pages).sum(),
         rows_written,
         new_slots: 0,
         new_heaps: 0,

@@ -117,6 +117,7 @@ pub fn patch_heaps(
                 re_encode: None,
                 root,
                 pages_walked: Some(&|n| meter.add(n)),
+                isolated: None,
             },
         )
         .map_err(|e| invalid(format!("heap {hfid:?}: {e}")))?;

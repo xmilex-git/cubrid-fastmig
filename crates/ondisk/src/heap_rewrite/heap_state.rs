@@ -80,6 +80,23 @@ pub(crate) fn spage_err(vpid: Vpid, e: SpageError) -> io::Error {
     invalid(format!("heap page {vpid:?}: {e:?}"))
 }
 
+/// The error an isolated rewrite stops with when it would reach another page (see `isolated_pages`).
+#[derive(Debug)]
+struct LeftToChainWalk;
+
+impl std::fmt::Display for LeftToChainWalk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the page reaches another page; left to the chain walk")
+    }
+}
+
+impl std::error::Error for LeftToChainWalk {}
+
+/// `e` is an isolated rewrite stopping before it reached another page.
+pub(crate) fn is_left_to_chain_walk(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|i| i.is::<LeftToChainWalk>())
+}
+
 /// The chain record of heap data page `vpid` (`page` is the whole IO page).
 pub(crate) fn chain_of(page: &[u8], vpid: Vpid) -> io::Result<HeapChain> {
     SlottedPage::new(db_area(page))
@@ -119,6 +136,8 @@ pub(crate) struct HeapState<'s, 'v> {
     /// Bestspace pages: they hold entries, not records, so they are neither insert targets nor counted when an edit
     /// (a chain link) touches them.
     pub bestspace_pages: Vec<Vpid>,
+    /// Only the current page may change: any edit, insert or allocation elsewhere fails with [`LeftToChainWalk`].
+    isolated: bool,
 }
 
 impl<'s, 'v> HeapState<'s, 'v> {
@@ -143,7 +162,29 @@ impl<'s, 'v> HeapState<'s, 'v> {
             index: HashMap::new(),
             appended_pages: 0,
             bestspace_pages: Vec::new(),
+            isolated: false,
         }
+    }
+
+    /// A state that rewrites one page and touches no other (the parallel first pass, `isolated_pages`).
+    pub fn isolated(
+        space: &'s SpaceManager<'v>,
+        hfid: Hfid,
+        class_oid: Oid,
+        reuse_slots: bool,
+    ) -> Self {
+        HeapState {
+            isolated: true,
+            ..Self::new(space, hfid, class_oid, reuse_slots, Vfid::NULL, Vpid::NULL)
+        }
+    }
+
+    /// Fails on an isolated state: the caller is about to reach a page other than the current one.
+    pub fn reach_other_page(&self) -> io::Result<()> {
+        if self.isolated {
+            return Err(io::Error::other(LeftToChainWalk));
+        }
+        Ok(())
     }
 
     pub fn vs(&self) -> &'v VolumeSet {
@@ -228,6 +269,7 @@ impl<'s, 'v> HeapState<'s, 'v> {
             c.dirty = true;
             return f(&mut c.page);
         }
+        self.reach_other_page()?;
         let mut page = self.vs().read_page(vpid)?;
         let r = f(&mut page)?;
         self.vs().write_page(vpid, &page)?;
@@ -315,6 +357,7 @@ impl<'s, 'v> HeapState<'s, 'v> {
         rec: &[u8],
         exclude: Vpid,
     ) -> io::Result<Oid> {
+        self.reach_other_page()?;
         let header = self.hfid.vpid();
         let mut i = 0;
         while i < self.pages.len() {

@@ -69,6 +69,9 @@ pub struct Placed {
 /// REC_BIGONE.
 pub(crate) fn release_target(st: &mut HeapState, oid: Oid) -> io::Result<Released> {
     let (t, body) = home_slot(st, oid)?;
+    if t != RecordType::Home {
+        st.reach_other_page()?;
+    }
     match t {
         RecordType::Home => Ok(Released::default()),
         RecordType::Relocation => {
@@ -117,6 +120,7 @@ fn set_home(
 pub(crate) fn place(st: &mut HeapState, oid: Oid, rec: &[u8], mvcc: bool) -> io::Result<Placed> {
     let released = release_target(st, oid)?;
     if rec.len() > max_slotted_len(st.db_pagesize()) {
+        st.reach_other_page()?;
         let big = if mvcc {
             let h = RecordHeader::read(rec).map_err(|e| decode_err(oid, e))?;
             with_header(rec, &h, &residue_free_overflow_header(&h))

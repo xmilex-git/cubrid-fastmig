@@ -466,6 +466,7 @@ pub fn plan_catalog(
             }),
             root: true,
             pages_walked: None,
+            isolated: None,
         },
     )
     .map_err(|e| invalid(format!("root heap: {e}")))?;
@@ -574,6 +575,7 @@ pub fn plan_catalog(
                 }),
                 root: false,
                 pages_walked: None,
+                isolated: None,
             },
         )
         .map_err(|e| invalid(format!("{dev} heap: {e}")))?;

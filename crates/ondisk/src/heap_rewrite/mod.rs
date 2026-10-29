@@ -9,6 +9,7 @@
 pub mod header_rewrite;
 pub mod heap_state;
 pub mod heap_writer;
+pub mod isolated_pages;
 pub mod overflow;
 pub mod page_rewrite;
 pub mod placement;
@@ -19,6 +20,7 @@ pub mod vacuum_horizon;
 
 pub use heap_state::PageStats;
 pub use heap_writer::{HeapWriter, create_heap};
+pub use isolated_pages::{IsolatedHeap, IsolatedPages, rewrite_isolated_pages};
 pub use page_rewrite::PageCounts;
 pub use placement::max_slotted_len;
 pub use re_encode::{ClassReEncoder, ReEncode, mvcc_disabled_class};

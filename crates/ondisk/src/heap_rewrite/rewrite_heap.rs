@@ -8,6 +8,9 @@
 //! and only patch targets are written; the header page is always rewritten. Pages not written stay byte-identical
 //! (clone sharing kept); their `max_mvccid` is below the target's first MVCCID because the new log continues the
 //! source's `mvcc_next_id` (workspace#484 invariant, `heap_file.c:25045` assert).
+//! The isolated pages of a heap may have been rewritten already by the parallel first pass
+//! ([`crate::heap_rewrite::rewrite_isolated_pages`], `HeapJob::isolated`): the walk reads them in their chain place
+//! and rewrites the rest; the bytes are those of the walk alone (workspace#536).
 //! A develop source (the same-version path, workspace#501) has its bestspace pages in the chain already: they are
 //! never patched nor counted, and a heap that is not walked is left byte-identical, header included.
 //! Source: workspace#482 decision 10 (patch/transform after releases, before index builds), R2 § 3 R1-R7.
@@ -18,6 +21,7 @@ use crate::file_alloc::SpaceManager;
 use crate::file_header::{FileHeader, FileType};
 use crate::heap_rewrite::header_rewrite::{HeaderOutcome, rewrite_header};
 use crate::heap_rewrite::heap_state::{HeapState, PageStats, chain_of, invalid};
+use crate::heap_rewrite::isolated_pages::IsolatedHeap;
 use crate::heap_rewrite::page_rewrite::{PageCounts, PageTreatment, rewrite_current_page};
 use crate::heap_rewrite::re_encode::ReEncode;
 use crate::heap_rewrite::vacuum_horizon::VacuumHorizon;
@@ -39,7 +43,11 @@ pub struct HeapJob<'a> {
     pub root: bool,
     /// Called with 1 for every page of a walked heap (header and chain pages, the heap file's user pages): the
     /// page-treatment progress, whose total the plan sums from the same pages (workspace#508).
-    pub pages_walked: Option<&'a dyn Fn(u64)>,
+    pub pages_walked: Option<&'a (dyn Fn(u64) + Sync)>,
+    /// Pages [`rewrite_isolated_pages`] already rewrote: read in chain order, not rewritten again (workspace#536).
+    ///
+    /// [`rewrite_isolated_pages`]: crate::heap_rewrite::rewrite_isolated_pages
+    pub isolated: Option<IsolatedHeap<'a>>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +60,8 @@ pub struct HeapReport {
     pub pages_read: u64,
     /// Pages whose records were patched or re-encoded (header page included).
     pub pages_rewritten: u64,
+    /// Of `pages_rewritten`, the isolated pages the parallel first pass wrote; the rest were rewritten in chain order.
+    pub isolated_pages: u64,
     pub counts: PageCounts,
     /// Pages added to the chain for NEWHOME records.
     pub appended_pages: u64,
@@ -98,8 +108,9 @@ pub fn rewrite_heap(
         // nothing to clean and nothing to convert: header and pages stay as the source wrote them (workspace#501)
         return Ok(untouched(job, &src, bestspace_pages));
     }
-    let mut counts = PageCounts::default();
+    let mut counts = job.isolated.map_or_else(PageCounts::default, |d| d.counts);
     let mut rewritten = 0;
+    let mut isolated_seen = 0;
     // the header page is read first: NEWHOME first-fit order is read order
     st.load(hv)?;
     let page_walked = || {
@@ -119,7 +130,11 @@ pub fn rewrite_heap(
         let mut walked = 0u64;
         while !v.is_null() {
             walked += 1;
-            page_walked();
+            let isolated = job.isolated.is_some_and(|d| d.set.contains(v));
+            if !isolated {
+                // an isolated page was counted when the first pass rewrote it
+                page_walked();
+            }
             if walked > limit {
                 return Err(invalid(format!(
                     "heap {hv:?}: chain longer than the volume set"
@@ -127,6 +142,17 @@ pub fn rewrite_heap(
             }
             if bestspace_pages.contains(&v) {
                 // entries, not records: neither patched nor read into the statistics (heap_update_statistics)
+                v = st.peek(v, |p| chain_of(p, v))?.next_vpid;
+                continue;
+            }
+            if isolated {
+                // rewritten already; read so first fit and the statistics see it where the walk alone would
+                st.load(v)?;
+                isolated_seen += 1;
+                rewritten += 1;
+                if v == stop {
+                    break;
+                }
                 v = st.peek(v, |p| chain_of(p, v))?.next_vpid;
                 continue;
             }
@@ -147,6 +173,11 @@ pub fn rewrite_heap(
             v = chain.next_vpid;
         }
     }
+    if job.isolated.is_some_and(|d| d.pages != isolated_seen) {
+        return Err(invalid(format!(
+            "heap {hv:?}: a page rewritten as isolated is not in the heap chain"
+        )));
+    }
     st.load(hv)?;
     counts.add(rewrite_current_page(
         &mut st,
@@ -162,6 +193,7 @@ pub fn rewrite_heap(
         measured: walk,
         pages_read: st.pages().len() as u64,
         pages_rewritten: rewritten,
+        isolated_pages: isolated_seen,
         counts,
         appended_pages: st.appended_pages,
         stats: header.stats,
@@ -183,6 +215,7 @@ fn untouched(job: &HeapJob, src: &HeapHdrStats, bestspace_pages: &[Vpid]) -> Hea
         measured: false,
         pages_read: 1,
         pages_rewritten: 0,
+        isolated_pages: 0,
         counts: PageCounts::default(),
         appended_pages: 0,
         header: HeaderOutcome {

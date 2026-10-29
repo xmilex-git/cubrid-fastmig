@@ -54,6 +54,10 @@ _Avoid_: 쓰레기 레코드, MVCC 찌꺼기
 vacuum 잔여를 지우려고 레코드 단위로 고치는 힙 페이지. 힙 헤더 페이지는 항상 들어가고(develop 출발은 출발에 vacuum 작업이 남았을 때만), 데이터 페이지는 출발에서 vacuum 상태가 ONCE이거나, UNKNOWN이면서 max_mvccid가 출발의 가장 오래된 미처리 MVCCID 이상일 때 들어간다. 그 밖의 페이지는 체인 레코드까지 바이트 그대로 둔다. 재인코딩 클래스의 페이지는 이 구분 없이 전부 다시 쓴다. develop 출발의 bestspace 페이지는 레코드가 없어 대상이 아니다([workspace#499](https://github.com/xmilex-git/workspace/issues/499), [#501](https://github.com/xmilex-git/workspace/issues/501)).
 _Avoid_: vacuum 대상 페이지, 더러운 페이지
 
+**고립 페이지 (isolated page)**:
+재작성이 그 페이지 안에서 끝나는 힙 데이터 페이지. REC_RELOCATION·REC_BIGONE·REC_NEWHOME 슬롯이 없고, 체인의 마지막 페이지가 아니며, 모든 레코드가 제 슬롯에 다시 들어간다. page treatment는 모든 힙의 고립 페이지를 먼저 병렬로 다시 쓰고, 나머지 페이지와 새 페이지 할당은 힙마다 체인 순서로 처리한다. 결과 바이트는 체인 순서로만 처리했을 때와 같다([workspace#536](https://github.com/xmilex-git/workspace/issues/536)).
+_Avoid_: 독립 페이지, 병렬 페이지
+
 **볼륨 확장 (volume expansion)**:
 도착 DB의 영구 데이터 볼륨 하나의 섹터 수(`nsect_total`)를 그 볼륨의 최대(`nsect_max`)까지 늘리는 일. 새 인덱스·bestspace 페이지·재인코딩 레코드가 기존 여유 섹터에 다 들어가지 않을 때 엔진 자동 확장과 같은 규칙으로 먼저 한다([ADR 0013](docs/adr/0013-target-grows-like-engine-auto-extension.md)).
 _Avoid_: 볼륨 증설, 볼륨 늘리기, resize
