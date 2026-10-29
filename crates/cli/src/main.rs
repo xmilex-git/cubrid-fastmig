@@ -7,6 +7,7 @@
 //! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
 mod args;
+mod catalog_regeneration;
 mod finalize;
 mod heap_counter;
 mod limits;

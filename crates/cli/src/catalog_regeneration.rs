@@ -1,0 +1,210 @@
+//! The 11.4 → develop part of `migrate` between the volume copy and the new log: old catalog files freed, user heaps
+//! patched or re-encoded, the catalog regenerated (system rows, class objects, catalog file, `ctid`).
+//!
+//! Input: the [`SpaceManager`] over the target volumes, the source's log header, the worker limit and the
+//! page-treatment meter; between [`prepare`] and [`finish`] the caller creates the B-tree files (workspace#503). Output: the target volumes in
+//! develop's catalog format; a [`CatalogOutcome`] for report.json.
+//! Source: workspace#482 decision 10 (order: free, page treatment, index build, class objects and catalog);
+//! workspace#504 (catalog writer: `plan_catalog` before the BTIDs exist, `write_catalog` after, `write_bt_stats` once
+//! the B-trees are filled).
+
+use fastmig_catalog::catalog_layout::{CatalogLayout, plan_catalog};
+use fastmig_catalog::catalog_write::{index_build_classes, write_bt_stats, write_catalog};
+use fastmig_catalog::free_old_files::free_old_files;
+use fastmig_catalog::page_treatment::treat_user_heaps;
+use fastmig_catalog::source_catalog::SourceCatalog;
+use fastmig_catalog::template::CatalogTemplate;
+use fastmig_catalog::template_store::builtin;
+use fastmig_index::memory_limit::MemoryLimit;
+use fastmig_index::rebuild::{TargetClass as IndexClass, free_btree_files, rebuild_indexes};
+use fastmig_index::spill_dir::SpillDir;
+use fastmig_index::worker_limit::WorkerLimit;
+use fastmig_ondisk::boot_parm::BootDbParm;
+use fastmig_ondisk::catalog_dir::{BtStats, PKEYS_NUM};
+use fastmig_ondisk::file_alloc::SpaceManager;
+use fastmig_ondisk::heap_rewrite::{HeapReport, VacuumHorizon};
+use fastmig_ondisk::log_header::LogHeader;
+use fastmig_ondisk::value::Value;
+use fastmig_ondisk::{Btid, Oid, VersionLine};
+use fastmig_progress::Meter;
+use std::collections::{BTreeMap, HashMap};
+use std::io;
+
+use crate::limits::Limits;
+
+/// What the catalog part did, for report.json.
+pub struct CatalogOutcome {
+    pub freed_files: usize,
+    pub user_heaps: usize,
+    /// User heaps whose statistics were measured (every chain page read).
+    pub measured_heaps: usize,
+    pub rows_written: BTreeMap<&'static str, usize>,
+    pub new_slots: usize,
+    pub new_heaps: usize,
+    pub deleted_classes: usize,
+    pub catalog_pages: usize,
+    pub indexes_built: usize,
+}
+
+impl CatalogOutcome {
+    pub fn json(&self) -> String {
+        let rows: Vec<String> = self
+            .rows_written
+            .iter()
+            .map(|(t, n)| format!("\"{t}\": {n}"))
+            .collect();
+        format!(
+            "{{\"freed_files\": {}, \"user_heaps\": {}, \"measured_heaps\": {}, \"new_slots\": {}, \"new_heaps\": {}, \"deleted_classes\": {}, \"catalog_pages\": {}, \"indexes_built\": {}, \"rows_written\": {{{}}}}}",
+            self.freed_files,
+            self.user_heaps,
+            self.measured_heaps,
+            self.new_slots,
+            self.new_heaps,
+            self.deleted_classes,
+            self.catalog_pages,
+            self.indexes_built,
+            rows.join(", ")
+        )
+    }
+}
+
+/// The migrate start time as a DATETIME (`created_time` / `updated_time` of new catalog rows, workspace#482 8).
+fn now_datetime() -> Value {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    // Julian day of 1970-01-01 is 2440588
+    Value::Datetime {
+        date: (2_440_588 + ms.div_euclid(86_400_000)) as u32,
+        time: ms.rem_euclid(86_400_000) as u32,
+    }
+}
+
+/// The state between [`prepare`] and [`finish`]: the source catalog read before the first write and where the new
+/// catalog goes.
+pub struct Prepared {
+    source: SourceCatalog,
+    template: CatalogTemplate,
+    layout: CatalogLayout,
+    freed_files: usize,
+    reports: Vec<HeapReport>,
+}
+
+impl Prepared {
+    /// Classes whose heap statistics were measured (every chain page read), for verify.
+    pub fn measured(&self) -> impl Iterator<Item = Oid> + '_ {
+        self.reports
+            .iter()
+            .filter(|r| r.measured)
+            .map(|r| r.class_oid)
+    }
+}
+
+/// Frees the old catalog files, treats the user heaps (page-treatment phase), places the catalog and writes its rows.
+pub fn prepare(
+    space: &SpaceManager,
+    src_log: &LogHeader,
+    worker_limit: usize,
+    meter: Meter,
+) -> io::Result<Prepared> {
+    let vols = space.volumes();
+    let (_, boot) = BootDbParm::read(vols)?;
+    // everything the regeneration reads from the source catalog, before the first write
+    let source = SourceCatalog::read(vols, VersionLine::V11_4)?;
+    let template = builtin(VersionLine::Develop, source.charset).ok_or_else(|| {
+        io::Error::other(format!(
+            "no catalog template for charset {}",
+            source.charset
+        ))
+    })?;
+    let horizon = VacuumHorizon::read(vols, src_log, boot.vacuum_data_vfid)?;
+    // every old file goes before the first new allocation (workspace#482 10.2), B-trees included (workspace#503)
+    let freed_files = free_old_files(space, &source)?.len() + free_btree_files(space)?;
+    let reports = treat_user_heaps(space, &source, &horizon, worker_limit, meter)?;
+    let stats: HashMap<_, _> = reports.iter().map(|r| (r.hfid, r.stats)).collect();
+    let layout = plan_catalog(space, &source, &template, &horizon, &now_datetime(), stats)?;
+    Ok(Prepared {
+        source,
+        template,
+        layout,
+        freed_files,
+        reports,
+    })
+}
+
+/// Rebuilds every plain index (index-build phase), then writes the class objects with the new BTIDs, the catalog
+/// file and the B-tree statistics.
+pub fn finish(
+    space: &SpaceManager,
+    mut p: Prepared,
+    limits: &Limits,
+    worker_limit: usize,
+    index_meter: Meter,
+) -> io::Result<CatalogOutcome> {
+    let classes = index_build_classes(&p.source, &p.template, &p.layout)
+        .map_err(|e| io::Error::other(format!("class objects for the index rebuild: {e}")))?;
+    let owners: Vec<IndexClass> = classes
+        .iter()
+        .filter(|t| !t.class.heap.is_null())
+        .map(|t| IndexClass {
+            oid: t.oid,
+            class: &t.class,
+            hfid: t.class.heap,
+        })
+        .collect();
+    let workers = WorkerLimit::new(worker_limit);
+    let memory = MemoryLimit::new(usize::try_from(limits.memory_limit_bytes).unwrap_or(usize::MAX));
+    let spill = SpillDir::create(&limits.spill_dir)?;
+    let rebuilt = rebuild_indexes(
+        space,
+        &owners,
+        &fastmig_index::Limits {
+            workers: &workers,
+            memory: &memory,
+            spill: &spill,
+        },
+        Some(index_meter),
+    )
+    .map_err(|e| io::Error::other(format!("index rebuild: {e}")))?;
+    write_catalog(
+        space,
+        &mut p.layout,
+        &p.source,
+        &p.template,
+        &|class, name| rebuilt.by_constraint.get(&(class, name.to_vec())).copied(),
+    )?;
+    let stats: HashMap<Btid, BtStats> = rebuilt
+        .filled
+        .iter()
+        .map(|f| (f.btid, bt_stats(f.btid, &f.stats)))
+        .collect();
+    write_bt_stats(space, &mut p.layout, &|b| stats.get(&b).cloned())?;
+    Ok(CatalogOutcome {
+        freed_files: p.freed_files,
+        user_heaps: p.reports.len(),
+        measured_heaps: p.reports.iter().filter(|r| r.measured).count(),
+        rows_written: p.layout.rows_written.clone(),
+        new_slots: p.layout.new_slots.len(),
+        new_heaps: p.layout.new_heaps.len(),
+        deleted_classes: p.layout.deleted_classes.len(),
+        catalog_pages: p.layout.catalog_pages.len(),
+        indexes_built: rebuilt.filled.len(),
+    })
+}
+
+/// The disk-representation form of a filled index's statistics (`has_function` is set by the catalog writer).
+fn bt_stats(btid: Btid, s: &fastmig_index::bt_stats::BtStats) -> BtStats {
+    let mut pkeys = [0i64; PKEYS_NUM];
+    for (d, v) in pkeys.iter_mut().zip(&s.pkeys) {
+        *d = *v as i64;
+    }
+    BtStats {
+        btid,
+        leafs: s.leafs as i32,
+        pages: s.pages as i32,
+        height: s.height as i32,
+        has_function: 0,
+        keys: s.keys as i64,
+        pkeys,
+    }
+}

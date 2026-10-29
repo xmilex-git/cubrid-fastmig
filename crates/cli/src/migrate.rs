@@ -30,8 +30,9 @@ use fastmig_copy::{
 use fastmig_ondisk::Oid;
 use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::databases_txt::DatabaseEntry;
+use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::log_header::LogHeader;
-use fastmig_ondisk::volume_set::Locate;
+use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
@@ -39,6 +40,7 @@ use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
 use fastmig_verify::Role;
 
 use crate::args::{CliError, parse};
+use crate::catalog_regeneration;
 use crate::finalize::OUTSIDE_BASE;
 use crate::limits::{self, Limits};
 use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
@@ -89,10 +91,8 @@ const PHASES: &[PhaseSpec] = &[
 ];
 const VOLUME_COPY: usize = 2;
 /// Meter of the heap patch and re-encoding (workspace#503, #504): records done.
-#[allow(dead_code)]
 const PAGE_TREATMENT: usize = 4;
 /// Meter of the index build (workspace#503): keys done.
-#[allow(dead_code)]
 const INDEX_BUILD: usize = 5;
 const DURABLE_SYNC: usize = 9;
 
@@ -256,9 +256,33 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
 
     // Heap patch and re-encoding (workspace#503, #504) fill this set with the classes whose heap header statistics
     // they measured (`HeapReport.measured`); verify compares those.
-    let measured: BTreeSet<Oid> = BTreeSet::new();
-    rep.lap("page_treatment");
-    rep.lap("index_build");
+    let mut measured: BTreeSet<Oid> = BTreeSet::new();
+    let mut catalog = None;
+    if pair.regenerates_catalog() {
+        let vols = VolumeSet::open(&targets[0], Locate::Recorded, Access::ReadWrite)?;
+        let trk = BootDbParm::read(&vols)?.1.trk_vfid;
+        let space = SpaceManager::new(&vols, pair.target, trk);
+        let prepared = catalog_regeneration::prepare(
+            &space,
+            &src.log,
+            o.worker_limit,
+            rep.progress.meter(PAGE_TREATMENT),
+        )?;
+        measured.extend(prepared.measured());
+        rep.lap("page_treatment");
+        marker.create_dir_all(&o.limits.spill_dir)?;
+        catalog = Some(catalog_regeneration::finish(
+            &space,
+            prepared,
+            &o.limits,
+            o.worker_limit,
+            rep.progress.meter(INDEX_BUILD),
+        )?);
+        rep.lap("index_build");
+    } else {
+        rep.lap("page_treatment");
+        rep.lap("index_build");
+    }
     rep.lap("catalog_regeneration");
 
     let java = out_of_volume_asset::copy_dir_tree(
@@ -366,6 +390,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         keys.is_some(),
         &lob,
         &summary,
+        &catalog.map_or("null".into(), |c| c.json()),
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;
     if !passed {
@@ -432,6 +457,7 @@ fn report_json(
     keys: bool,
     lob: &AssetOutcome,
     verify_summary: &str,
+    catalog: &str,
 ) -> String {
     let steps: Vec<String> = rep
         .steps
@@ -457,7 +483,7 @@ fn report_json(
         )
     };
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"heap_peak_bytes\": {},\n  \"progress\": {}\n}}",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"catalog\": {catalog},\n  \"heap_peak_bytes\": {},\n  \"progress\": {}\n}}",
         line_name(plan.version_pair.source),
         line_name(plan.version_pair.target),
         o.worker_limit,

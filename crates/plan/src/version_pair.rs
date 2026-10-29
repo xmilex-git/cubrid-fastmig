@@ -25,10 +25,7 @@ impl VersionPair {
                     .into(),
             ),
             (s, t) if s == t => None,
-            (VersionLine::V11_4, VersionLine::Develop) => Some(
-                "version pair 11.4 -> develop: catalog writing is not wired yet (workspace#504)"
-                    .into(),
-            ),
+            (VersionLine::V11_4, VersionLine::Develop) => None,
             (s, t) => Some(format!(
                 "version pair {} -> {} is a downgrade (ADR 0003)",
                 line_name(s),
