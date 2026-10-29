@@ -17,6 +17,7 @@ pub mod develop_class_rewrite;
 pub mod disk_repr_build;
 pub mod dry_run;
 pub mod free_old_files;
+pub mod lob_dir_heap;
 pub mod output_sql;
 pub mod page_treatment;
 pub mod record_map;

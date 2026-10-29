@@ -34,6 +34,7 @@ E2E=$(dirname "$(realpath "$0")")
 [ ! -e "$OUT" ] || { echo "$OUT exists" >&2; exit 2; }
 mkdir -p "$OUT/log" "$OUT/src-dbs" "$OUT/dbs" "$OUT/unload"
 OUT=$(realpath "$OUT")
+cd "$OUT" || exit 2   # csql and unloaddb leave csql.err and logs in the cwd
 vinf=$(ls "$PRISTINE"/*_vinf 2>/dev/null | head -1)
 [ -n "$vinf" ] || { echo "no *_vinf in $PRISTINE" >&2; exit 2; }
 DB=$(basename "$vinf" _vinf)
@@ -113,10 +114,11 @@ if [ $registered = 1 ]; then
   step lob-contents 0 grep -q "lob-rows $nlob $nlob $nlob end" "$OUT/log/lob-sql.log"
   step server-stop 0 bash "$CTL" stop "$DB"
   cubrid service stop >"$OUT/log/service-stop.log" 2>&1
-  # every referenced LOB file of the manifest is still there after the engine booted and shut down the target
+  # every referenced LOB file of the manifest (last column: its target path) is still there after the engine booted
+  # and shut down the target
   # (develop removes top-level ces_* dirs of the lob-base at boot as temporary, CBRD-23700)
   [ ! -s "$TGT/fastmig/lob-manifest" ] || step lob-after-boot 0 awk -F'\t' -v d="$TGT/lob" \
-    '{ if (system("test -f \"" d "/" $2 "\"")) { print "missing " $2; n++ } } END { print NR - n " of " NR " present"; exit n > 0 }' \
+    '{ if (system("test -f \"" d "/" $NF "\"")) { print "missing " $NF; n++ } } END { print NR - n " of " NR " present"; exit n > 0 }' \
     "$TGT/fastmig/lob-manifest"
   # every smoke query has an index scan in its plan and none errored
   step smoke-plans 0 bash -c '! grep -q "^ERROR" "$1" && [ "$(grep -c "^ *Index scan(" "$1")" -ge "$2" ]' _ \

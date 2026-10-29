@@ -6,7 +6,8 @@
 //! incomplete marker. Output: counts per copy method, and the manifest entries whose source file is missing (a
 //! pre-existing defect: skipped and reported, not an error).
 //! Source: decision G6 workspace#488 (copy referenced files only, clone first; Java directories copied as is);
-//! ADR 0009.
+//! ADR 0009; workspace#507 (11.4 → develop: each file goes to its target path in develop's per-attribute LOB
+//! directory, and every LOB attribute's directory is made, as the engine does at CREATE TABLE).
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -28,32 +29,43 @@ pub struct AssetOutcome {
     pub missing: Vec<PathBuf>,
 }
 
-/// Copies the manifest's files from `src_base` to `dst_base`, keeping each relative path.
+/// Copies the manifest's files from `src_base/<rel_path>` to `dst_base/<target_rel>`, after making `lob_dirs`
+/// (relative to `dst_base`).
 pub fn copy_referenced_lob_files(
     src_base: &Path,
     dst_base: &Path,
     entries: &[ReferencedLobFile],
+    lob_dirs: &[PathBuf],
     worker_limit: usize,
     marker: &IncompleteMarker,
 ) -> io::Result<AssetOutcome> {
-    for e in entries {
-        // a locator path must stay below the base (it is joined to both roots)
-        if !e
-            .rel_path
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
-        {
-            return Err(io::Error::other(format!(
+    // a locator path must stay below the base (it is joined to a root)
+    let below = |p: &Path| {
+        if p.components().all(|c| matches!(c, Component::Normal(_))) {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
                 "LOB path leaves the base: {}",
-                e.rel_path.display()
-            )));
+                p.display()
+            )))
         }
-        if let Some(parent) = e.rel_path.parent() {
+    };
+    marker.create_dir_all(dst_base)?;
+    for d in lob_dirs {
+        below(d)?;
+        marker.create_dir_all(&dst_base.join(d))?;
+    }
+    for e in entries {
+        below(&e.rel_path)?;
+        below(&e.target_rel)?;
+        if let Some(parent) = e.target_rel.parent() {
             marker.create_dir_all(&dst_base.join(parent))?;
         }
     }
-    marker.create_dir_all(dst_base)?;
-    let files: Vec<PathBuf> = entries.iter().map(|e| e.rel_path.clone()).collect();
+    let files: Vec<(PathBuf, PathBuf)> = entries
+        .iter()
+        .map(|e| (e.rel_path.clone(), e.target_rel.clone()))
+        .collect();
     copy_files(src_base, dst_base, &files, worker_limit, marker, true)
 }
 
@@ -69,6 +81,7 @@ pub fn copy_dir_tree(
     }
     let mut files = Vec::new();
     walk(src, Path::new(""), dst, marker, &mut files)?;
+    let files: Vec<(PathBuf, PathBuf)> = files.into_iter().map(|f| (f.clone(), f)).collect();
     copy_files(src, dst, &files, worker_limit, marker, false)
 }
 
@@ -101,23 +114,24 @@ fn walk(
 fn copy_files(
     src_root: &Path,
     dst_root: &Path,
-    files: &[PathBuf],
+    files: &[(PathBuf, PathBuf)],
     worker_limit: usize,
     marker: &IncompleteMarker,
     missing_ok: bool,
 ) -> io::Result<AssetOutcome> {
     let out = Mutex::new(AssetOutcome::default());
     worker_pool::run(files.len(), worker_limit, |i| {
-        let src = src_root.join(&files[i]);
+        let (src_rel, dst_rel) = &files[i];
+        let src = src_root.join(src_rel);
         let src_file = match File::open(&src) {
             Ok(f) => f,
             Err(e) if missing_ok && e.kind() == io::ErrorKind::NotFound => {
-                out.lock().unwrap().missing.push(files[i].clone());
+                out.lock().unwrap().missing.push(src_rel.clone());
                 return Ok(());
             }
             Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", src.display()))),
         };
-        let (method, bytes) = copy_file(&src_file, &dst_root.join(&files[i]), marker)?;
+        let (method, bytes) = copy_file(&src_file, &dst_root.join(dst_rel), marker)?;
         let mut o = out.lock().unwrap();
         match method {
             CopyMethod::Clone => o.cloned += 1,

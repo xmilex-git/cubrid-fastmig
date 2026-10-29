@@ -77,7 +77,7 @@ _Avoid_: 카탈로그 변환, 카탈로그 업그레이드(엔진 upgradedb와 �
 _Avoid_: 템플릿 DB(파일 자체와 섞인다), 시드
 
 **재인코딩 클래스 (re-encoded class)**:
-어느 representation에든 값 인코딩이 바뀐 타입이 있어서, 모든 레코드를 현재 representation으로 다시 쓰는 클래스. 그 밖의 클래스는 레코드와 representation을 그대로 둔다.
+어느 representation에든 값 인코딩이 바뀐 타입이 있거나 LOB 속성이 있어서(LOB 로케이터가 develop의 속성별 LOB 디렉터리로 바뀜, workspace#507), 모든 레코드를 현재 representation으로 다시 쓰는 클래스. 그 밖의 클래스는 레코드와 representation을 그대로 둔다.
 _Avoid_: TRANSFORM 클래스(페이지 처리 등급 transform과 섞인다), 변환 클래스
 
 **일반 인덱스 (plain index)**:
@@ -140,7 +140,7 @@ DB에 속하지만 볼륨 파일 바깥에 있는 파일. LOB 외부 파일(lob-
 _Avoid_: 외부 파일(LOB 파일만 가리키는 것으로 읽힌다), 부속 파일
 
 **참조 LOB 파일 (referenced LOB file)**:
-출발 DB의 레코드에 있는 LOB 로케이터가 가리키는 lob-base-path 아래의 파일. 도구가 옮기고, 나중에 지우는 단위다.
+출발 DB의 레코드에 있는 LOB 로케이터가 가리키는 lob-base-path 아래의 파일. 도구가 옮기고, 나중에 지우는 단위다. 11.4 → develop에서는 도착의 속성별 LOB 디렉터리(`<힙 헤더 pageid><volid><fileid><attrid>`)로 옮긴다.
 
 **고아 LOB 파일 (orphan LOB file)**:
 lob-base-path 아래에 있지만 어느 레코드의 로케이터도 가리키지 않는 파일. 11.4는 DROP TABLE 때 LOB 파일을 지우지 않으므로 정상적으로도 쌓인다. 같은 lob-base-path를 쓰는 다른 DB의 파일도 이것과 구별할 수 없다. 옮기지도 지우지도 않고 보고만 한다.

@@ -442,10 +442,12 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             None
         }
     };
-    let lob = lob_scan::scan(i.vols, line, &classes, lob_base.as_deref())?;
-    if lob.absolute_under_base > 0 {
-        // shortcut: G6 3 rewrites these records as relative; no source line this tool reads writes them, so the
-        // record rewrite is not built until a source has them
+    let lob = lob_scan::scan(i.vols, line, &classes, lob_base.as_deref(), regenerates)?;
+    // 11.4 → develop re-encodes LOB classes and rewrites these locators (workspace#507); the same-version path
+    // copies pages as they are
+    if lob.absolute_under_base > 0 && !regenerates {
+        // shortcut: the same-version path has no record rewrite; 11.4 written by unloaddb/loaddb from 11.3 or
+        // older has these (workspace#507), a develop source would need it
         refusals.push(format!(
             "{} LOB locators are absolute paths under the lob-base-path; their rewrite is not built (workspace#488 3)",
             lob.absolute_under_base

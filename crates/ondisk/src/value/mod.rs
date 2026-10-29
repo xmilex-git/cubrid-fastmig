@@ -26,7 +26,7 @@ pub use db_type::DbType;
 pub use db_value::{SetElement, SetValue, Value};
 pub use develop_map::{changes_in_develop, domain_to_develop, value_to_develop};
 pub use domain::{CollationFlag, Domain};
-pub use elo::{Elo, LobPath};
+pub use elo::{Elo, LobPath, develop_lob_dir, develop_lob_rel_path};
 pub use index_image::Collation;
 pub use key_domain::{KeyColumn, KeyDomain};
 pub use numeric::Numeric;

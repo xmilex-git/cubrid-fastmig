@@ -117,7 +117,8 @@ pub fn classify(classes: &[SourceClass]) -> Vec<ClassPlan> {
             let mut re_encoded = false;
             for (att, chain) in attribute_domains(c) {
                 match schema_domain(VersionLine::V11_4, chain) {
-                    Ok(d) => re_encoded |= changes_in_develop(&d),
+                    // a LOB locator moves to develop's per-attribute directory (workspace#507)
+                    Ok(d) => re_encoded |= changes_in_develop(&d) || matches!(d.ty, DbType::Blob | DbType::Clob),
                     Err(e) => refusals.push(format!("{name}: attribute id {att}: {e}")),
                 }
             }

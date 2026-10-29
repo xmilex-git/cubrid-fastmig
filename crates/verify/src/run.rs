@@ -197,8 +197,12 @@ pub fn verify_database(
             r.heaps += 1;
             r.defects
                 .extend(check_chain(t, &p, measured.contains(&sc.oid)));
-            r.defects
-                .extend(check_lobs(&p.lobs, db.lob_base.as_deref(), &t.name));
+            r.defects.extend(check_lobs(
+                &p.lobs,
+                db.lob_base.as_deref(),
+                db.line,
+                &t.name,
+            ));
             r.lobs += p.lobs.len();
             live.add(sc.oid, &p.live);
             refs.extend(p.refs);

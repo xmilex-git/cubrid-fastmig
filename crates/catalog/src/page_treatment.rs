@@ -7,9 +7,11 @@
 //! heap, in class order.
 //! Source: workspace#482 decision 10.3 (after the old files are freed, before the index builds); workspace#499
 //! hand-over (`rewrite_heap` per heap with `ClassReEncoder` for a re-encoded class; heaps are independent because the
-//! `SpaceManager` serializes space changes); workspace#481 (one worker limit for the run).
+//! `SpaceManager` serializes space changes); workspace#481 (one worker limit for the run); workspace#507 (LOB
+//! locators of a re-encoded class move to develop's per-attribute directories).
 
 use std::io;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -21,6 +23,7 @@ use fastmig_ondisk::heap_rewrite::{
 use fastmig_progress::Meter;
 
 use crate::classify::ClassKind;
+use crate::lob_dir_heap::lob_dir_heap;
 use crate::source_catalog::SourceCatalog;
 
 fn invalid(msg: String) -> io::Error {
@@ -31,6 +34,7 @@ pub fn treat_user_heaps(
     space: &SpaceManager,
     source: &SourceCatalog,
     horizon: &VacuumHorizon,
+    lob_base: Option<&Path>,
     worker_limit: usize,
     meter: Meter,
 ) -> io::Result<Vec<HeapReport>> {
@@ -48,7 +52,7 @@ pub fn treat_user_heaps(
                 loop {
                     let j = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&i) = jobs.get(j) else { break };
-                    let r = treat_one(space, source, horizon, i, meter);
+                    let r = treat_one(space, source, horizon, lob_base, i, meter);
                     reports.lock().unwrap()[j] = Some(r);
                 }
             });
@@ -66,6 +70,7 @@ fn treat_one(
     space: &SpaceManager,
     source: &SourceCatalog,
     horizon: &VacuumHorizon,
+    lob_base: Option<&Path>,
     i: usize,
     meter: Meter,
 ) -> io::Result<HeapReport> {
@@ -76,6 +81,15 @@ fn treat_one(
         .re_encoded
         .then(|| ClassReEncoder::new(&c.class, true))
         .transpose()
+        // LOB locators move to develop's per-attribute directories (workspace#507)
+        .map(|r| {
+            r.map(|r| {
+                r.with_lob_dirs(
+                    lob_dir_heap(c, &source.classes),
+                    lob_base.map(Path::to_path_buf),
+                )
+            })
+        })
         .map_err(|e| invalid(format!("{}: {e}", plan.name)))?;
     let report = rewrite_heap(
         space,

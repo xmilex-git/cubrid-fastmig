@@ -32,6 +32,7 @@ use fastmig_ondisk::{Btid, Oid, VersionLine};
 use fastmig_progress::Meter;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
+use std::path::Path;
 
 use crate::limits::Limits;
 
@@ -107,6 +108,7 @@ impl Prepared {
 pub fn prepare(
     space: &SpaceManager,
     src_log: &LogHeader,
+    src_lob_base: Option<&Path>,
     worker_limit: usize,
     meter: Meter,
 ) -> io::Result<Prepared> {
@@ -123,7 +125,7 @@ pub fn prepare(
     let horizon = VacuumHorizon::read(vols, src_log, boot.vacuum_data_vfid)?;
     // every old file goes before the first new allocation (workspace#482 10.2), B-trees included (workspace#503)
     let freed_files = free_old_files(space, &source)?.len() + free_btree_files(space)?;
-    let reports = treat_user_heaps(space, &source, &horizon, worker_limit, meter)?;
+    let reports = treat_user_heaps(space, &source, &horizon, src_lob_base, worker_limit, meter)?;
     let stats: HashMap<_, _> = reports.iter().map(|r| (r.hfid, r.stats)).collect();
     let layout = plan_catalog(space, &source, &template, &horizon, &now_datetime(), stats)?;
     Ok(Prepared {

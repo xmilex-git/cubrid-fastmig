@@ -11,13 +11,17 @@
 //! `db_ha_apply_info` in 11.4).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::class_object::ClassObject;
 use crate::record::layout::RecordLayout;
 use crate::record::mvcc_header::RecordHeader;
 use crate::record::record_codec::{decode_record, encode_record};
-use crate::value::{DecodeError, DecodeResult, OrReader, Value, decode_tagged, value_to_develop};
-use crate::{Oid, VersionLine};
+use crate::value::{
+    DecodeError, DecodeResult, OrReader, Value, decode_tagged, develop_lob_dir,
+    develop_lob_rel_path, value_to_develop,
+};
+use crate::{Hfid, Oid, VersionLine};
 
 /// Turns a record of a heap into its develop form. Implemented by [`ClassReEncoder`]; callers with their own row
 /// source (system catalog rows) can supply another.
@@ -41,6 +45,8 @@ pub struct ClassReEncoder {
     /// Original default value of each current attribute (`Value::Null` when it has none), develop form.
     defaults: HashMap<i32, Value>,
     mvcc: bool,
+    /// The class heap and the source lob-base-path, when LOB locators move to develop's per-attribute directories.
+    lob_dirs: Option<(Hfid, Option<PathBuf>)>,
 }
 
 impl ClassReEncoder {
@@ -72,7 +78,29 @@ impl ClassReEncoder {
             target,
             defaults,
             mvcc,
+            lob_dirs: None,
         })
+    }
+
+    /// Rewrites each LOB locator to its file's place in develop's directory of (`heap`, attribute): a relative
+    /// locator or an absolute one under `lob_base`; an absolute locator outside it stays (G6 workspace#488).
+    /// The copy step puts the files there (workspace#507, CBRD-23700).
+    pub fn with_lob_dirs(mut self, heap: Hfid, lob_base: Option<PathBuf>) -> Self {
+        self.lob_dirs = Some((heap, lob_base));
+        self
+    }
+
+    fn relocate_lob(&self, attrid: i32, v: Value) -> Value {
+        match (v, &self.lob_dirs) {
+            (Value::Elo(mut e), Some((heap, base))) => {
+                let dir = develop_lob_dir(*heap, attrid);
+                if let Some(rel) = develop_lob_rel_path(&e.lob_path(), base.as_deref(), &dir) {
+                    e.locator = format!("file:{}", rel.display()).into_bytes();
+                }
+                Value::Elo(e)
+            }
+            (v, _) => v,
+        }
     }
 
     /// The develop layout records are written under.
@@ -99,7 +127,7 @@ impl ReEncode for ClassReEncoder {
             .attrs
             .iter()
             .map(|a| match by_id.get(&a.id) {
-                Some(v) => value_to_develop(v),
+                Some(v) => self.relocate_lob(a.id, value_to_develop(v)),
                 None => self.defaults.get(&a.id).cloned().unwrap_or(Value::Null),
             })
             .collect();

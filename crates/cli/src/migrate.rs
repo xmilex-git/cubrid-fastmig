@@ -265,6 +265,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         let prepared = catalog_regeneration::prepare(
             &space,
             &src.log,
+            src_lob_base.as_deref(),
             o.worker_limit,
             rep.progress.meter(PAGE_TREATMENT),
         )?;
@@ -320,6 +321,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
             base,
             &o.lob_dir,
             &plan.lob.referenced,
+            &plan.lob.lob_dirs,
             o.worker_limit,
             &marker,
         )?,

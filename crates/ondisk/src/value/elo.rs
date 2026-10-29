@@ -5,8 +5,10 @@
 //! Source: engine `src/object/object_primitive.c` `mr_data_writemem_elo`, `peekmem_elo` (develop @5b1867174
 //! :5847, :5885; release/11.4 the same), `or_packed_string_length` (`object_representation.c:2216`); locator forms
 //! `src/storage/es_posix.c` `es_make_abs_path`, `es_common.c` `es_get_type`; G6 workspace#488 (11.4 stores
-//! `file:` paths relative to lob-base-path; 10.2–11.3 absolute).
+//! `file:` paths relative to lob-base-path; 10.2–11.3 absolute, CBRD-25446); workspace#507 (develop per-attribute
+//! LOB directories, CBRD-23700).
 
+use crate::Hfid;
 use crate::value::db_type::DbType;
 use crate::value::or_buf::{DecodeResult, OrReader, OrWriter};
 
@@ -97,4 +99,36 @@ pub fn write_elo(w: &mut OrWriter, e: &Elo) {
     write_c_string(w, Some(&e.locator));
     write_c_string(w, e.meta_data.as_deref());
     w.i32(e.elo_type);
+}
+
+/// develop's LOB directory of one attribute of one heap, relative to the lob-base-path: the heap's header page id,
+/// VFID volid, VFID fileid (`HFID_AS_ARGS`, storage_common.h:200) and the attribute id as decimal numbers run
+/// together (engine `locator_lob_make_dir_path`, develop locator_sr.c:14001, and
+/// `heap_attrinfo_transform_variable_to_disk` heap_file.c:12636, CBRD-23700). Checked on develop T1: product heap
+/// 1|1280|1281, attribute 0 → `1281112800`. develop keeps each LOB file at `<this dir>/ces_NNN/<file>`; a `ces_*` directory
+/// right under the lob-base-path is temporary to develop and removed at every boot and shutdown (workspace#507).
+pub fn develop_lob_dir(hfid: Hfid, attrid: i32) -> String {
+    format!(
+        "{}{}{}{attrid}",
+        hfid.pageid, hfid.vfid.volid, hfid.vfid.fileid
+    )
+}
+
+/// Where an 11.4 locator's file goes in a develop target: `<develop_lob_dir>/<path below the base>`. `None` for a
+/// locator the tool leaves as is (an absolute path outside `base`, another scheme). An absolute locator under
+/// `base` moves like a relative one: develop would remove its `ces_*` directory at boot (workspace#507).
+pub fn develop_lob_rel_path(
+    lob: &LobPath<'_>,
+    base: Option<&std::path::Path>,
+    dir: &str,
+) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let below = match *lob {
+        LobPath::Relative(p) => std::path::Path::new(std::ffi::OsStr::from_bytes(p)),
+        LobPath::Absolute(p) => std::path::Path::new(std::ffi::OsStr::from_bytes(p))
+            .strip_prefix(base?)
+            .ok()?,
+        LobPath::Unsupported(_) => return None,
+    };
+    Some(std::path::Path::new(dir).join(below))
 }
