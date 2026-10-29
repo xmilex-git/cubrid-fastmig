@@ -8,8 +8,8 @@
 
 use super::or_be::{Structure, opt_string, read_oid, within};
 use super::sub_set;
-use crate::Oid;
-use crate::value::{DecodeResult, read_string};
+use crate::value::{CollationFlag, DbType, DecodeResult, Domain, read_string};
+use crate::{Oid, VersionLine};
 
 /// One domain as the class object stores it. `type_id` is the raw `DB_TYPE` of the record's release line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +30,29 @@ pub struct SchemaDomain {
 }
 
 impl SchemaDomain {
+    /// The same domain as the value codec models it (engine: the class loader builds one `TP_DOMAIN` from this
+    /// substructure); `None` when the type id is not one `line` stores.
+    pub fn to_value_domain(&self, line: VersionLine) -> Option<Domain> {
+        Some(Domain {
+            ty: DbType::from_id(line, u32::try_from(self.type_id).ok()?)?,
+            precision: self.precision,
+            scale: self.scale,
+            codeset: self.codeset as u8,
+            collation_id: self.collation_id,
+            collation_flag: CollationFlag::Normal,
+            is_desc: false,
+            class_oid: (!self.class_oid.is_null()).then_some(self.class_oid),
+            set_domain: self
+                .set_domain
+                .iter()
+                .map(|d| d.to_value_domain(line))
+                .collect::<Option<_>>()?,
+            enum_labels: self.enumeration.clone(),
+            json_schema: self.json_schema.clone(),
+            builtin: false,
+        })
+    }
+
     pub(crate) fn decode(elem: &[u8]) -> DecodeResult<SchemaDomain> {
         let s = Structure::new(elem, 3)?;
         let mut f = s.fixed();
