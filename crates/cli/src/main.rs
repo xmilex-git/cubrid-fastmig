@@ -5,6 +5,7 @@
 //! Source: decision G1 workspace#481 (commands plan, migrate, verify, finalize). Only `migrate` exists so far.
 
 mod args;
+mod limits;
 mod migrate;
 mod template_extract;
 

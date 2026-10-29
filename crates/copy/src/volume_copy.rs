@@ -17,8 +17,8 @@ use crate::clone_file::try_clone;
 use crate::incomplete_marker::IncompleteMarker;
 use crate::worker_pool;
 
-/// Bytes one copy task moves; also each worker's buffer size.
-const CHUNK_BYTES: u64 = 8 << 20;
+/// Bytes one copy task moves; also each worker's buffer size, the copy engine's only per-worker memory.
+pub const CHUNK_BYTES: u64 = 8 << 20;
 
 pub struct VolumeJob {
     pub volid: i16,

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use fastmig_copy::asset_copy::{self, AssetOutcome};
+use fastmig_copy::volume_copy::CHUNK_BYTES;
 use fastmig_copy::{
     IncompleteMarker, NoPatch, VolumeJob, VolumeOutcome, copy_volumes, durable, lob_manifest,
     new_log, new_log_start, open_locked_log, open_source, register_db, volinfo, volume_paths,
@@ -26,6 +27,7 @@ use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 
 use crate::args::{CliError, parse};
+use crate::limits::{self, Limits};
 
 const HELP: &str = "\
 cubrid-fastmig migrate <db> --dest <dir> [options]
@@ -38,6 +40,8 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
   --lob-dir <dir>                target lob-base-path (default: <dest>/lob)
   --lob-manifest <file>          referenced LOB files (<size>\\t<relative path> per line); without it no LOB
                                  file is copied (the locator scan that builds it comes with workspace#484)
+  --mem <size>                   memory cap for the whole run, e.g. 16G (default: physical memory / 4)
+  --spill-dir <dir>              where stages over the cap spill (default: <dest>/fastmig/spill)
   --no-clone                     byte-copy even where the filesystem could clone (copy-mode measurement)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
@@ -66,10 +70,12 @@ struct Options {
     lob_manifest: Option<PathBuf>,
     allow_clone: bool,
     locate: Locate,
+    limits: Limits,
 }
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
-    let p = parse(argv, FLAGS, SWITCHES)?;
+    let flags = [FLAGS, limits::FLAGS].concat();
+    let p = parse(argv, &flags, SWITCHES)?;
     if p.switch("--help") {
         println!("{HELP}");
         return Ok(());
@@ -125,8 +131,17 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         } else {
             Locate::Recorded
         },
+        limits: Limits::from(&p, &dest)?,
         dest,
     };
+    // the copy engine streams every volume through one fixed buffer per worker
+    if (o.workers as u64).saturating_mul(CHUNK_BYTES) > o.limits.mem_bytes {
+        return Err(CliError::Usage(format!(
+            "--workers {} needs {} MiB of copy buffers, over --mem",
+            o.workers,
+            (o.workers as u64 * CHUNK_BYTES) >> 20
+        )));
+    }
     migrate(&o).map_err(CliError::Failed)
 }
 
@@ -370,8 +385,10 @@ fn report_json(
         )
     };
     format!(
-        "{{\n  \"workers\": {},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid}\n}}",
+        "{{\n  \"workers\": {},\n  \"mem_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid}\n}}",
         o.workers,
+        o.limits.mem_bytes,
+        o.limits.spill_dir,
         steps.join(", "),
         vols.join(", "),
         asset(java[0]),
