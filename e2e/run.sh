@@ -100,7 +100,10 @@ if [ $registered = 1 ]; then
   done
   # 6. target unloaddb, set comparison against the source's engine unload
   step target-unload 0 bash -c 'cd "$1" && cubrid unloaddb -S -O "$1" "$2"' _ "$OUT/unload" "$DB"
-  step set-comparison 0 "$BIN" set-comparison "$REF" "$OUT/unload/$DB" --diff "$OUT/set-comparison.diff"
+  # the two engine lines come from the plan, so the pair's unloaddb print differences are normalized (workspace#502)
+  pair=$(sed -n 's/.*"version_pair": {"source": "\([^"]*\)", "target": "\([^"]*\)"}.*/\1 \2/p' "$OUT/plan.json")
+  step set-comparison 0 "$BIN" set-comparison "$REF" "$OUT/unload/$DB" --diff "$OUT/set-comparison.diff" \
+    --source-version "${pair% *}" --target-version "${pair#* }"
   # 7. engine smoke: CS server on the target, SELECTs and their plans
   step server-start 0 bash "$CTL" start "$DB"
   step smoke-sql 0 csql -C -u dba -i "$E2E/smoke.sql" "$DB"
