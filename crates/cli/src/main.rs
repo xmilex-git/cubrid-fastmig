@@ -7,6 +7,7 @@
 mod args;
 mod limits;
 mod migrate;
+mod partition_streams;
 mod template_extract;
 
 use std::process::ExitCode;
@@ -19,6 +20,7 @@ fn main() -> ExitCode {
     let result = match argv.first().map(String::as_str) {
         Some("migrate") => migrate::run(&argv[1..]),
         Some("template-extract") => template_extract::run(&argv[1..]),
+        Some("partition-streams") => partition_streams::run(&argv[1..]),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
