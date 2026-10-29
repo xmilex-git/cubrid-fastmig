@@ -33,7 +33,9 @@ version = "0.1.0"
 dependencies = [
  "fastmig-catalog",
  "fastmig-copy",
+ "fastmig-index",
  "fastmig-ondisk",
+ "fastmig-verify",
 ]
 
 [[package]]
@@ -82,6 +84,11 @@ version = "0.1.0"
 [[package]]
 name = "fastmig-verify"
 version = "0.1.0"
+dependencies = [
+ "fastmig-catalog",
+ "fastmig-index",
+ "fastmig-ondisk",
+]
 
 [[package]]
 name = "generic-array"

@@ -122,11 +122,15 @@ impl<'a> SlottedPage<'a> {
     }
 
     /// Slot `slotid` as stored, unchecked: (offset, length, record type bits); `None` past `num_slots`.
-    /// For checkers that must see the slots `record` treats as unknown.
+    /// For the verifier, which must see the slots `record` treats as unknown.
     pub fn raw_slot(&self, slotid: usize) -> Option<(usize, usize, u32)> {
         (slotid < self.num_slots()).then(|| {
             let raw = get_u32(self.area, slot_pos(self.area.len(), slotid));
-            ((raw & 0x3fff) as usize, (raw >> 14 & 0x3fff) as usize, raw >> 28)
+            (
+                (raw & 0x3fff) as usize,
+                (raw >> 14 & 0x3fff) as usize,
+                raw >> 28,
+            )
         })
     }
 
