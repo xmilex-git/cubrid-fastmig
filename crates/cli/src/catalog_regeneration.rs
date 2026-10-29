@@ -223,18 +223,32 @@ fn bt_stats(btid: Btid, s: &fastmig_index::bt_stats::BtStats) -> BtStats {
     }
 }
 
-/// The same-version (develop → develop) catalog writes: heaps patched (page-treatment phase), the deferred
-/// indexes' catalog rows removed, every index rebuilt (index-build phase), class objects and catalog file written
-/// with the new BTIDs, then the B-tree statistics. Returns the outcome and the classes whose heap statistics were
-/// measured.
-pub fn same_version(
+/// The state between [`same_version_prepare`] and [`same_version_finish`]: the target's develop catalog read before
+/// the first write, and what the page treatment did.
+pub struct SameVersionPrepared {
+    cat: DevelopCatalog,
+    freed_files: usize,
+    reports: Vec<HeapReport>,
+    deleted_rows: usize,
+}
+
+impl SameVersionPrepared {
+    /// Classes whose heap statistics were measured (every chain page read), for verify.
+    pub fn measured(&self) -> impl Iterator<Item = Oid> + '_ {
+        self.reports
+            .iter()
+            .filter(|r| r.measured && !r.class_oid.is_null())
+            .map(|r| r.class_oid)
+    }
+}
+
+/// The same-version (develop → develop) first half: the catalog file and every B-tree freed, heaps patched
+/// (page-treatment phase), the deferred indexes' catalog rows removed.
+pub fn same_version_prepare(
     space: &SpaceManager,
     src_log: &LogHeader,
-    limits: &Limits,
-    worker_limit: usize,
     treatment_meter: Meter,
-    index_meter: Meter,
-) -> io::Result<(CatalogOutcome, Vec<Oid>)> {
+) -> io::Result<SameVersionPrepared> {
     let vols = space.volumes();
     let (_, boot) = BootDbParm::read(vols)?;
     let cat = DevelopCatalog::read(vols)?;
@@ -243,7 +257,25 @@ pub fn same_version(
     let freed_files = free_catalog_file(space)? + free_btree_files(space)?;
     let reports = patch_heaps(space, &cat, &horizon, treatment_meter)?;
     let deleted_rows = remove_deferred_rows(space, &cat)?;
-    let owners: Vec<IndexClass> = cat
+    Ok(SameVersionPrepared {
+        cat,
+        freed_files,
+        reports,
+        deleted_rows,
+    })
+}
+
+/// The same-version second half: every index rebuilt (index-build phase), class objects and catalog file written
+/// with the new BTIDs, then the B-tree statistics.
+pub fn same_version_finish(
+    space: &SpaceManager,
+    p: SameVersionPrepared,
+    limits: &Limits,
+    worker_limit: usize,
+    index_meter: Meter,
+) -> io::Result<CatalogOutcome> {
+    let owners: Vec<IndexClass> = p
+        .cat
         .classes
         .iter()
         .filter(|c| !c.class.heap.is_null())
@@ -268,10 +300,10 @@ pub fn same_version(
     )
     .map_err(|e| io::Error::other(format!("index rebuild: {e}")))?;
     // after the patch every heap's header holds its statistics: measured, or the source's kept as is
-    let heap_stats: HashMap<_, _> = reports.iter().map(|r| (r.hfid, r.stats)).collect();
+    let heap_stats: HashMap<_, _> = p.reports.iter().map(|r| (r.hfid, r.stats)).collect();
     let mut layout = write_classes_and_catalog(
         space,
-        &cat,
+        &p.cat,
         &|b| rebuilt.by_old_btid.get(&b).copied(),
         &heap_stats,
     )?;
@@ -282,24 +314,16 @@ pub fn same_version(
         .collect();
     write_bt_stats(space, &mut layout, &|b| stats.get(&b).cloned())?;
     let mut rows_written = BTreeMap::new();
-    rows_written.insert("deleted deferred-index rows", deleted_rows);
-    let measured = reports
-        .iter()
-        .filter(|r| r.measured && !r.class_oid.is_null())
-        .map(|r| r.class_oid)
-        .collect();
-    Ok((
-        CatalogOutcome {
-            freed_files,
-            user_heaps: reports.len(),
-            measured_heaps: reports.iter().filter(|r| r.measured).count(),
-            rows_written,
-            new_slots: 0,
-            new_heaps: 0,
-            deleted_classes: 0,
-            catalog_pages: layout.catalog_pages.len(),
-            indexes_built: rebuilt.filled.len(),
-        },
-        measured,
-    ))
+    rows_written.insert("deleted deferred-index rows", p.deleted_rows);
+    Ok(CatalogOutcome {
+        freed_files: p.freed_files,
+        user_heaps: p.reports.len(),
+        measured_heaps: p.reports.iter().filter(|r| r.measured).count(),
+        rows_written,
+        new_slots: 0,
+        new_heaps: 0,
+        deleted_classes: 0,
+        catalog_pages: layout.catalog_pages.len(),
+        indexes_built: rebuilt.filled.len(),
+    })
 }

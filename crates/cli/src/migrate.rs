@@ -282,16 +282,20 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         c
     } else {
         // the same-version path: patch, deferred indexes out, every index rebuilt (workspace#501, #503, #504)
-        let (c, m) = catalog_regeneration::same_version(
+        let prepared = catalog_regeneration::same_version_prepare(
             &space,
             &src.log,
+            rep.progress.meter(PAGE_TREATMENT),
+        )?;
+        measured.extend(prepared.measured());
+        rep.lap("page_treatment");
+        let c = catalog_regeneration::same_version_finish(
+            &space,
+            prepared,
             &o.limits,
             o.worker_limit,
-            rep.progress.meter(PAGE_TREATMENT),
             rep.progress.meter(INDEX_BUILD),
         )?;
-        measured.extend(m);
-        rep.lap("page_treatment");
         rep.lap("index_build");
         c
     };
