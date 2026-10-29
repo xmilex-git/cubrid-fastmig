@@ -1,7 +1,7 @@
 //! Rewrites the records whose home is the current heap page: vacuum-residue removal (patch) or re-encoding, then
 //! the page's slotted area compacted, the 11.4-only header bit cleared and the chain record reset.
 //!
-//! Input: a [`HeapState`] whose current page is the page to rewrite, and the [`PageMode`]. Output: the page (and the
+//! Input: a [`HeapState`] whose current page is the page to rewrite, and the [`PageTreatment`]. Output: the page (and the
 //! NEWHOME/overflow pages its records reach) edited; counts in [`PageCounts`].
 //! Source: R2 § 3 R3 (record rules; a REC_NEWHOME is reached from its home, never on its own; slots are never
 //! removed), R4 (`spage_compact` result, `need_update_best_hint` cleared), R5 (chain `max_mvccid` = 0, flags = 0;
@@ -15,10 +15,10 @@ use std::io;
 use crate::heap_rewrite::heap_state::{HeapState, editor, invalid, spage_err};
 use crate::heap_rewrite::overflow;
 use crate::heap_rewrite::placement::{self, home_slot, slot_record};
+use crate::heap_rewrite::re_encode::ReEncode;
 use crate::heap_rewrite::record_patch::{
     OVERFLOW_FIRST_DATA, reset_overflow_header, strip_insid_and_prev,
 };
-use crate::heap_rewrite::reencode::Reencode;
 use crate::page::{db_area, db_area_mut};
 use crate::record::HomeKind;
 use crate::record::heap_chain::HeapChain;
@@ -28,11 +28,11 @@ use crate::spage::{RecordType, SlottedPage};
 use crate::{Oid, Vpid};
 
 #[derive(Clone, Copy)]
-pub enum PageMode<'a> {
+pub enum PageTreatment<'a> {
     /// Remove vacuum residue, bytes otherwise kept.
     Patch,
     /// Write every live record again through the re-encoder.
-    Reencode(&'a dyn Reencode),
+    Transform(&'a dyn ReEncode),
 }
 
 /// What a rewrite did, summed over pages.
@@ -141,11 +141,11 @@ fn patch_object(
     Ok(())
 }
 
-fn reencode_object(
+fn re_encode_object(
     st: &mut HeapState,
     oid: Oid,
     target: Target,
-    re: &dyn Reencode,
+    re: &dyn ReEncode,
     c: &mut PageCounts,
 ) -> io::Result<()> {
     let (deleted, rec) = match &target {
@@ -164,7 +164,7 @@ fn reencode_object(
         return Ok(());
     }
     let new = re
-        .reencode(oid, &rec)
+        .re_encode(oid, &rec)
         .map_err(|e| invalid(format!("{oid:?}: re-encode: {e}")))?;
     let (kind, released) = placement::place(st, oid, &new, re.mvcc())?;
     c.overflow_pages_released += released as u64;
@@ -176,9 +176,12 @@ fn reencode_object(
     Ok(())
 }
 
-/// Rewrites the current page's records under `mode`, then compacts it, clears the 11.4 header bit and, on a data
+/// Rewrites the current page's records under `treatment`, then compacts it, clears the 11.4 header bit and, on a data
 /// page, resets the chain record.
-pub(crate) fn rewrite_current_page(st: &mut HeapState, mode: PageMode) -> io::Result<PageCounts> {
+pub(crate) fn rewrite_current_page(
+    st: &mut HeapState,
+    treatment: PageTreatment,
+) -> io::Result<PageCounts> {
     let vpid = st.current_vpid();
     let nslots = st.peek(vpid, |p| {
         Ok(SlottedPage::new(db_area(p)).map_or(0, |sp| sp.num_slots()))
@@ -204,9 +207,9 @@ pub(crate) fn rewrite_current_page(st: &mut HeapState, mode: PageMode) -> io::Re
             RecordType::BigOne => Target::Big(Oid::read(&body, 0).vpid()),
             _ => continue,
         };
-        match mode {
-            PageMode::Patch => patch_object(st, oid, target, &mut c)?,
-            PageMode::Reencode(re) => reencode_object(st, oid, target, re, &mut c)?,
+        match treatment {
+            PageTreatment::Patch => patch_object(st, oid, target, &mut c)?,
+            PageTreatment::Transform(re) => re_encode_object(st, oid, target, re, &mut c)?,
         }
     }
     let header_page = vpid == st.hfid.vpid();

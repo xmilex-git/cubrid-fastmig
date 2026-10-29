@@ -1,4 +1,6 @@
 //! Readers and writers for CUBRID on-disk structures: volume and page headers, heap records, file headers, the log header.
+//!
+//! Names follow GLOSSARY.md terms (in English); words a GLOSSARY entry lists under _Avoid_ are not used.
 
 pub mod boot_parm;
 pub mod btree;

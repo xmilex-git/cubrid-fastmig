@@ -16,8 +16,8 @@ use crate::file_alloc::SpaceManager;
 use crate::file_header::{FileHeader, FileType};
 use crate::heap_rewrite::header_rewrite::{HeaderOutcome, rewrite_header};
 use crate::heap_rewrite::heap_state::{HeapState, PageStats, invalid};
-use crate::heap_rewrite::page_rewrite::{PageCounts, PageMode, rewrite_current_page};
-use crate::heap_rewrite::reencode::Reencode;
+use crate::heap_rewrite::page_rewrite::{PageCounts, PageTreatment, rewrite_current_page};
+use crate::heap_rewrite::re_encode::ReEncode;
 use crate::heap_rewrite::vacuum_horizon::VacuumHorizon;
 use crate::page::db_area;
 use crate::record::heap_chain::HeapChain;
@@ -31,7 +31,7 @@ pub struct HeapJob<'a> {
     pub hfid: Hfid,
     /// Records go through this re-encoder (a re-encoded class, or a catalog class whose rows are regenerated);
     /// `None` keeps record bytes and only removes vacuum residue.
-    pub reencode: Option<&'a dyn Reencode>,
+    pub re_encode: Option<&'a dyn ReEncode>,
     /// The root class heap (one bestspace shard).
     pub root: bool,
 }
@@ -90,7 +90,7 @@ pub fn rewrite_heap(
     st.header_reserve =
         HeapHdrStats::size(VersionLine::Develop) - HeapHdrStats::size(VersionLine::V11_4);
 
-    let walk = job.reencode.is_some() || horizon.pending;
+    let walk = job.re_encode.is_some() || horizon.pending;
     let mut counts = PageCounts::default();
     let mut rewritten = 0;
     // the header page is read first: NEWHOME first-fit order is read order
@@ -113,13 +113,13 @@ pub fn rewrite_heap(
             }
             st.load(v)?;
             let chain = st.peek(v, |p| chain_of(p, v))?;
-            let mode = match job.reencode {
-                Some(re) => Some(PageMode::Reencode(re)),
-                None if horizon.page_needs_patch(&chain) => Some(PageMode::Patch),
+            let treatment = match job.re_encode {
+                Some(re) => Some(PageTreatment::Transform(re)),
+                None if horizon.page_needs_patch(&chain) => Some(PageTreatment::Patch),
                 None => None,
             };
-            if let Some(mode) = mode {
-                counts.add(rewrite_current_page(&mut st, mode)?);
+            if let Some(treatment) = treatment {
+                counts.add(rewrite_current_page(&mut st, treatment)?);
                 rewritten += 1;
             }
             if v == stop {
@@ -131,7 +131,8 @@ pub fn rewrite_heap(
     st.load(hv)?;
     counts.add(rewrite_current_page(
         &mut st,
-        job.reencode.map_or(PageMode::Patch, PageMode::Reencode),
+        job.re_encode
+            .map_or(PageTreatment::Patch, PageTreatment::Transform),
     )?);
     rewritten += 1;
     let header = rewrite_header(&mut st, &src, walk, job.root)?;

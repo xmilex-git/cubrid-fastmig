@@ -19,12 +19,12 @@ use crate::record::record_codec::{decode_record, encode_record};
 use crate::value::{DecodeError, DecodeResult, OrReader, Value, decode_tagged, value_to_develop};
 use crate::{Oid, VersionLine};
 
-/// Turns a record of a heap into its develop form. Implemented by [`ClassReencoder`]; callers with their own row
+/// Turns a record of a heap into its develop form. Implemented by [`ClassReEncoder`]; callers with their own row
 /// source (system catalog rows) can supply another.
-pub trait Reencode: Sync {
+pub trait ReEncode: Sync {
     /// The develop record of object `oid` whose current record is `rec` (a whole record, as the home, NEWHOME or
     /// overflow chain holds it).
-    fn reencode(&self, oid: Oid, rec: &[u8]) -> DecodeResult<Vec<u8>>;
+    fn re_encode(&self, oid: Oid, rec: &[u8]) -> DecodeResult<Vec<u8>>;
     /// Whether the class is MVCC (decides the header of a record that goes to overflow pages).
     fn mvcc(&self) -> bool;
 }
@@ -35,7 +35,7 @@ pub fn mvcc_disabled_class(name: &[u8]) -> bool {
     matches!(name, b"db_serial" | b"_db_collation" | b"db_ha_apply_info")
 }
 
-pub struct ClassReencoder {
+pub struct ClassReEncoder {
     source: HashMap<u32, RecordLayout>,
     target: RecordLayout,
     /// Original default value of each current attribute (`Value::Null` when it has none), develop form.
@@ -43,9 +43,9 @@ pub struct ClassReencoder {
     mvcc: bool,
 }
 
-impl ClassReencoder {
+impl ClassReEncoder {
     /// Prepares the layouts of every representation of `class` (an 11.4 class object).
-    pub fn new(class: &ClassObject, mvcc: bool) -> DecodeResult<ClassReencoder> {
+    pub fn new(class: &ClassObject, mvcc: bool) -> DecodeResult<ClassReEncoder> {
         let line = VersionLine::V11_4;
         let current = RecordLayout::for_repid(line, class, class.repid as u32)?;
         let mut source = HashMap::new();
@@ -67,7 +67,7 @@ impl ClassReencoder {
         }
         let target = current.to_develop();
         source.insert(current.repid, current);
-        Ok(ClassReencoder {
+        Ok(ClassReEncoder {
             source,
             target,
             defaults,
@@ -81,8 +81,8 @@ impl ClassReencoder {
     }
 }
 
-impl Reencode for ClassReencoder {
-    fn reencode(&self, _oid: Oid, rec: &[u8]) -> DecodeResult<Vec<u8>> {
+impl ReEncode for ClassReEncoder {
+    fn re_encode(&self, _oid: Oid, rec: &[u8]) -> DecodeResult<Vec<u8>> {
         let h = RecordHeader::read(rec)?;
         let layout = self.source.get(&h.repid).ok_or_else(|| DecodeError {
             at: 0,

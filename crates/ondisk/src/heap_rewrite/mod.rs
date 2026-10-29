@@ -11,13 +11,13 @@ pub mod heap_state;
 pub mod overflow;
 pub mod page_rewrite;
 pub mod placement;
+pub mod re_encode;
 pub mod record_patch;
-pub mod reencode;
 pub mod rewrite_heap;
 pub mod vacuum_horizon;
 
 pub use page_rewrite::PageCounts;
 pub use placement::max_slotted_len;
-pub use reencode::{ClassReencoder, Reencode, mvcc_disabled_class};
+pub use re_encode::{ClassReEncoder, ReEncode, mvcc_disabled_class};
 pub use rewrite_heap::{HeapJob, HeapReport, rewrite_heap};
 pub use vacuum_horizon::VacuumHorizon;
