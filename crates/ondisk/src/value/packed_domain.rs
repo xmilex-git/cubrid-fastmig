@@ -48,21 +48,25 @@ fn has_set_domain(ty: DbType) -> bool {
     ty.is_set() || matches!(ty, DbType::Table | DbType::Midxkey)
 }
 
-/// The type a built-in reference names: `tp_Domains[index - 1]`. develop keeps slots 26/27 but fills them with
-/// `#define tp_NChar_domain tp_Char_domain` and `tp_VarNChar_domain tp_String_domain` (`object_domain.c:327-362`).
+/// The type a built-in reference names: `tp_Domains[index - 1]` (`object_domain.c:329-387`, same slot list in
+/// release/11.4 and develop). Slots 21 (`DB_VALUE`), 30 (`TABLE`) and 41-47 (padding) hold the NULL domain; develop
+/// keeps slots 26/27 but fills them with `#define tp_NChar_domain tp_Char_domain` and
+/// `tp_VarNChar_domain tp_String_domain` (develop :327-362).
 fn builtin_type(version: VersionLine, slot: u32) -> Option<DbType> {
     match (version, slot) {
+        (_, 21 | 30 | 41..=47) => Some(DbType::Null),
         (VersionLine::Develop, 26) => Some(DbType::Char),
         (VersionLine::Develop, 27) => Some(DbType::Varchar),
         _ => DbType::from_id(version, slot),
     }
 }
 
-/// The 1-based `built_in_index` the engine writes for a built-in domain. develop's init loop
-/// (`tp_domain_init`, `built_in_index = i + 1`) visits the CHAR and VARCHAR domains a second time at slots 26/27, so
-/// their final index is 27 and 28.
+/// The 1-based `built_in_index` the engine writes for a built-in domain. `tp_domain_init` sets
+/// `built_in_index = i + 1` slot by slot, so a domain listed in several slots keeps its last one: NULL 48 (both
+/// versions), and in develop CHAR 27 and VARCHAR 28.
 fn builtin_index(version: VersionLine, ty: DbType) -> u32 {
     match (version, ty) {
+        (_, DbType::Null) => 48,
         (VersionLine::Develop, DbType::Char) => 27,
         (VersionLine::Develop, DbType::Varchar) => 28,
         _ => ty.id() as u32 + 1,
