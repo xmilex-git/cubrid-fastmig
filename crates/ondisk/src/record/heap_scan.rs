@@ -3,13 +3,12 @@
 //! Input: an open [`VolumeSet`] and the heap's HFID. Output: [`HeapRecord`]s in page-chain and slot order, each the
 //! complete record — a REC_RELOCATION home is resolved to its REC_NEWHOME bytes, a REC_BIGONE home to the bytes
 //! assembled from its overflow pages. Deleted and address-only slots are skipped; MVCC visibility is the caller's
-//! (see [`crate::record::mvcc_header`]).
+//! (see [`crate::record::mvcc_header`]). Memory is one page plus the record being returned, whatever the heap's size.
 //! Source: engine `src/storage/heap_file.c` `heap_next_internal`/`heap_get_record_data_when_all_ready` (record
 //! types), `heap_page_next` (skips `HEAP_PAGE_IS_BESTSPACE`, develop :2816-2832), `heap_ovf_get`;
 //! `src/storage/overflow_file.h` `OVERFLOW_FIRST_PART`/`OVERFLOW_REST_PART` (native, same in 11.4 and develop);
 //! R2 § 1.3, § 1.8.
 
-use std::collections::HashSet;
 use std::io;
 
 use crate::le_field::get_i32;
@@ -63,9 +62,12 @@ fn read_overflow(vs: &VolumeSet, first: Vpid) -> io::Result<Vec<u8>> {
     let take = (area.len() - 12).min(length);
     out.extend_from_slice(&area[12..12 + take]);
     let mut next = Vpid::read(area, 0);
-    let mut seen = HashSet::from([first]);
+    // a chain longer than the bytes it carries is a cycle; counting keeps memory constant
+    let max_pages = length / (area.len() - 8) + 1;
+    let mut pages = 1;
     while out.len() < length {
-        if next.is_null() || !seen.insert(next) {
+        pages += 1;
+        if next.is_null() || pages > max_pages {
             return Err(invalid(format!(
                 "overflow {first:?}: chain ends at {} of {length} bytes",
                 out.len()
@@ -86,7 +88,9 @@ pub struct HeapScan<'a> {
     next_page: Vpid,
     page: Option<(Vpid, Box<[u8]>)>,
     slot: usize,
-    seen: HashSet<Vpid>,
+    /// Pages walked so far, and the most a chain can have (every page of the volume set): past it the chain loops.
+    walked: u64,
+    max_pages: u64,
     failed: bool,
 }
 
@@ -97,7 +101,12 @@ pub fn heap_records(vs: &VolumeSet, hfid: Hfid) -> HeapScan<'_> {
         next_page: hfid.vpid(),
         page: None,
         slot: 1,
-        seen: HashSet::new(),
+        walked: 0,
+        max_pages: vs
+            .volumes()
+            .iter()
+            .map(|v| v.header.nsect_total.max(0) as u64 * v.header.sect_npgs.max(0) as u64)
+            .sum(),
         failed: false,
     }
 }
@@ -110,8 +119,11 @@ impl HeapScan<'_> {
             if vpid.is_null() {
                 return Ok(false);
             }
-            if !self.seen.insert(vpid) {
-                return Err(invalid(format!("heap chain revisits {vpid:?}")));
+            self.walked += 1;
+            if self.walked > self.max_pages {
+                return Err(invalid(format!(
+                    "heap chain longer than the volume set at {vpid:?}"
+                )));
             }
             let page = self.vs.read_page(vpid)?;
             let sp = slotted(&page, vpid)?;
