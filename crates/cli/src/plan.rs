@@ -189,19 +189,13 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         limits::physical_memory()?,
     )?;
     if p.switch("--json") {
-        let resources = est.as_ref().map_or("null".into(), |e| e.json(mem));
-        print!("{}", plan_report::json(&plan, &resources));
+        print!("{}", plan_report::json(&plan, &est.json(mem)));
     } else {
         print!("{}", plan_report::table(&plan));
-        match &est {
-            Some(e) => print!("{}", e.table(mem)),
-            None => println!(
-                "resources: not estimated for 11.4 sources yet (migrate counts on the target)"
-            ),
-        }
+        print!("{}", est.table(mem));
         let t = target_space::bound(
             &plan,
-            est.as_ref(),
+            &est,
             s.vols.io_pagesize() as u64,
             fs::metadata(&s.lgat_path)?.len(),
         );

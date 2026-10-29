@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use fastmig_ondisk::class_object::{ClassObject, Constraint};
+use fastmig_ondisk::heap_rewrite::ReEncode;
 use fastmig_ondisk::page::{self, PageType};
 use fastmig_ondisk::record::{
     ExtractedKey, HeapChain, RecordHeader, RecordLayout, decode_record, extract_key, resolve_record,
@@ -31,9 +32,18 @@ pub struct ClassKeys<'c> {
     pub hfid: Hfid,
     layouts: HashMap<u32, RecordLayout>,
     indexes: Vec<(&'c Constraint, &'c KeyDomain)>,
+    /// Records still in the 11.4 encoding go through this first (the plan's pair count on an 11.4 source of a
+    /// re-encoded class, workspace#526); the build reads target records and has none.
+    re_encode: Option<&'c dyn ReEncode>,
 }
 
 impl<'c> ClassKeys<'c> {
+    /// Reads records through `r` into the develop encoding before their keys are extracted.
+    pub fn with_re_encode(mut self, r: &'c dyn ReEncode) -> Self {
+        self.re_encode = Some(r);
+        self
+    }
+
     /// `indexes`: the class's plain indexes in the order their runs come out.
     pub fn new(
         class_oid: Oid,
@@ -55,6 +65,7 @@ impl<'c> ClassKeys<'c> {
             hfid,
             layouts,
             indexes,
+            re_encode: None,
         })
     }
 
@@ -115,6 +126,17 @@ pub fn page_keys(
         if header.is_deleted() {
             continue;
         }
+        let re_encoded;
+        let (bytes, header) = match ck.re_encode {
+            Some(r) => {
+                re_encoded = r
+                    .re_encode(oid, bytes)
+                    .map_err(|e| bad(oid, e.to_string()))?;
+                let h = RecordHeader::read(&re_encoded).map_err(|e| bad(oid, e.to_string()))?;
+                (&re_encoded[..], h)
+            }
+            None => (bytes, header),
+        };
         let layout = ck
             .layouts
             .get(&header.repid)

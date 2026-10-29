@@ -21,7 +21,7 @@ pub const FLAGS: &[&str] = &["--mem", "--spill-dir"];
 pub struct Limits {
     pub memory_limit_bytes: u64,
     pub spill_dir: PathBuf,
-    /// The temp disk limit migrate chose before the start (workspace#526); None: no limit, one index batch.
+    /// The temp disk limit migrate chose before the start (workspace#526); None: one index batch (no limit, or one that holds every index at once).
     pub temp_disk: Option<u64>,
     /// The spill arena of that limit, allocated before the first write; every spill goes into it.
     pub arena: Option<Arc<SpillArena>>,

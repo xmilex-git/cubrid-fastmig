@@ -69,10 +69,11 @@ pub fn fill_btrees(
     let batches = match lim.temp_disk {
         None => vec![(0..defs.len()).collect()],
         Some(limit) => {
-            let bytes: Vec<u64> = pair_bytes(space.volumes(), &all, lim.workers.limit())?
-                .iter()
-                .map(|by_class| by_class.values().sum())
-                .collect();
+            let bytes: Vec<u64> =
+                pair_bytes(space.volumes(), &all, lim.workers.limit(), &|_| None)?
+                    .iter()
+                    .map(|by_class| by_class.values().sum())
+                    .collect();
             index_batches(&bytes, limit, lim.memory.limit() as u64).map_err(|min| {
                 BuildError::TempDisk(format!(
                     "{limit} B is below {min} B, the spill bound of the largest index"

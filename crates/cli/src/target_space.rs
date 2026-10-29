@@ -8,8 +8,7 @@
 //! Bound of the rewritten pages (`Plan::rewritten_pages_bound`): every heap page when the catalog is regenerated,
 //! else the treated pages and the root heap. Bound of the new B-trees: a leaf record of a pair takes at most twice
 //! its spill record (`12 + key`: key, OID, class OID, slot), leaves are filled to at most 90 % and non-leaf pages are
-//! fewer than leaves, so 5 · T_i / page + 4 pages per index; without an estimate (11.4 sources) three times the
-//! source's B-tree pages.
+//! fewer than leaves, so 5 · T_i / page + 4 pages per index.
 //! Source: workspace#526 (1번 세션 decision: copy volumes allocated at the start, one reservation for the rest).
 
 use std::fs::OpenOptions;
@@ -39,24 +38,14 @@ impl TargetSpace {
     }
 }
 
-pub fn bound(
-    plan: &Plan,
-    est: Option<&ResourceEstimate>,
-    io_page: u64,
-    new_log_bytes: u64,
-) -> TargetSpace {
+pub fn bound(plan: &Plan, est: &ResourceEstimate, io_page: u64, new_log_bytes: u64) -> TargetSpace {
     let copy_bytes = plan
         .volumes
         .iter()
         .filter(|v| v.copy_method == CopyMethod::Copy)
         .map(|v| v.bytes)
         .sum();
-    let btree_pages = match est {
-        Some(e) => e.per_def.iter().map(|&t| 5 * t / io_page + 4).sum(),
-        // shortcut: no pair estimate for 11.4 sources yet; three times the source's trees stands in until the
-        // 11.4 counting scan lands (workspace#526)
-        None => 3 * plan.source_btree_pages,
-    };
+    let btree_pages: u64 = est.per_def.iter().map(|&t| 5 * t / io_page + 4).sum();
     let pages = plan.rewritten_pages_bound + btree_pages + CATALOG_SLACK_PAGES;
     let extra_bytes = pages * io_page
         + plan.lob.referenced_bytes()

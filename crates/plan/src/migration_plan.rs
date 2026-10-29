@@ -119,8 +119,6 @@ pub struct Plan {
     pub lob: LobScan,
     pub java: DirSize,
     pub java_static: DirSize,
-    /// Pages of the source's B-tree and overflow key files (what the rebuilt trees replace).
-    pub source_btree_pages: u64,
     /// Heap pages the run may rewrite in place, an upper bound (workspace#526): what a cloned volume must unshare
     /// besides the new B-trees — every heap page when the catalog is regenerated (11.4 → develop), else the
     /// treated pages and the root heap (class objects get the rebuilt BTIDs).
@@ -622,7 +620,6 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         lob,
         java,
         java_static,
-        source_btree_pages: btree_pages,
         rewritten_pages_bound: rewritten_pages_bound + if regenerates { 0 } else { treated_pages },
         needed_bytes: needed,
         available_bytes: available,

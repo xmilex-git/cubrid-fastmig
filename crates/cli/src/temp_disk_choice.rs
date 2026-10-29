@@ -1,8 +1,8 @@
 //! The temp disk limit of one migrate, decided once before anything is written (workspace#526).
 //!
-//! Input: `--temp-disk min|max|<size>` or nothing, the resource estimate (None for an 11.4 source), the memory
-//! limit, the target space the plan needs, and the free space of the target and spill filesystems.
-//! Output: the limit in bytes, or None for no limit (an 11.4 source without `--temp-disk`, as before).
+//! Input: `--temp-disk min|max|<size>` or nothing, the resource estimate, the memory limit, the target space the
+//! plan needs, and the free space of the target and spill filesystems.
+//! Output: the limit in bytes.
 //! Rules (user, 2026-10-30): no option on a terminal → show min and max and ask; no option otherwise → max when it
 //! fits the free space, else refuse naming the choices; with `--verify` the minimum is max (the verifier spills
 //! every index in one scan); a limit below min or a limit plus the target growth over
@@ -55,23 +55,14 @@ fn choices(e: &ResourceEstimate, mem: u64) -> String {
 #[allow(clippy::too_many_arguments)]
 pub fn choose(
     choice: Option<TempDiskChoice>,
-    est: Option<&ResourceEstimate>,
+    e: &ResourceEstimate,
     mem: u64,
     verify: bool,
     needed: u64,
     target_available: u64,
     spill: &Path,
     target: &Path,
-) -> io::Result<Option<u64>> {
-    let Some(e) = est else {
-        return match choice {
-            None => Ok(None),
-            Some(TempDiskChoice::Bytes(b)) => Ok(Some(b)),
-            Some(_) => Err(refuse(
-                "min and max need the resource estimate, which 11.4 sources do not have yet; give a size".into(),
-            )),
-        };
-    };
+) -> io::Result<u64> {
     // the verifier scans every index at once, after the build's spill is gone (docs/resources.md)
     let hi = e.temp_max(mem);
     let lo = if verify { hi } else { e.temp_min(mem) };
@@ -112,7 +103,7 @@ pub fn choose(
             mib(target_available)
         )));
     }
-    Ok(Some(limit))
+    Ok(limit)
 }
 
 /// Shows the table and reads `min`, `max` or a size from the terminal (empty: max).

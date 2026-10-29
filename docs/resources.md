@@ -22,6 +22,12 @@ max.
 pair the build would emit (deleted rows and all-NULL keys are left out the same way). This is the exact size of
 the index's pairs as spill records, `T_i`. The read takes about one heap scan; the table shows its time.
 
+An 11.4 source is counted as the target will hold it: each user class through the class object the run writes
+(`rewrite_user_class`) and, for a re-encoded class, each row through its re-encoder first, so every key has its
+develop length (T1 11.4 clean and dirty: all 44 user indexes equal to the target's count, byte for byte). The
+system catalog indexes are filled from regenerated rows the source does not hold; each gets an allowance of twice
+its class's heap bytes (a catalog row is small, and a pair's `12 +` key at most doubles a row).
+
 The scan keeps finished runs in memory while the limit has room: each worker holds a share of at most
 `share = min(256 MiB, mem/2)` and finished runs get the other half, so at least `mem/2 − share` bytes stay in
 memory before anything spills. One scan over a set of indexes therefore spills at most
@@ -84,9 +90,8 @@ at any moment of the run (the build and, with `--verify`, the verifier).
 
 ## Not covered yet
 
-- 11.4 sources have no estimate (their keys come from re-encoded rows): `plan` says so, `--temp-disk min|max` is
-  refused, `--temp-disk <size>` is taken and checked against the exact count on the target before the build.
 - The verifier does not batch: with `--verify` the limit must be temp max (T1 develop dirty, `--mem 64M`,
   `--temp-disk min --verify` before this rule: build peak 0.85 MB under a 1.48 MB limit, the verifier 7.5 MB).
-- The B-tree bound for 11.4 sources is three times the source's B-tree pages until their pair counts exist
-  (`target_space` shortcut).
+- The 11.4 system-class allowance is checked only in total (T1 11.4 clean and dirty: 25 allowances, 1,212,416 B,
+  against 31 rebuilt develop system indexes of 104,331 B; largest allowance 163,840 B, largest index 40,814 B);
+  the classes are matched by name, so one system class is not proven to stay under its own allowance.

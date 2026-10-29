@@ -3,27 +3,36 @@
 //!
 //! Input: the source volumes, the version pair, the worker limit. Output: [`ResourceEstimate`] — per index the bytes
 //! its (key, OID) pairs take as spill records (counted by reading the source heaps with the build's own key
-//! extractor, `fastmig_index::pair_count`), the counting scan's seconds, and from those, per memory limit: temp
-//! min/max, the index batches a temp limit needs and their extra time.
+//! extractor, `fastmig_index::pair_count`; an 11.4 source's rows re-encoded first, its system catalog indexes an
+//! allowance), the counting scan's seconds, and from those, per memory limit: temp min/max, the index batches a temp
+//! limit needs and their extra time.
 //! Bounds (docs/resources.md): temp_min(mem) = the largest single index's `spill_bound`, temp_max(mem) = the
-//! bound of all indexes in one batch (what a run without `--temp-disk` spills at most); a batch is one more heap scan,
+//! bound of all indexes in one batch (what one scan of every index spills at most); a batch is one more heap scan,
 //! priced at the counting scan's time. mem_recommended spills nothing at full parallelism; mem_min is what the copy
 //! engine needs (one I/O buffer per worker) — the rest of the run degrades to spill under a smaller limit.
 //! Temp disk the verifier needs comes after the build's spill is gone: a run needs max(build, verify), not the sum.
 //! Source: workspace#526 (user requests: the sizes before the start, no disk full in the middle).
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io;
 use std::time::Instant;
 
+use fastmig_catalog::class_rewrite::{RewriteInputs, rewrite_user_class};
+use fastmig_catalog::classify::ClassKind;
 use fastmig_catalog::same_version_catalog::DevelopCatalog;
+use fastmig_catalog::source_catalog::SourceCatalog;
+use fastmig_catalog::source_classes::SourceClass;
 use fastmig_copy::volume_copy::IO_BUF_BYTES;
 use fastmig_index::IndexDef;
 use fastmig_index::pair_count::pair_bytes;
 use fastmig_index::rebuild::{TargetClass, class_constraints, plain_index_defs};
 use fastmig_index::temp_disk::{WORKER_SHARE, index_batches, spill_bound};
-use fastmig_ondisk::VersionLine;
+use fastmig_ondisk::class_object::class_properties;
+use fastmig_ondisk::file_table::FileTable;
+use fastmig_ondisk::heap_rewrite::{ClassReEncoder, ReEncode};
 use fastmig_ondisk::volume_set::VolumeSet;
+use fastmig_ondisk::{Oid, VersionLine};
 use fastmig_plan::version_pair::VersionPair;
 
 /// One index's pairs, by its owner class (a BTID shared by classes has one row per class).
@@ -47,39 +56,127 @@ fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(format!("resource estimate: {e}"))
 }
 
-/// The estimate of a develop source (same-version); None for an 11.4 source, whose rows the counting scan cannot
-/// read as the target will hold them.
-// shortcut: no estimate for 11.4 -> develop yet (its keys come from re-encoded rows); the run counts on the target
-// before the build instead, so `--temp-disk <size>` still holds there — upgrade with the 11.4 counting scan
+/// The estimate of a source: a develop source's classes are counted as they are; an 11.4 source's user classes are
+/// counted through the class objects the run writes (`rewrite_user_class`, BTIDs kept) and, for a re-encoded class,
+/// through its re-encoder, so every key has the length the target will hold. The 11.4 system catalog indexes are
+/// rebuilt from regenerated rows the source does not hold; they get an allowance (below).
 pub fn estimate(
     vols: &VolumeSet,
     pair: VersionPair,
     workers: usize,
     physical_memory: u64,
-) -> io::Result<Option<ResourceEstimate>> {
-    if pair.source != VersionLine::Develop {
-        return Ok(None);
-    }
+) -> io::Result<ResourceEstimate> {
     let started = Instant::now();
-    let cat = DevelopCatalog::read(vols)?;
-    let classes: Vec<TargetClass> = cat
-        .classes
+    let mut e = match pair.source {
+        VersionLine::Develop => {
+            let cat = DevelopCatalog::read(vols)?;
+            let classes: Vec<TargetClass> = cat
+                .classes
+                .iter()
+                .filter(|c| !c.class.heap.is_null())
+                .map(|c| TargetClass {
+                    oid: c.oid,
+                    class: &c.class,
+                    hfid: c.class.heap,
+                })
+                .collect();
+            count(vols, &classes, &HashMap::new(), workers)?
+        }
+        VersionLine::V11_4 => {
+            let src = SourceCatalog::read(vols, VersionLine::V11_4)?;
+            let mut users = Vec::new();
+            let mut re_encoders = HashMap::new();
+            let mut allowance = Vec::new();
+            for (c, p) in src.classes.iter().zip(&src.plans) {
+                if c.class.heap.is_null() {
+                    continue;
+                }
+                if p.kind != ClassKind::User {
+                    allowance.extend(system_allowance(vols, c, &p.name)?);
+                    continue;
+                }
+                let target = rewrite_user_class(
+                    c,
+                    p,
+                    &RewriteInputs {
+                        rep_dir: Oid::NULL,
+                        new_btid: &Some,
+                    },
+                )
+                .map_err(|e| invalid(format!("{}: {e}", p.name)))?;
+                if p.re_encoded {
+                    // user classes are MVCC classes (page_treatment); LOB locators are not keys
+                    re_encoders.insert(
+                        c.oid,
+                        ClassReEncoder::new(&c.class, true)
+                            .map_err(|e| invalid(format!("{}: {e}", p.name)))?,
+                    );
+                }
+                users.push((c.oid, target));
+            }
+            let classes: Vec<TargetClass> = users
+                .iter()
+                .map(|(oid, class)| TargetClass {
+                    oid: *oid,
+                    class,
+                    hfid: class.heap,
+                })
+                .collect();
+            let mut e = count(vols, &classes, &re_encoders, workers)?;
+            for a in allowance {
+                e.per_def.push(a.bytes);
+                e.indexes.push(a);
+            }
+            e
+        }
+    };
+    e.scan_seconds = started.elapsed().as_secs_f64();
+    e.workers = workers;
+    e.physical_memory = physical_memory;
+    Ok(e)
+}
+
+/// Allowance for the indexes of an 11.4 system class, which the run fills from regenerated catalog rows: per index
+/// twice the class's heap bytes (a catalog row is small and every pair's key is at most its row, `12 +` key at
+/// most doubles it).
+fn system_allowance(vols: &VolumeSet, c: &SourceClass, name: &str) -> io::Result<Vec<IndexPairs>> {
+    if c.class.properties.is_empty() {
+        return Ok(Vec::new());
+    }
+    let heap_bytes = FileTable::read(vols, c.class.heap.vfid)?.user_pages().len() as u64
+        * vols.io_pagesize() as u64;
+    let cons = class_properties(&c.class.properties, VersionLine::V11_4)
+        .map_err(|e| invalid(format!("{name}: {e}")))?
+        .constraints;
+    Ok(cons
         .iter()
-        .filter(|c| !c.class.heap.is_null())
-        .map(|c| TargetClass {
-            oid: c.oid,
-            class: &c.class,
-            hfid: c.class.heap,
+        .filter(|k| k.btid.is_some())
+        .map(|k| IndexPairs {
+            class: name.to_string(),
+            index: format!("{} (allowance)", String::from_utf8_lossy(&k.name)),
+            bytes: 2 * heap_bytes,
         })
-        .collect();
-    let cons = class_constraints(&classes).map_err(invalid)?;
+        .collect())
+}
+
+/// Counts the pairs of every plain index of `classes`, each class's records through its re-encoder if it has one.
+fn count(
+    vols: &VolumeSet,
+    classes: &[TargetClass],
+    re_encoders: &HashMap<Oid, ClassReEncoder>,
+    workers: usize,
+) -> io::Result<ResourceEstimate> {
+    let cons = class_constraints(classes).map_err(invalid)?;
     let charset = vols.volume(0)?.header.db_charset as u8;
     let (defs, _) =
-        plain_index_defs(&classes, &cons, vols.io_pagesize(), charset).map_err(invalid)?;
+        plain_index_defs(classes, &cons, vols.io_pagesize(), charset).map_err(invalid)?;
     let refs: Vec<&IndexDef> = defs.iter().collect();
-    let counted = pair_bytes(vols, &refs, workers).map_err(invalid)?;
+    let counted = pair_bytes(vols, &refs, workers, &|oid| {
+        re_encoders.get(&oid).map(|r| r as &dyn ReEncode)
+    })
+    .map_err(invalid)?;
     let name_of = |oid| {
-        cat.classes.iter().find(|c| c.oid == oid).map_or_else(
+        classes.iter().find(|c| c.oid == oid).map_or_else(
             || format!("{oid:?}"),
             |c| String::from_utf8_lossy(&c.class.name).into(),
         )
@@ -94,13 +191,13 @@ pub fn estimate(
             });
         }
     }
-    Ok(Some(ResourceEstimate {
+    Ok(ResourceEstimate {
         indexes,
         per_def: counted.iter().map(|b| b.values().sum()).collect(),
-        scan_seconds: started.elapsed().as_secs_f64(),
+        scan_seconds: 0.0,
         workers,
-        physical_memory,
-    }))
+        physical_memory: 0,
+    })
 }
 
 impl ResourceEstimate {

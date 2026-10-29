@@ -193,13 +193,13 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     let mem = o.limits.memory_limit_bytes;
     let target = target_space::bound(
         &plan,
-        est.as_ref(),
+        &est,
         src.vols.io_pagesize() as u64,
         fs::metadata(&src.lgat_path)?.len(),
     );
     let temp_limit = temp_disk_choice::choose(
         temp_disk,
-        est.as_ref(),
+        &est,
         mem,
         o.verify,
         target.total(),
@@ -212,7 +212,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         &p,
         progress.clone(),
         Some(o.limits.memory_limit_bytes),
-        temp_limit,
+        Some(temp_limit),
     )?;
     let report = migrate(
         &o,
@@ -260,8 +260,8 @@ struct Begun {
     started: Instant,
     src: OpenSource,
     plan: Plan,
-    est: Option<ResourceEstimate>,
-    temp_limit: Option<u64>,
+    est: ResourceEstimate,
+    temp_limit: u64,
     target: TargetSpace,
 }
 
@@ -275,14 +275,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let po = &o.plan;
     let (src, plan) = (b.src, b.plan);
     let mem = o.limits.memory_limit_bytes;
-    // one batch when the limit holds every index at once (the bound of a run without --temp-disk)
+    // one batch when the limit holds every index at once
     let mut limits = Limits {
-        temp_disk: b
-            .temp_limit
-            .filter(|&l| b.est.as_ref().is_none_or(|e| l < e.temp_max(mem))),
+        temp_disk: Some(b.temp_limit).filter(|&l| l < b.est.temp_max(mem)),
         ..o.limits.clone()
     };
-    let resources = b.est.as_ref().map_or("null".into(), |e| e.json(mem));
+    let resources = b.est.json(mem);
     let temp_limit = b.temp_limit;
     let target = b.target;
     for w in &plan.warnings {
@@ -327,17 +325,17 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &fastmig_dir.join("reserve-target"),
         b.target.extra_bytes,
     )?;
-    if let Some(l) = temp_limit {
-        marker.create_dir_all(&limits.spill_dir)?;
-        let path = limits.spill_dir.join("arena");
-        marker.record_scratch(&path)?;
-        limits.arena = Some(Arc::new(SpillArena::create(&path, l).map_err(|e| {
+    marker.create_dir_all(&limits.spill_dir)?;
+    let arena = limits.spill_dir.join("arena");
+    marker.record_scratch(&arena)?;
+    limits.arena = Some(Arc::new(SpillArena::create(&arena, temp_limit).map_err(
+        |e| {
             io::Error::other(format!(
-                "temp disk: allocating {l} B at {}: {e}",
-                path.display()
+                "temp disk: allocating {temp_limit} B at {}: {e}",
+                arena.display()
             ))
-        })?));
-    }
+        },
+    )?));
     write_outputs(
         &marker,
         &fastmig_dir,
@@ -570,7 +568,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         added_volumes,
         &format!(
             "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_reserved_bytes\": {}}}",
-            temp_limit.map_or("null".into(), |l| l.to_string()),
+            temp_limit,
             limits.temp_disk.is_some(),
             TEMP_DISK.now_and_peak().1,
             target.copy_bytes,

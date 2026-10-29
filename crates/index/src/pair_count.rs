@@ -1,7 +1,8 @@
 //! Counts what an index rebuild's heap scan would turn into spill records: per index the bytes its (key, OID) pairs
 //! take (`temp_disk::spill_record_bytes`), from one read of the owner classes' heaps, keeping no keys.
 //!
-//! Input: develop-format volumes (the target after page treatment, or a develop source read only), the index
+//! Input: the volumes (the target after page treatment, or a source read only; an 11.4 source passes a
+//! re-encoder per re-encoded class so its records are counted as the target will hold them), the index
 //! definitions and the worker count. Output: per definition, per owner class, the pair bytes — the input of
 //! `temp_disk::index_batches` and of the plan's temp disk estimate.
 //! Rows are read with `heap_keys::page_keys`, the extractor the build uses, so every key counted is a key the build
@@ -12,6 +13,7 @@ use std::collections::BTreeMap;
 
 use fastmig_ondisk::Oid;
 use fastmig_ondisk::file_table::FileTable;
+use fastmig_ondisk::heap_rewrite::ReEncode;
 use fastmig_ondisk::volume_set::VolumeSet;
 
 use crate::build_error::BuildError;
@@ -27,10 +29,11 @@ const UNIT_PAGES: usize = 256;
 /// Pair bytes of one definition, by owner class OID.
 pub type PairBytes = BTreeMap<Oid, u64>;
 
-pub fn pair_bytes(
+pub fn pair_bytes<'c>(
     vols: &VolumeSet,
-    defs: &[&IndexDef],
+    defs: &[&'c IndexDef<'c>],
     workers: usize,
+    re_encode: &dyn Fn(Oid) -> Option<&'c dyn ReEncode>,
 ) -> Result<Vec<PairBytes>, BuildError> {
     // per owner class: (definition, owner position) of its first index and every definition it feeds
     let mut by_class: BTreeMap<Oid, (usize, usize, Vec<usize>)> = BTreeMap::new();
@@ -65,6 +68,10 @@ pub fn pair_bytes(
                 what: format!("class layout: {e}"),
             }
         })?;
+        let ck = match re_encode(class_oid) {
+            Some(r) => ck.with_re_encode(r),
+            None => ck,
+        };
         let pages: Vec<_> = FileTable::read(vols, owner.hfid.vfid)?
             .user_pages_by_sector()
             .into_iter()
