@@ -49,7 +49,8 @@ use crate::{heap_counter, plan_report, progress_args};
 const HELP: &str = "\
 cubrid-fastmig migrate <db> --dest <dir> [options]
   --dest <dir>                   target directory for the volumes (must be empty or hold FASTMIG_INCOMPLETE)
-  --target-version 11.4|develop  target release line (default: develop)
+  --target-version 11.4|develop  target release line (default: develop; 11.4 is refused: no 11.4 layout
+                                 B-tree builder)
   --log-dir <dir>                target log directory (default: --dest)
   --workers <n>                  worker limit: thread cap for the whole run (default: CPUs / 2)
   --target-name <name>           target DB name (default: <db>)

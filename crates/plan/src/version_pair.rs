@@ -3,7 +3,8 @@
 //! Input: the source line (log header `db_compatibility`) and `--target-version`. Output: a [`VersionPair`] and, for
 //! a pair the tool cannot migrate, the refusal. Later stages read the pair and never re-derive the target line.
 //! Source: workspace#505 (target version `11.4|develop`, default develop, decided by the plan; relayed decision of
-//! the map supervisor 2026-10-29); ADR 0003 (direct pairs only, no downgrade).
+//! the map supervisor 2026-10-29); ADR 0003 (direct pairs only, no downgrade); target 11.4 refused while the index
+//! builder writes the develop layout only (map supervisor 2026-10-29, workspace#472 Not yet specified).
 
 use fastmig_ondisk::VersionLine;
 
@@ -18,6 +19,11 @@ impl VersionPair {
     /// Why the tool refuses this pair; `None` when it migrates it.
     pub fn refusal(self) -> Option<String> {
         match (self.source, self.target) {
+            // the index builder writes the develop B-tree layout only (map supervisor 2026-10-29)
+            (_, VersionLine::V11_4) => Some(
+                "target 11.4: 11.4 layout B-tree builder not implemented (workspace#472 Not yet specified)"
+                    .into(),
+            ),
             (s, t) if s == t => None,
             (VersionLine::V11_4, VersionLine::Develop) => Some(
                 "version pair 11.4 -> develop: catalog writing is not wired yet (workspace#504)"
