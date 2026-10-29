@@ -44,6 +44,8 @@ pub fn new_header(
         db_logpagesize: src.db_logpagesize,
         is_shutdown: true,
         next_trid: 1,
+        // never below the source: kept heap pages keep their HEAP_CHAIN max_mvccid, which must precede every new
+        // MVCCID (heap_file.c:25045 MVCC_ID_PRECEDES (chain->max_mvccid, mvccid); workspace#499)
         mvcc_next_id: src.mvcc_next_id,
         avg_ntrans: 100,
         avg_nlocks: 977,
