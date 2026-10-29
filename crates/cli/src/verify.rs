@@ -141,7 +141,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         Some("source") => Role::Source,
         Some(r) => return Err(CliError::Usage(format!("bad --role {r}"))),
     };
-    let workers = match p.value("--workers") {
+    let worker_limit = match p.value("--workers") {
         Some(w) => w
             .parse()
             .ok()
@@ -164,8 +164,8 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         .transpose()?
         .unwrap_or_default();
 
-    let wb = WorkerBudget::new(workers);
-    let mb = MemoryBudget::new(usize::try_from(lim.mem_bytes).unwrap_or(usize::MAX));
+    let wb = WorkerBudget::new(worker_limit);
+    let mb = MemoryBudget::new(usize::try_from(lim.memory_limit_bytes).unwrap_or(usize::MAX));
     let spill = SpillDir::create(&lim.spill_dir)?;
     let limits = fastmig_verify::Limits {
         workers: &wb,
@@ -186,7 +186,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         tres.defects.clone(),
         sres.as_ref().map(|r| r.defects.clone()),
     );
-    let summary = summary_line(&all, &tres, sres.as_ref(), workers);
+    let summary = summary_line(&all, &tres, sres.as_ref(), worker_limit);
     let mut text = String::new();
     for c in &all {
         text.push_str(&defect_line(c));

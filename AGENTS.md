@@ -47,7 +47,7 @@ plan     → ondisk
 copy     → ondisk, plan
 catalog  → ondisk
 index    → ondisk, catalog
-verify   → ondisk, catalog
+verify   → ondisk, catalog, index   (index: the heap-scan driver, sorted runs with spill and k-way merge)
 cli      → all of the above; the only binary
 ```
 
