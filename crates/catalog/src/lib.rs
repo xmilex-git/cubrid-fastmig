@@ -4,6 +4,7 @@ pub mod class_rewrite;
 pub mod classify;
 pub mod disk_repr_build;
 pub mod dry_run;
+pub mod output_sql;
 pub mod source_classes;
 pub mod system_classes;
 pub mod template;
