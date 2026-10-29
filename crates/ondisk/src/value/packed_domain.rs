@@ -48,6 +48,27 @@ fn has_set_domain(ty: DbType) -> bool {
     ty.is_set() || matches!(ty, DbType::Table | DbType::Midxkey)
 }
 
+/// The type a built-in reference names: `tp_Domains[index - 1]`. develop keeps slots 26/27 but fills them with
+/// `#define tp_NChar_domain tp_Char_domain` and `tp_VarNChar_domain tp_String_domain` (`object_domain.c:327-362`).
+fn builtin_type(version: VersionLine, slot: u32) -> Option<DbType> {
+    match (version, slot) {
+        (VersionLine::Develop, 26) => Some(DbType::Char),
+        (VersionLine::Develop, 27) => Some(DbType::Varchar),
+        _ => DbType::from_id(version, slot),
+    }
+}
+
+/// The 1-based `built_in_index` the engine writes for a built-in domain. develop's init loop
+/// (`tp_domain_init`, `built_in_index = i + 1`) visits the CHAR and VARCHAR domains a second time at slots 26/27, so
+/// their final index is 27 and 28.
+fn builtin_index(version: VersionLine, ty: DbType) -> u32 {
+    match (version, ty) {
+        (VersionLine::Develop, DbType::Char) => 27,
+        (VersionLine::Develop, DbType::Varchar) => 28,
+        _ => ty.id() as u32 + 1,
+    }
+}
+
 /// Reads one packed domain chain (engine `or_get_domain` without a caller domain). Returns the chain and whether
 /// the first carrier had the tagged-NULL bit (meaningful only when the domain tags a value).
 pub fn decode_packed_domain(
@@ -67,7 +88,7 @@ pub fn decode_packed_domain(
             let index = (carrier >> PRECISION_SHIFT) & 0xFFFF;
             let ty = index
                 .checked_sub(1)
-                .and_then(|t| DbType::from_id(version, t))
+                .and_then(|t| builtin_type(version, t))
                 .ok_or_else(|| r.error(format!("bad built-in domain index {index}")))?;
             chain.push(Domain::builtin(version, ty));
             return Ok((chain, is_null));
@@ -167,7 +188,7 @@ pub fn encode_packed_domain(
     if let [d] = chain
         && d.builtin
     {
-        let mut carrier = FLAG_100 | ((d.ty.id() as u32 + 1) << PRECISION_SHIFT);
+        let mut carrier = FLAG_100 | (builtin_index(version, d.ty) << PRECISION_SHIFT);
         if is_null {
             carrier |= NULL_OR_DESC_FLAG;
         }
