@@ -30,6 +30,7 @@ comes from, without reading the rest of the tree.
   | [R4](https://github.com/xmilex-git/workspace/blob/research/fastmig-r4-catalog-tables/docs/research/fastmig/r4-catalog-tables.md) | catalog tables |
   | [R5](https://github.com/xmilex-git/workspace/blob/research/fastmig-r5-min-files/docs/research/fastmig/r5-min-files.md) | minimum files of a new database |
   | [R6](https://github.com/xmilex-git/workspace/blob/research/fastmig-r6-index-build/docs/research/fastmig/r6-index-build.md) | index build port |
+  | [R7](https://github.com/xmilex-git/workspace/blob/research/fastmig-r7-xasl-streams/docs/research/fastmig/r7-xasl-streams.md) | serialized XASL streams and stored opcodes |
 
   A later research doc gets a row here in the commit that first cites it.
 - **Engine source**: `~/dev/cubrid-worktree/develop` on the dev host, release lines at
