@@ -57,6 +57,11 @@ impl<'c> ClassKeys<'c> {
             indexes,
         })
     }
+
+    /// How many indexes this class feeds (the length of a per-index tally).
+    pub fn indexes_len(&self) -> usize {
+        self.indexes.len()
+    }
 }
 
 fn bad(oid: Oid, what: impl Into<String>) -> BuildError {

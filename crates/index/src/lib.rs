@@ -25,6 +25,7 @@ pub mod ovf_key_file;
 pub mod ovf_key_writer;
 pub mod ovf_oid_chain;
 pub mod page_sink;
+pub mod pair_count;
 pub mod rebuild;
 pub mod run_writer;
 pub mod scratch_sink;

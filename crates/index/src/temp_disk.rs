@@ -1,10 +1,10 @@
 //! The temp disk limit (`--temp-disk`): the bytes spill files may hold at once, kept by scheduling, not by failing.
 //!
-//! Input: per index the bytes its (key, OID) pairs take as spill records (`IndexPairBytes`, from the plan's
-//! estimate scan), the limit, the memory limit and the worker count. Output: [`index_batches`] — the indexes cut
-//! into batches whose spill bound fits the limit (each batch is one heap scan of its owner classes, then its
-//! builds, then its spill files go); [`TEMP_DISK`] — the spill bytes on disk now and at most, for the progress
-//! display and report.json.
+//! Input: per index the bytes its (key, OID) pairs take as spill records (`pair_count::pair_bytes`, counted on the
+//! target before the build, or on a develop source for the plan), the limit and the memory limit.
+//! Output: [`index_batches`] — the indexes cut into batches whose spill bound fits the limit (each batch is one
+//! heap scan of its owner classes, then its builds, then its spill files go); [`TEMP_DISK`] — the spill bytes on
+//! disk now and at most, for the progress display and report.json.
 //! Spill bound of one scan ([`spill_bound`]): a spill record is `key_len u32 · OID 8 B · key` (`spill_run`), so
 //! the pairs of a batch take `T` bytes as records. The heap scan gives each worker a share of at most
 //! `min(WORKER_SHARE, mem/2)` and keeps a finished run in memory while the limit has room for it, so at least
@@ -12,12 +12,11 @@
 //! spilled. The build after the scan spills nothing more.
 //! Source: workspace#526 (user request: no disk full during a run, the size chosen before it starts).
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fastmig_ondisk::Oid;
 
-use crate::heap_scan::WORKER_SHARE;
+pub use crate::heap_scan::WORKER_SHARE;
 
 /// Spill bytes on disk: now and the most at any moment of the run (Relaxed: a display, not a guard).
 pub struct TempDiskUsage {
@@ -91,11 +90,4 @@ pub fn index_batches(
         }
     }
     Ok(batches.into_iter().map(|(_, b)| b).collect())
-}
-
-/// What a run with `--temp-disk` gives the index rebuild: the limit and, per (class OID, constraint name), the
-/// bytes that index's pairs take as spill records (the plan's estimate scan, an upper bound).
-pub struct TempDiskPlan {
-    pub limit: u64,
-    pub pair_bytes: BTreeMap<(Oid, Vec<u8>), u64>,
 }

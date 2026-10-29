@@ -56,23 +56,33 @@ pub fn free_btree_files(space: &SpaceManager) -> std::io::Result<usize> {
     Ok(n)
 }
 
-pub fn rebuild_indexes(
-    space: &SpaceManager,
-    classes: &[TargetClass],
-    lim: &Limits,
-    progress: Option<Meter>,
-) -> Result<RebuiltIndexes, BuildError> {
-    // the constraints of every class, parsed once
-    let mut cons: Vec<Vec<Constraint>> = Vec::with_capacity(classes.len());
-    for c in classes {
-        cons.push(if c.class.properties.is_empty() {
-            Vec::new()
-        } else {
-            class_properties(&c.class.properties, VersionLine::Develop)
+/// A function or filter index left out: (class OID, constraint name).
+pub type DeferredIndex = (Oid, Vec<u8>);
+
+/// Each class's constraints, parsed once (empty for a class with no properties).
+pub fn class_constraints(classes: &[TargetClass]) -> Result<Vec<Vec<Constraint>>, BuildError> {
+    classes
+        .iter()
+        .map(|c| {
+            if c.class.properties.is_empty() {
+                return Ok(Vec::new());
+            }
+            Ok(class_properties(&c.class.properties, VersionLine::Develop)
                 .map_err(|e| record_err(c.oid, format!("class properties: {e}")))?
-                .constraints
-        });
-    }
+                .constraints)
+        })
+        .collect()
+}
+
+/// The plain indexes of `classes` (`cons` from [`class_constraints`]): one definition per BTID the class objects
+/// name, its owners the classes that share it, `btid` still that old BTID; function and filter indexes come back as
+/// deferred (class OID, constraint name). Reads nothing from the volumes: a plan can call it on a source.
+pub fn plain_index_defs<'c>(
+    classes: &[TargetClass<'c>],
+    cons: &'c [Vec<Constraint>],
+    io_pagesize: usize,
+    db_charset: u8,
+) -> Result<(Vec<IndexDef<'c>>, Vec<DeferredIndex>), BuildError> {
     // old BTID -> its owners (class index, constraint)
     let mut by_btid: BTreeMap<Btid, Vec<(usize, &Constraint)>> = BTreeMap::new();
     let mut deferred = Vec::new();
@@ -89,14 +99,8 @@ pub fn rebuild_indexes(
             }
         }
     }
-
-    free_btree_files(space)?;
-    let io_pagesize = space.volumes().io_pagesize();
-    let db_charset = space.volumes().volume(0)?.header.db_charset as u8;
     let mut defs = Vec::with_capacity(by_btid.len());
-    let mut by_constraint = BTreeMap::new();
-    let mut by_old_btid = BTreeMap::new();
-    for (old, owners) in &by_btid {
+    for (old, owners) in by_btid {
         let owners: Vec<IndexOwner> = owners
             .iter()
             .map(|&(i, k)| IndexOwner {
@@ -116,17 +120,37 @@ pub fn rebuild_indexes(
                 ),
             )
         })?;
-        let btid = create_btree_file(space, &shape, first_key_attr(first.constraint))?;
-        for o in &owners {
-            by_constraint.insert((o.class_oid, o.constraint.name.clone()), btid);
-        }
-        by_old_btid.insert(*old, btid);
         defs.push(IndexDef {
-            btid,
+            btid: old,
             owners,
             shape,
             key_domain,
         });
+    }
+    Ok((defs, deferred))
+}
+
+pub fn rebuild_indexes(
+    space: &SpaceManager,
+    classes: &[TargetClass],
+    lim: &Limits,
+    progress: Option<Meter>,
+) -> Result<RebuiltIndexes, BuildError> {
+    let cons = class_constraints(classes)?;
+    let io_pagesize = space.volumes().io_pagesize();
+    let db_charset = space.volumes().volume(0)?.header.db_charset as u8;
+    let (mut defs, deferred) = plain_index_defs(classes, &cons, io_pagesize, db_charset)?;
+
+    free_btree_files(space)?;
+    let mut by_constraint = BTreeMap::new();
+    let mut by_old_btid = BTreeMap::new();
+    for d in &mut defs {
+        let btid = create_btree_file(space, &d.shape, first_key_attr(d.owners[0].constraint))?;
+        for o in &d.owners {
+            by_constraint.insert((o.class_oid, o.constraint.name.clone()), btid);
+        }
+        by_old_btid.insert(d.btid, btid);
+        d.btid = btid;
     }
     let filled = fill_btrees(space, &defs, lim, progress)?;
     Ok(RebuiltIndexes {

@@ -33,6 +33,13 @@ target with no migration defect is registered and loses its `FASTMIG_INCOMPLETE`
 The verifier runs on both source and target, so defects already present in the source are
 not reported as migration defects.
 
+## Disk and memory are chosen before the start
+
+`plan` shows, per memory limit, the temp disk the index rebuild needs at least (one index at a time) and at most
+(every index at once), and what the batches in between cost in time; `migrate --temp-disk min|max|<size>` picks
+one before anything is written and keeps to it by building the indexes in batches. How the bounds are computed:
+[docs/resources.md](docs/resources.md) (workspace#526).
+
 ## Layout
 
 | Crate | Role |

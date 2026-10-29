@@ -20,7 +20,8 @@ use fastmig_plan::version_pair::parse_line;
 use fastmig_plan::{Plan, PlanInputs};
 
 use crate::args::{CliError, Parsed, parse};
-use crate::plan_report;
+use crate::limits::{self, Limits};
+use crate::{plan_report, resource_estimate};
 
 const HELP: &str = "\
 cubrid-fastmig plan <db> --dest <dir> [options]
@@ -32,7 +33,10 @@ cubrid-fastmig plan <db> --dest <dir> [options]
   --target-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --no-clone                     plan byte copies even where the filesystem could clone
   --volumes-in-first-dir         find volumes 1.. next to volume 0 (a source copied without its headers rewritten)
-  --json                         print plan.json instead of the table";
+  --workers <n>                  worker limit the resource table assumes (default: CPUs / 2)
+  --mem <size>                   memory limit the resource table assumes (default: physical memory / 4)
+  --json                         print plan.json instead of the table
+The resource table (temp disk and memory per --mem, docs/resources.md) needs one read of every indexed heap.";
 
 /// Flags `plan` and `migrate` share.
 pub const FLAGS: &[&str] = &[
@@ -162,8 +166,8 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
 }
 
 pub fn run(argv: &[String]) -> Result<u8, CliError> {
-    let flags = FLAGS;
-    let p = parse(argv, flags, &[SWITCHES, &["--json", "--help"]].concat())?;
+    let flags = [FLAGS, limits::FLAGS, &["--workers"]].concat();
+    let p = parse(argv, &flags, &[SWITCHES, &["--json", "--help"]].concat())?;
     if p.switch("--help") {
         println!("{HELP}");
         return Ok(0);
@@ -171,10 +175,24 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     let o = PlanOptions::from(&p, "plan")?;
     let s = OpenSource::open(&o)?;
     let plan = make_plan(&o, &s)?;
+    let mem = Limits::from(&p, &o.target_dir)?.memory_limit_bytes;
+    let est = resource_estimate::estimate(
+        &s.vols,
+        plan.version_pair,
+        limits::worker_limit(&p)?,
+        limits::physical_memory()?,
+    )?;
     if p.switch("--json") {
-        print!("{}", plan_report::json(&plan));
+        let resources = est.as_ref().map_or("null".into(), |e| e.json(mem));
+        print!("{}", plan_report::json(&plan, &resources));
     } else {
         print!("{}", plan_report::table(&plan));
+        match &est {
+            Some(e) => print!("{}", e.table(mem)),
+            None => println!(
+                "resources: not estimated for 11.4 sources yet (migrate counts on the target)"
+            ),
+        }
     }
     Ok(u8::from(!plan.refusals.is_empty()))
 }

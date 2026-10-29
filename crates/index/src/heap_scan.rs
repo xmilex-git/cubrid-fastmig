@@ -27,7 +27,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Memory one worker asks for at most; it gets less when the memory limit is smaller.
-pub(crate) const WORKER_SHARE: usize = 256 << 20;
+pub const WORKER_SHARE: usize = 256 << 20;
 
 /// Sectors per work unit (64 pages each at 16 KiB): small enough to spread a large heap, large enough that the
 /// queue costs nothing next to the pages.

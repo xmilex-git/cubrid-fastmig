@@ -48,9 +48,11 @@ use crate::catalog_regeneration;
 use crate::finalize::OUTSIDE_BASE;
 use crate::limits::{self, Limits};
 use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
+use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
 use crate::verify::{DbArg, run_verifier};
-use crate::{heap_counter, plan_report, progress_args};
+use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
+use fastmig_index::temp_disk::TEMP_DISK;
 
 const HELP: &str = "\
 cubrid-fastmig migrate <db> --dest <dir> [options]
@@ -65,6 +67,9 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
   --lob-dir <dir>                target lob-base-path (default: <dest>/lob)
   --mem <size>                   memory limit for the whole run, e.g. 16G (default: physical memory / 4)
   --spill-dir <dir>              where stages over the memory limit spill (default: <dest>/fastmig/spill)
+  --temp-disk min|max|<size>     temp disk limit: spill bytes on disk at once, kept by building indexes in batches
+                                 (default: asked on a terminal, else max when it fits the free space;
+                                 docs/resources.md)
   --db-volume-size <size>        the target server's db_volume_size: size cap of a volume the run adds when the
                                  target runs out of space, e.g. 512M (default: 512M, the engine default)
   --verify                       run the verifier on target and source after the writes; register and remove
@@ -74,7 +79,13 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
 
-const FLAGS: &[&str] = &["--log-dir", "--workers", "--lob-dir", "--db-volume-size"];
+const FLAGS: &[&str] = &[
+    "--log-dir",
+    "--workers",
+    "--lob-dir",
+    "--db-volume-size",
+    "--temp-disk",
+];
 /// The run's phases, one per `Report::lap` in `migrate`, in order (GLOSSARY "phase").
 const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("precheck"),
@@ -127,14 +138,8 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
     let plan = PlanOptions::from(&p, "migrate")?;
-    let worker_limit = match p.value("--workers") {
-        Some(w) => w
-            .parse()
-            .ok()
-            .filter(|&n| n > 0)
-            .ok_or_else(|| CliError::Usage(format!("bad --workers {w}")))?,
-        None => std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)),
-    };
+    let worker_limit = limits::worker_limit(&p)?;
+    let temp_disk = limits::temp_disk_choice(&p)?;
     let o = Options {
         log_dir: p
             .value("--log-dir")
@@ -163,9 +168,47 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             (o.worker_limit * IO_BUF_BYTES) >> 10
         )));
     }
+    // The plan decides everything and refuses before anything is written, the temp disk limit included (asked on a
+    // terminal before the progress display starts). The source log stays read-locked while `src` lives.
+    let started = Instant::now();
+    let src = OpenSource::open(&o.plan)?;
+    let plan = make_plan(&o.plan, &src)?;
+    if !plan.refusals.is_empty() {
+        return Err(CliError::Failed(io::Error::other(format!(
+            "the plan refuses the migration:\n  {}",
+            plan.refusals.join("\n  ")
+        ))));
+    }
+    let est = resource_estimate::estimate(
+        &src.vols,
+        plan.version_pair,
+        o.worker_limit,
+        limits::physical_memory()?,
+    )?;
+    let mem = o.limits.memory_limit_bytes;
+    let temp_limit = temp_disk_choice::choose(
+        temp_disk,
+        est.as_ref(),
+        mem,
+        plan.needed_bytes,
+        plan.available_bytes,
+        &o.limits.spill_dir,
+        &o.plan.target_dir,
+    )?;
     let progress = Progress::new("migrate", PHASES, o.worker_limit);
     let monitor = progress_args::start(&p, progress.clone(), Some(o.limits.memory_limit_bytes))?;
-    let report = migrate(&o, progress).map_err(CliError::Failed)?;
+    let report = migrate(
+        &o,
+        Begun {
+            started,
+            src,
+            plan,
+            est,
+            temp_limit,
+        },
+        progress,
+    )
+    .map_err(CliError::Failed)?;
     monitor.finish();
     println!("{report}");
     Ok(())
@@ -193,25 +236,35 @@ fn write_recorded(marker: &IncompleteMarker, path: &Path, text: &str) -> io::Res
     fs::write(path, text)
 }
 
+/// What `run` decided before the progress display started: the open source (its log read-locked), the plan, the
+/// resource estimate and the temp disk limit; `started` begins the precheck phase.
+struct Begun {
+    started: Instant,
+    src: OpenSource,
+    plan: Plan,
+    est: Option<ResourceEstimate>,
+    temp_limit: Option<u64>,
+}
+
 /// Returns report.json.
-fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
+fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String> {
     let mut rep = Report {
         steps: Vec::new(),
-        started: Instant::now(),
+        started: b.started,
         progress,
     };
     let po = &o.plan;
-
-    // The plan decides everything and refuses before anything is written. The source log stays read-locked until
-    // this function returns (`src` owns the handle).
-    let src = OpenSource::open(po)?;
-    let plan = make_plan(po, &src)?;
-    if !plan.refusals.is_empty() {
-        return Err(io::Error::other(format!(
-            "the plan refuses the migration:\n  {}",
-            plan.refusals.join("\n  ")
-        )));
-    }
+    let (src, plan) = (b.src, b.plan);
+    let mem = o.limits.memory_limit_bytes;
+    // one batch when the limit holds every index at once (the bound of a run without --temp-disk)
+    let limits = Limits {
+        temp_disk: b
+            .temp_limit
+            .filter(|&l| b.est.as_ref().is_none_or(|e| l < e.temp_max(mem))),
+        ..o.limits.clone()
+    };
+    let resources = b.est.as_ref().map_or("null".into(), |e| e.json(mem));
+    let temp_limit = b.temp_limit;
     for w in &plan.warnings {
         rep.progress.warn(format!("warning: {w}"));
     }
@@ -252,6 +305,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         &src,
         po,
         src_lob_base.as_deref(),
+        &resources,
     )?;
     rep.lap("open_sources");
 
@@ -289,7 +343,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         }),
     };
     let space = SpaceManager::new(&vols, pair.target, trk).with_growth(growth);
-    marker.create_dir_all(&o.limits.spill_dir)?;
+    marker.create_dir_all(&limits.spill_dir)?;
     // laps: page_treatment after prepare, index_build after the rebuild; the catalog writes and BT_STATS of finish
     // fall in catalog_regeneration, lapped after the closure
     let mut regenerate = || {
@@ -306,7 +360,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
             let rebuilt = catalog_regeneration::build_indexes(
                 &space,
                 &prepared,
-                &o.limits,
+                &limits,
                 o.worker_limit,
                 rep.progress.meter(INDEX_BUILD),
             )?;
@@ -324,7 +378,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
             let rebuilt = catalog_regeneration::same_version_build_indexes(
                 &space,
                 &prepared,
-                &o.limits,
+                &limits,
                 o.worker_limit,
                 rep.progress.meter(INDEX_BUILD),
             )?;
@@ -404,7 +458,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     )?;
     let verify_report = fastmig_dir.join("verify.jsonl");
     let (passed, summary) = if o.verify {
-        marker.create_dir_all(&o.limits.spill_dir)?;
+        marker.create_dir_all(&limits.spill_dir)?;
         marker.record(&verify_report)?;
         let (code, summary) = run_verifier(
             &DbArg {
@@ -424,7 +478,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
             Role::Target,
             &measured,
             o.worker_limit,
-            &o.limits,
+            &limits,
             &verify_report,
         )?;
         (code == 0, summary)
@@ -463,6 +517,12 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         &summary,
         &catalog.json(),
         added_volumes,
+        &format!(
+            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}}}",
+            temp_limit.map_or("null".into(), |l| l.to_string()),
+            limits.temp_disk.is_some(),
+            TEMP_DISK.now_and_peak().1
+        ),
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;
     if !passed {
@@ -485,8 +545,13 @@ fn write_outputs(
     src: &OpenSource,
     po: &PlanOptions,
     src_lob_base: Option<&Path>,
+    resources: &str,
 ) -> io::Result<()> {
-    write_recorded(marker, &dir.join("plan.json"), &plan_report::json(plan))?;
+    write_recorded(
+        marker,
+        &dir.join("plan.json"),
+        &plan_report::json(plan, resources),
+    )?;
     write_recorded(
         marker,
         &dir.join("deferred-indexes.sql"),
@@ -531,6 +596,7 @@ fn report_json(
     verify_summary: &str,
     catalog: &str,
     added_volumes: usize,
+    temp_disk: &str,
 ) -> String {
     let steps: Vec<String> = rep
         .steps
@@ -556,7 +622,7 @@ fn report_json(
         )
     };
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"added_volumes\": {added_volumes},\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"catalog\": {catalog},\n  \"heap_peak_bytes\": {},\n  \"progress\": {}\n}}",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"added_volumes\": {added_volumes},\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"catalog\": {catalog},\n  \"heap_peak_bytes\": {},\n  \"temp_disk\": {temp_disk},\n  \"progress\": {}\n}}",
         line_name(plan.version_pair.source),
         line_name(plan.version_pair.target),
         o.worker_limit,

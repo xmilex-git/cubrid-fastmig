@@ -22,7 +22,8 @@ fn strings<'a>(v: impl IntoIterator<Item = &'a str>) -> String {
     format!("[{}]", v.join(", "))
 }
 
-pub fn json(p: &Plan) -> String {
+/// `resources`: the resource table as JSON (`resource_estimate`), or `null` when it was not estimated.
+pub fn json(p: &Plan, resources: &str) -> String {
     let vols: Vec<String> = p
         .volumes
         .iter()
@@ -65,7 +66,7 @@ pub fn json(p: &Plan) -> String {
         })
         .collect();
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"classes\": [\n    {}\n  ]\n}}\n",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
         line_name(p.version_pair.source),
         line_name(p.version_pair.target),
         strings(p.refusals.iter().map(String::as_str)),

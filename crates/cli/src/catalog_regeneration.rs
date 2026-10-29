@@ -159,7 +159,7 @@ fn rebuild(
             workers: &workers,
             memory: &memory,
             spill: &spill,
-            temp_disk: None,
+            temp_disk: limits.temp_disk,
         },
         Some(index_meter),
     )
