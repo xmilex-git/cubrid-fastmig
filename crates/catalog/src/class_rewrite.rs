@@ -13,7 +13,7 @@
 
 use fastmig_ondisk::class_object::{
     Attribute, ClassObject, ClassProperties, ClassType, Constraint, ConstraintKind, SchemaDomain,
-    class_properties, format_btid, parse_btid,
+    class_properties, format_btid, parse_btid, without_deduplicate_key,
 };
 use fastmig_ondisk::partition_stream::transcode_partition_stream;
 use fastmig_ondisk::record::RecordLayout;
@@ -31,8 +31,6 @@ const TO: VersionLine = VersionLine::Develop;
 /// 11.4 `DB_MAX_VARNCHAR_PRECISION` and `DB_MAX_VARCHAR_PRECISION`.
 const MAX_VARNCHAR_PRECISION: i32 = 0x3fff_ffff / 2;
 const MAX_VARCHAR_PRECISION: i32 = 0x3fff_ffff;
-/// 11.4 `deduplicate_key.h`: `MK_DEDUPLICATE_KEY_ATTR_ID(level)` = 0x8A8B8C90 − level, level 1..14.
-const DEDUP_ID_BASE: i32 = 0x8A8B_8C90_u32 as i32;
 
 /// What the rewrite needs from the rest of the migration.
 pub struct RewriteInputs<'a> {
@@ -144,7 +142,9 @@ fn map_constraint_info(
     }
     let (body, tail) = e.split_at(e.len() - 2);
     let mut out = vec![map_btid_string(&body[0], new_btid)];
-    let mut mid = &body[1..];
+    // DEDUPLICATE keys go with their prefix lengths and function key offset (workspace#537)
+    let stripped = without_deduplicate_key(kind, &body[1..]);
+    let mut mid = stripped.as_slice();
     let optional = match mid.last().map(|x| &x.value) {
         Some(Value::Set(_)) => {
             let o = mid.last().cloned();
@@ -158,13 +158,10 @@ fn map_constraint_info(
             Value::Integer(i) => i,
             _ => return Err(err(format!("key attribute {:?}", k[0].value))),
         };
-        if attr_ids.contains(&id) {
-            out.extend(k.iter().cloned());
-        } else if !(DEDUP_ID_BASE - 14..=DEDUP_ID_BASE - 1).contains(&id) {
-            return Err(err(format!(
-                "key attribute id {id} is neither an attribute nor a DEDUPLICATE key"
-            )));
+        if !attr_ids.contains(&id) {
+            return Err(err(format!("key attribute id {id} is not an attribute")));
         }
+        out.extend(k.iter().cloned());
     }
     if let Some(mut o) = optional {
         if let Value::Set(s) = &mut o.value {

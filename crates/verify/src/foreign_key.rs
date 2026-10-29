@@ -6,11 +6,12 @@
 //! domains are equal, compared as they are (NULL columns found from the image header); each side is a sorted stream
 //! of distinct keys, merged once (O(n)).
 //! The builder does not check this (it reports only unique and NOT NULL violations); the verifier does
-//! (G3 workspace#483 Q4, after #478 Q8).
+//! (G3 workspace#483 Q4, after #478 Q8). An 11.3/11.4 DEDUPLICATE FK index drops its hidden key column first.
 //! Source: G3 workspace#483 Q4; engine FK semantics (MATCH SIMPLE: a key with a NULL column references nothing).
 
 use std::cmp::Ordering;
 
+use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::value::{KeyDomain, Value};
 
 use crate::btree_walk::{IndexTree, LeafPairs};
@@ -57,6 +58,11 @@ pub fn check_fk(fk: &IndexTree, pks: &[IndexTree]) -> Vec<Defect> {
     // the same key domain on both sides: an FK image is its PK image, no decode and encode per key (workspace#509);
     // check 2 has compared the FK index keys with the heap already
     let same_domain = fk_kd == pk_kd;
+    // an 11.3/11.4 DEDUPLICATE FK key carries a hidden SHORT column the PK has not (R16 workspace#532, workspace#537)
+    let hidden = (fk.db.line == VersionLine::V11_4)
+        .then(|| fk.root.dedup_key_idx_114())
+        .flatten()
+        .and_then(|i| usize::try_from(i).ok());
     let (class, index) = (fk.class.clone(), fk.name.clone());
     let mut fks = DistinctKeys::new(fk);
     let mut pk_streams: Vec<DistinctKeys> = pks.iter().map(DistinctKeys::new).collect();
@@ -78,7 +84,25 @@ pub fn check_fk(fk: &IndexTree, pks: &[IndexTree]) -> Vec<Defect> {
                 Some(Ok(Some(_))) => unreachable!("filtered out by find"),
             }
         } else {
-            match fk_kd.decode_key(k) {
+            match fk_kd.decode_key(k).map(|mut v| {
+                if let Some(i) = hidden.filter(|&i| i < v.len()) {
+                    v.remove(i);
+                }
+                v
+            }) {
+                Ok(v) if v.len() != pk_kd.columns.len() => {
+                    out.push(decode_defect(
+                        &class,
+                        &index,
+                        format!(
+                            "{} key columns, the primary key has {}",
+                            v.len(),
+                            pk_kd.columns.len()
+                        ),
+                    ));
+                    fks.advance();
+                    continue;
+                }
                 Ok(v) if v.iter().any(Value::is_null) => {
                     fks.advance();
                     continue;

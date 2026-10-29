@@ -10,6 +10,7 @@
 mod attribute;
 mod class_record;
 mod constraint;
+mod deduplicate_key;
 mod domain;
 mod encode;
 mod method;
@@ -26,6 +27,7 @@ pub use constraint::{
     ClassProperties, Constraint, ConstraintKind, ForeignKeyInfo, class_properties, format_btid,
     parse_btid,
 };
+pub use deduplicate_key::{is_deduplicate_key, without_deduplicate_key};
 pub use domain::SchemaDomain;
 pub use encode::encode_develop;
 pub use method::{Method, MethodArg, MethodFile, MethodSig, Resolution};

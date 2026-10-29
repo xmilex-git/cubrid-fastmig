@@ -212,7 +212,13 @@ fn constraint(
         Some(n) => (None, Some(n.to_vec())),
         None => (parse_btid(id), None),
     };
-    let mut mid = &e[1..e.len() - tail];
+    // an 11.3/11.4 DEDUPLICATE index lists its hidden key like an attribute; the target has none (workspace#537)
+    let stripped = match line {
+        VersionLine::V11_4 => super::without_deduplicate_key(kind, &s.elements[1..e.len() - tail]),
+        VersionLine::Develop => s.elements[1..e.len() - tail].to_vec(),
+    };
+    let body: Vec<&Value> = stripped.iter().map(|e| &e.value).collect();
+    let mut mid = body.as_slice();
     let optional = match mid.last() {
         Some(Value::Set(_)) => {
             let o = (*mid.last().unwrap()).clone();
