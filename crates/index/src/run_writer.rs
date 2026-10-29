@@ -7,7 +7,7 @@
 //! temporary files when the sort buffer fills).
 
 use crate::key_order::KeyOrder;
-use crate::memory_limit::MemoryGrant;
+use crate::memory_limit::{MemoryGrant, MemoryLimit};
 use crate::sort_run::Run;
 use crate::spill_dir::SpillDir;
 use crate::spill_run::SpillRun;
@@ -74,6 +74,29 @@ impl<'a> RunWriter<'a> {
         self.spilled.push(SpillRun::write(self.dir, &self.run)?);
         self.run.clear();
         Ok(())
+    }
+
+    /// The runs, the in-memory one kept when the memory limit has room for it now (a grant of its size) and
+    /// spilled otherwise: a finished run never waits for memory, so a scan that holds its worker shares cannot
+    /// block on runs nobody frees before the build (workspace#503).
+    pub fn finish_within<'m>(mut self, memory: &'m MemoryLimit) -> io::Result<IndexRuns<'m>> {
+        if self.run.is_empty() {
+            return Ok(IndexRuns {
+                spilled: self.spilled,
+                ..IndexRuns::default()
+            });
+        }
+        let need = self.run.bytes();
+        let grant = memory.try_acquire(need);
+        if grant.bytes < need {
+            drop(grant);
+            self.spill()?;
+            return Ok(IndexRuns {
+                spilled: self.spilled,
+                ..IndexRuns::default()
+            });
+        }
+        Ok(self.finish(grant))
     }
 
     /// The runs, `grant` paying for the in-memory one.

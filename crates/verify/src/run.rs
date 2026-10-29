@@ -2,9 +2,9 @@
 //!
 //! Input: an open [`Database`], the classes whose heap header statistics the migration measured, and the shared
 //! worker / memory / spill limits. Output: [`DbResult`].
-//! Order: check 4 (sectors; yields the tracked files) → per group of classes that share an index: one heap pass per
-//! class (checks 1 and the heap side of 2), then each of the group's indexes walked and merged with its heap side
-//! (check 2) → the root heap → deferred indexes against the live OID set → foreign keys → catalog references
+//! Order: check 4 (sectors; yields the tracked files) → every index tree opened → one multi-class pass over every
+//! heap (checks 1 and the heap side of 2; the index builder's `scan_classes`, workspace#503) → every plain index walked
+//! and merged with its heap side on `--workers` threads, largest first (check 2) → the root heap → deferred indexes against the live OID set → foreign keys → catalog references
 //! and OBJECT values (check 3) → LOB files (check 5).
 //! Source: G3 workspace#483 Q9 (one scan per class, all its indexes at once; merges per index; workers and --mem of
 //! migrate), G5 workspace#486 (deferred indexes: structure + OID survival, key values "not checked").
@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use fastmig_index::job_pool::run_jobs;
 use fastmig_index::{BuildError, IndexRuns, MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{Constraint, class_properties};
 use fastmig_ondisk::{Btid, Oid};
@@ -22,7 +23,7 @@ use crate::database::Database;
 use crate::defect::{Check, Defect, OidText};
 use crate::foreign_key::check_fk;
 use crate::heap_chain::check_chain;
-use crate::heap_pass::{HeapTarget, IndexKeys, scan_heap};
+use crate::heap_pass::{HeapScanJob, HeapTarget, IndexKeys, scan_heap, scan_heaps};
 use crate::index_merge::{check_oids, merge_pairs};
 use crate::live_oids::LiveOids;
 use crate::lob_files::check_lobs;
@@ -124,62 +125,78 @@ pub fn verify_database(
     let mut refs: Vec<ObjectRef> = Vec::new();
     let mut deferred: Vec<(usize, IndexTree)> = Vec::new();
     let t_heaps = Instant::now();
-    for group in groups(db, &specs) {
-        let mut runs: BTreeMap<usize, IndexRuns> = BTreeMap::new();
-        let mut nulls: BTreeMap<usize, u64> = BTreeMap::new();
-        let mut trees: BTreeMap<usize, IndexTree> = BTreeMap::new();
-        for &s in &group.indexes {
-            let spec = &specs[s];
-            let (ci, c) = &spec.owners[0];
-            let class = db.class_name(db.classes[*ci].oid);
-            let name = String::from_utf8_lossy(&c.name).into_owned();
-            match IndexTree::open(db, class, name.clone(), spec.btid) {
-                Ok(t) => {
-                    let dedup = t.root.dedup_key_idx_114().is_some()
-                        && db.line == fastmig_ondisk::VersionLine::V11_4;
-                    if !spec.is_plain() || dedup {
-                        r.not_checked.push(format!(
-                            "{}.{name}: {}",
-                            t.class,
-                            if dedup {
-                                "11.4 DEDUPLICATE index (hidden key column)"
-                            } else {
-                                "deferred index (function or filter)"
-                            }
-                        ));
-                        deferred.push((s, t));
-                    } else {
-                        trees.insert(s, t);
-                    }
+    // every index tree first: a plain one's key domain drives the heap side
+    let mut trees: BTreeMap<usize, IndexTree> = BTreeMap::new();
+    for (s, spec) in specs.iter().enumerate() {
+        let (ci, c) = &spec.owners[0];
+        let class = db.class_name(db.classes[*ci].oid);
+        let name = String::from_utf8_lossy(&c.name).into_owned();
+        match IndexTree::open(db, class, name.clone(), spec.btid) {
+            Ok(t) => {
+                let dedup = t.root.dedup_key_idx_114().is_some()
+                    && db.line == fastmig_ondisk::VersionLine::V11_4;
+                if !spec.is_plain() || dedup {
+                    r.not_checked.push(format!(
+                        "{}.{name}: {}",
+                        t.class,
+                        if dedup {
+                            "11.4 DEDUPLICATE index (hidden key column)"
+                        } else {
+                            "deferred index (function or filter)"
+                        }
+                    ));
+                    deferred.push((s, t));
+                } else {
+                    trees.insert(s, t);
                 }
-                Err(d) => r.defects.push(*d),
             }
+            Err(d) => r.defects.push(*d),
         }
-        for &ci in &group.classes {
+    }
+    // one multi-class scan over every heap (workspace#503), then the class checks in class order
+    let heap_classes: Vec<usize> = (0..db.classes.len())
+        .filter(|&i| !db.classes[i].class.heap.is_null())
+        .collect();
+    let mut runs: BTreeMap<usize, IndexRuns> = BTreeMap::new();
+    let mut nulls: BTreeMap<usize, u64> = BTreeMap::new();
+    {
+        let mut feeds: Vec<Vec<usize>> = Vec::with_capacity(heap_classes.len());
+        let jobs: Vec<HeapScanJob> = heap_classes
+            .iter()
+            .map(|&ci| {
+                let sc = &db.classes[ci];
+                let mine: Vec<usize> = trees
+                    .keys()
+                    .copied()
+                    .filter(|s| specs[*s].owners.iter().any(|(j, _)| *j == ci))
+                    .collect();
+                let indexes = mine
+                    .iter()
+                    .map(|s| IndexKeys {
+                        constraint: &specs[*s].owners.iter().find(|(j, _)| *j == ci).unwrap().1,
+                        kd: &trees[s].kd,
+                    })
+                    .collect();
+                feeds.push(mine);
+                HeapScanJob {
+                    target: HeapTarget {
+                        name: db.class_name(sc.oid),
+                        class_oid: sc.oid,
+                        class: Some(&sc.class),
+                        hfid: sc.class.heap,
+                    },
+                    indexes,
+                }
+            })
+            .collect();
+        let passes =
+            scan_heaps(db, &jobs, lim.workers, lim.memory, lim.spill).map_err(build_err)?;
+        for (((job, &ci), mine), p) in jobs.iter().zip(&heap_classes).zip(&feeds).zip(passes) {
             let sc = &db.classes[ci];
-            let mine: Vec<usize> = trees
-                .keys()
-                .copied()
-                .filter(|s| specs[*s].owners.iter().any(|(j, _)| *j == ci))
-                .collect();
-            let keys: Vec<IndexKeys> = mine
-                .iter()
-                .map(|s| IndexKeys {
-                    constraint: &specs[*s].owners.iter().find(|(j, _)| *j == ci).unwrap().1,
-                    kd: &trees[s].kd,
-                })
-                .collect();
-            let t = HeapTarget {
-                name: db.class_name(sc.oid),
-                class_oid: sc.oid,
-                class: Some(&sc.class),
-                hfid: sc.class.heap,
-            };
-            let p =
-                scan_heap(db, &t, &keys, lim.workers, lim.memory, lim.spill).map_err(build_err)?;
+            let t = &job.target;
             r.heaps += 1;
             r.defects
-                .extend(check_chain(&t, &p, measured.contains(&sc.oid)));
+                .extend(check_chain(t, &p, measured.contains(&sc.oid)));
             r.defects
                 .extend(check_lobs(&p.lobs, db.lob_base.as_deref(), &t.name));
             r.lobs += p.lobs.len();
@@ -191,33 +208,30 @@ pub fn verify_database(
                 *nulls.entry(*s).or_default() += n;
             }
         }
-        // the group's indexes, merged in parallel (each holds its own runs and tree)
-        let results: Vec<std::io::Result<(Vec<Defect>, u64)>> = std::thread::scope(|sc| {
-            let handles: Vec<_> = trees
-                .iter_mut()
-                .map(|(s, t)| {
-                    let mut run = runs.remove(s).unwrap_or_default();
-                    let n = nulls.get(s).copied().unwrap_or(0);
-                    sc.spawn(move || {
-                        let _permit = lim.workers.acquire(1);
-                        let mut lp = LeafPairs::new(t);
-                        let mut d = merge_pairs(&mut run, &mut lp)?;
-                        let pairs = lp.live_objects as u64;
-                        d.extend(lp.finish(Some(n)));
-                        Ok((d, pairs))
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("index merge panicked"))
-                .collect()
-        });
-        for res in results {
-            let (d, pairs) = res?;
-            r.defects.extend(d);
-            r.index_pairs += pairs;
-        }
+    }
+    // every plain index merged with its heap side on --workers threads, largest first (workspace#503)
+    let mut merges: Vec<(&mut IndexTree, IndexRuns, u64)> = trees
+        .iter_mut()
+        .map(|(s, t)| {
+            (
+                t,
+                runs.remove(s).unwrap_or_default(),
+                nulls.get(s).copied().unwrap_or(0),
+            )
+        })
+        .collect();
+    merges.sort_by_key(|(_, run, _)| std::cmp::Reverse(run.entries()));
+    let results = run_jobs(lim.workers.limit(), merges, |(t, mut run, n)| {
+        let mut lp = LeafPairs::new(t);
+        let mut d = merge_pairs(&mut run, &mut lp)?;
+        let pairs = lp.live_objects as u64;
+        d.extend(lp.finish(Some(n)));
+        Ok::<_, std::io::Error>((d, pairs))
+    });
+    for res in results {
+        let (d, pairs) = res?;
+        r.defects.extend(d);
+        r.index_pairs += pairs;
     }
     phases.push(("heaps and indexes", t_heaps.elapsed()));
 
@@ -228,7 +242,15 @@ pub fn verify_database(
             class: None,
             hfid: db.boot.rootclass_hfid,
         };
-        let p = scan_heap(db, &t, &[], lim.workers, lim.memory, lim.spill).map_err(build_err)?;
+        let p = scan_heap(
+            db,
+            t.clone(),
+            Vec::new(),
+            lim.workers,
+            lim.memory,
+            lim.spill,
+        )
+        .map_err(build_err)?;
         r.heaps += 1;
         r.defects.extend(check_chain(&t, &p, false));
         live.add(db.boot.rootclass_oid, &p.live);
@@ -290,51 +312,6 @@ pub fn verify_database(
 
 fn build_err(e: BuildError) -> std::io::Error {
     tool_err(e)
-}
-
-/// Classes that share an index, with those indexes; a class with no shared index is a group of its own.
-struct Group {
-    classes: Vec<usize>,
-    indexes: Vec<usize>,
-}
-
-fn groups(db: &Database, specs: &[IndexSpec]) -> Vec<Group> {
-    let n = db.classes.len();
-    let mut parent: Vec<usize> = (0..n).collect();
-    fn find(p: &mut [usize], mut x: usize) -> usize {
-        while p[x] != x {
-            p[x] = p[p[x]];
-            x = p[x];
-        }
-        x
-    }
-    for s in specs {
-        let a = find(&mut parent, s.owners[0].0);
-        for (j, _) in &s.owners[1..] {
-            let b = find(&mut parent, *j);
-            parent[b] = a;
-        }
-    }
-    let mut out: BTreeMap<usize, Group> = BTreeMap::new();
-    for (i, c) in db.classes.iter().enumerate() {
-        if !c.class.heap.is_null() {
-            let root = find(&mut parent, i);
-            out.entry(root)
-                .or_insert_with(|| Group {
-                    classes: Vec::new(),
-                    indexes: Vec::new(),
-                })
-                .classes
-                .push(i);
-        }
-    }
-    for (s, spec) in specs.iter().enumerate() {
-        let root = find(&mut parent, spec.owners[0].0);
-        if let Some(g) = out.get_mut(&root) {
-            g.indexes.push(s);
-        }
-    }
-    out.into_values().collect()
 }
 
 /// Every foreign key against its referenced primary key (with the partitions' primary keys of a partitioned class).

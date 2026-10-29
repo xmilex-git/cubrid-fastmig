@@ -78,6 +78,11 @@ impl<'v> SpaceManager<'v> {
         self
     }
 
+    /// The file tracker the space changes register files in.
+    pub fn trk_vfid(&self) -> Vfid {
+        self.trk_vfid
+    }
+
     pub fn volumes(&self) -> &'v VolumeSet {
         self.vols
     }

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use fastmig_index::BuildError;
-use fastmig_index::heap_scan::{ClassRuns, RowKey, scan_class};
+use fastmig_index::heap_scan::{ClassRuns, RowKey, ScanClass, scan_classes};
 use fastmig_index::{KeyOrder, MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{ClassObject, Constraint};
 use fastmig_ondisk::file_table::FileTable;
@@ -34,6 +34,7 @@ use crate::defect::{Check, Defect, OidText, VpidText};
 use crate::object_refs::{LobRef, ObjectRef, collect_refs};
 
 /// The heap to scan. `class` is `None` for the root heap, whose records are class objects (decoded at open).
+#[derive(Clone)]
 pub struct HeapTarget<'a> {
     pub name: String,
     pub class_oid: Oid,
@@ -89,55 +90,112 @@ struct Shared {
     defects: Vec<Defect>,
 }
 
+/// One heap to scan with the indexes its rows feed.
+pub struct HeapScanJob<'a> {
+    pub target: HeapTarget<'a>,
+    pub indexes: Vec<IndexKeys<'a>>,
+}
+
+/// One heap: [`scan_heaps`] with a single job.
 pub fn scan_heap<'m>(
     db: &Database,
-    t: &HeapTarget,
-    indexes: &[IndexKeys],
+    t: HeapTarget,
+    indexes: Vec<IndexKeys>,
     workers: &WorkerLimit,
     memory: &'m MemoryLimit,
     spill: &SpillDir,
 ) -> Result<HeapPass<'m>, BuildError> {
-    let ft = FileTable::read(&db.vols, t.hfid.vfid)?;
-    let sectors = ft.user_pages_by_sector();
-    let file_pages: Vec<Vpid> = ft.user_pages().into_iter().collect();
-    let layouts = t.class.map(|c| layouts_of(db, c)).unwrap_or_default();
-    let orders: Vec<&dyn KeyOrder> = indexes.iter().map(|i| i.kd as &dyn KeyOrder).collect();
-    let shared = Mutex::new(Shared::default());
-    let runs = scan_class(&sectors, &orders, workers, memory, spill, |vpid, emit| {
-        let mut out = Shared::default();
-        let page = db.vols.read_page(vpid)?;
-        scan_page(db, t, indexes, &layouts, vpid, &page, &mut out, emit);
-        let mut s = shared.lock().unwrap();
-        let o = out;
-        s.links.extend(o.links);
-        if o.header.is_some() {
-            s.header = o.header;
-        }
-        s.live.extend(o.live);
-        s.num_recs += o.num_recs;
-        s.recs_sumlen += o.recs_sumlen;
-        s.relocations.extend(o.relocations);
-        s.newhomes.extend(o.newhomes);
-        s.refs.extend(o.refs);
-        s.lobs.extend(o.lobs);
-        s.defects.extend(o.defects);
-        Ok(())
-    })?;
-    let s = shared.into_inner().unwrap();
-    Ok(HeapPass {
-        file_pages,
-        links: s.links,
-        header: s.header,
-        live: s.live,
-        num_recs: s.num_recs,
-        recs_sumlen: s.recs_sumlen,
-        relocations: s.relocations,
-        newhomes: s.newhomes,
-        refs: s.refs,
-        lobs: s.lobs,
-        runs,
-        defects: s.defects,
-    })
+    let job = HeapScanJob { target: t, indexes };
+    let mut p = scan_heaps(db, std::slice::from_ref(&job), workers, memory, spill)?;
+    Ok(p.pop().unwrap())
+}
+
+/// Every heap of `jobs` in one pass of the index builder's multi-class scan (`scan_classes`, workspace#503):
+/// small heaps run side by side, a large one spreads over the workers. Returns the passes in `jobs` order.
+pub fn scan_heaps<'m>(
+    db: &Database,
+    jobs: &[HeapScanJob],
+    workers: &WorkerLimit,
+    memory: &'m MemoryLimit,
+    spill: &SpillDir,
+) -> Result<Vec<HeapPass<'m>>, BuildError> {
+    let mut scans = Vec::with_capacity(jobs.len());
+    let mut file_pages = Vec::with_capacity(jobs.len());
+    let mut layouts = Vec::with_capacity(jobs.len());
+    for j in jobs {
+        let ft = FileTable::read(&db.vols, j.target.hfid.vfid)?;
+        file_pages.push(ft.user_pages().into_iter().collect::<Vec<Vpid>>());
+        layouts.push(
+            j.target
+                .class
+                .map(|c| layouts_of(db, c))
+                .unwrap_or_default(),
+        );
+        scans.push(ScanClass {
+            sectors: ft.user_pages_by_sector(),
+            orders: j.indexes.iter().map(|i| i.kd as &dyn KeyOrder).collect(),
+        });
+    }
+    let shared: Vec<Mutex<Shared>> = jobs.iter().map(|_| Mutex::default()).collect();
+    let runs = scan_classes(
+        &scans,
+        workers,
+        memory,
+        spill,
+        || (),
+        |_, c, vpid, emit| {
+            let j = &jobs[c];
+            let mut out = Shared::default();
+            let page = db.vols.read_page(vpid)?;
+            scan_page(
+                db,
+                &j.target,
+                &j.indexes,
+                &layouts[c],
+                vpid,
+                &page,
+                &mut out,
+                emit,
+            );
+            let mut s = shared[c].lock().unwrap();
+            let o = out;
+            s.links.extend(o.links);
+            if o.header.is_some() {
+                s.header = o.header;
+            }
+            s.live.extend(o.live);
+            s.num_recs += o.num_recs;
+            s.recs_sumlen += o.recs_sumlen;
+            s.relocations.extend(o.relocations);
+            s.newhomes.extend(o.newhomes);
+            s.refs.extend(o.refs);
+            s.lobs.extend(o.lobs);
+            s.defects.extend(o.defects);
+            Ok(())
+        },
+    )?;
+    Ok(shared
+        .into_iter()
+        .zip(file_pages)
+        .zip(runs)
+        .map(|((s, file_pages), runs)| {
+            let s = s.into_inner().unwrap();
+            HeapPass {
+                file_pages,
+                links: s.links,
+                header: s.header,
+                live: s.live,
+                num_recs: s.num_recs,
+                recs_sumlen: s.recs_sumlen,
+                relocations: s.relocations,
+                newhomes: s.newhomes,
+                refs: s.refs,
+                lobs: s.lobs,
+                runs,
+                defects: s.defects,
+            }
+        })
+        .collect())
 }
 
 /// The layout of every representation the class still knows (records may carry an old repid).

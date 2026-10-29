@@ -2,7 +2,7 @@
 //! the same time, join them at the seams, build the non-leaf levels and the root.
 //!
 //! Input: the index's runs (in memory and spilled, from the heap scan's `RunWriter`s), the NULL-key row count,
-//! the index shape and key order, the B-tree file's sink (its first page is the root), and the shared worker and
+//! the index shape and key order, the root and the B-tree file's sink (`btree_file` allocates the root with the file), and the shared worker and
 //! memory limits.
 //! Output: the root VPID, the root header written, the overflow key file if any, and `BtStats`.
 //! Source: R6 § 2 steps 5–11 (engine no-logging parallel load, `btsort_px_*`, `bt_load_patch_seam`
@@ -81,14 +81,16 @@ fn parallel_for<E: Send>(
     first_err.into_inner().unwrap().map_or(Ok(()), Err)
 }
 
-/// One index to build: its shape, key order, runs, NULL-key rows, and where its pages go.
+/// One index to build: its root, shape, key order, runs, NULL-key rows, and where its pages go.
 pub struct IndexJob<'a, 'm> {
+    /// The root page, allocated with the file before the build (`btree_file::create_btree_file`).
+    pub root: Vpid,
     pub shape: IndexShape,
     pub order: &'a dyn KeyOrder,
     pub runs: IndexRuns<'m>,
     pub nulls: u64,
     pub sink: &'a dyn PageSink,
-    pub make_ovf_key_sink: &'a MakeSink<'a>,
+    pub make_ovf_key_sink: &'a dyn MakeSink,
 }
 
 pub fn build_index(
@@ -97,6 +99,7 @@ pub fn build_index(
     memory: &MemoryLimit,
 ) -> Result<BuiltIndex, BuildError> {
     let IndexJob {
+        root,
         shape,
         order,
         mut runs,
@@ -106,7 +109,6 @@ pub fn build_index(
     } = job;
     let shape = &shape;
     let _own = worker_limit.acquire(1);
-    let root = sink.alloc_page()?;
     let ovf_keys = OvfKeyFile::new(make_ovf_key_sink);
 
     let t0 = Instant::now();

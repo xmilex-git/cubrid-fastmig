@@ -70,17 +70,17 @@ pub struct ShardLeaves {
     pub counts: ShardCounts,
 }
 
-struct Builder<'a> {
+struct Builder<'a, 'o> {
     shape: &'a IndexShape,
     order: &'a dyn KeyOrder,
     sink: &'a dyn PageSink,
-    ovf_keys: &'a OvfKeyFile<'a>,
+    ovf_keys: &'a OvfKeyFile<'o>,
     out: ShardLeaves,
     current: Option<LeafPage>,
     rec: Vec<u8>,
 }
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     fn key_group(
         &mut self,
         key: &[u8],

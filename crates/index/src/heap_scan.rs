@@ -1,13 +1,20 @@
-//! Scans a class's heap pages sector by sector in parallel and turns every live row into the (key, OID) runs of
-//! each of the class's indexes in one pass, inside the memory limit.
+//! Scans the heaps of many classes at once and turns every live row into the (key, OID) runs of each of its
+//! class's indexes, inside the memory limit.
 //!
-//! Input: the heap's user pages grouped by sector (workspace#490 `FileTable::user_pages_by_sector`, header and
-//! bestspace pages left out by the caller), the key order of each index, and a row callback that extracts each
-//! index's key (workspace#491). Output: per index, its runs (`IndexRuns`) and the count of rows with an all-NULL key.
+//! Input: per class its heap's user pages grouped by sector (workspace#490 `FileTable::user_pages_by_sector`,
+//! header and bestspace pages left out by the caller) and the key order of each of its indexes; a row callback
+//! that reads one page of one class and extracts each index's key (workspace#491). Output: per class, per index
+//! its runs (`IndexRuns`) and the count of rows with an all-NULL key.
+//! Work units: a class's sectors cut into ranges of `UNIT_SECTORS`, classes largest first (LPT), every unit of every
+//! class in one queue that `--workers` threads drain — a large class spreads over the workers, hundreds of
+//! one-sector classes run side by side (workspace#503). A worker keeps one writer per index of the class it is on
+//! and finishes them when the next unit is another class's; the results are merged once at the end (PAR-17).
+//! Memory (workspace#493, #503): each worker holds one share of the memory limit for the whole scan, split among the
+//! writers of its current class; a writer spills past its part. A finished run stays in memory only if the limit
+//! has room for it at that moment, otherwise it is spilled — the scan never waits for memory that only the build
+//! after it frees, and a spill file exists only for keys that did not fit.
 //! Source: R6 § 2 steps 1–3 (engine `get_next_vpid` sector distribution, `btree_sort_get_next`), § 4.1:
 //! R-ROW-3 all-NULL keys are counted and left out, R-ROW-4 a NULL in a NOT NULL (PK) key stops the build.
-//! Memory (workspace#493): the scan waits for one grant for all its writers — the keys of every index of the
-//! class come out at once — and each (worker, index) writer spills past its equal share.
 
 use crate::build_error::BuildError;
 use crate::key_order::KeyOrder;
@@ -17,10 +24,14 @@ use crate::spill_dir::SpillDir;
 use crate::worker_limit::WorkerLimit;
 use fastmig_ondisk::{Oid, Vpid, Vsid};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// Memory one writer asks for; the grant is smaller when the memory limit is.
-const WRITER_SHARE: usize = 64 << 20;
+/// Memory one worker asks for at most; it gets less when the memory limit is smaller.
+const WORKER_SHARE: usize = 256 << 20;
+
+/// Sectors per work unit (64 pages each at 16 KiB): small enough to spread a large heap, large enough that the
+/// queue costs nothing next to the pages.
+const UNIT_SECTORS: usize = 4;
 
 /// What the key extractor found for one index of one row.
 pub enum RowKey<'a> {
@@ -31,84 +42,169 @@ pub enum RowKey<'a> {
     NotNullViolation,
 }
 
-/// Per index: its runs and the all-NULL row count.
+/// One class to scan: its heap pages by sector and the key order of each of its indexes.
+pub struct ScanClass<'o> {
+    pub sectors: Vec<(Vsid, Vec<Vpid>)>,
+    pub orders: Vec<&'o dyn KeyOrder>,
+}
+
+impl ScanClass<'_> {
+    fn pages(&self) -> usize {
+        self.sectors.iter().map(|(_, p)| p.len()).sum()
+    }
+}
+
+/// Per index of one class: its runs and the all-NULL row count.
 pub struct ClassRuns<'m> {
     pub runs: Vec<IndexRuns<'m>>,
     pub nulls: Vec<u64>,
 }
 
-/// `page_rows(vpid, emit)` reads one heap page and calls `emit(index, oid, key)` for every live row and index.
-pub fn scan_class<'m, F>(
-    sectors: &[(Vsid, Vec<Vpid>)],
-    orders: &[&dyn KeyOrder],
+/// A worker's writers for the class it is on.
+struct Writers<'a> {
+    class: usize,
+    writers: Vec<RunWriter<'a>>,
+    nulls: Vec<u64>,
+}
+
+/// `page_rows(state, class, vpid, emit)` reads one heap page of class `class` (index into `classes`) and calls
+/// `emit(index, oid, key)` for every live row and index of that class; `state` is the worker's own (buffers it
+/// reuses), made once per worker by `worker_state`. Returns the runs in `classes` order.
+pub fn scan_classes<'m, S, F>(
+    classes: &[ScanClass],
     workers: &WorkerLimit,
     memory: &'m MemoryLimit,
     spill: &SpillDir,
+    worker_state: impl Fn() -> S + Sync,
     page_rows: F,
-) -> Result<ClassRuns<'m>, BuildError>
+) -> Result<Vec<ClassRuns<'m>>, BuildError>
 where
-    F: Fn(Vpid, &mut dyn FnMut(usize, Oid, RowKey)) -> Result<(), BuildError> + Sync,
+    F: Fn(&mut S, usize, Vpid, &mut dyn FnMut(usize, Oid, RowKey)) -> Result<(), BuildError> + Sync,
 {
-    let indexes = orders.len();
-    let permits = workers.acquire(sectors.len());
-    let writers = permits.count * indexes;
-    let mut grant = memory.acquire(writers * WRITER_SHARE);
-    let share = grant.bytes / writers.max(1);
-    let grants: Vec<Mutex<_>> = (0..writers)
-        .map(|_| Mutex::new(Some(grant.split(share))))
+    let mut by_size: Vec<usize> = (0..classes.len()).collect();
+    by_size.sort_by_key(|&c| std::cmp::Reverse(classes[c].pages()));
+    let units: Vec<(usize, usize, usize)> = by_size
+        .iter()
+        .flat_map(|&c| {
+            let n = classes[c].sectors.len();
+            (0..n)
+                .step_by(UNIT_SECTORS)
+                .map(move |s| (c, s, (s + UNIT_SECTORS).min(n)))
+        })
         .collect();
-    drop(grant);
+    let permits = workers.acquire(units.len().max(1));
+    // half the limit for the workers' shares, the other half for finished runs kept in memory
+    let share = WORKER_SHARE.min(memory.limit() / (2 * permits.count));
     let next = AtomicUsize::new(0);
-    let out = Mutex::new(ClassRuns {
-        runs: (0..indexes).map(|_| IndexRuns::default()).collect(),
-        nulls: vec![0; indexes],
-    });
-    let failed: Mutex<Option<BuildError>> = Mutex::new(None);
+    let failed = AtomicBool::new(false);
+    let first_err: Mutex<Option<BuildError>> = Mutex::new(None);
+    let out: Mutex<Vec<ClassRuns<'m>>> = Mutex::new(
+        classes
+            .iter()
+            .map(|c| ClassRuns {
+                runs: (0..c.orders.len()).map(|_| IndexRuns::default()).collect(),
+                nulls: vec![0; c.orders.len()],
+            })
+            .collect(),
+    );
     std::thread::scope(|s| {
-        for w in 0..permits.count {
-            let (grants, next, out, failed, page_rows) =
-                (&grants, &next, &out, &failed, &page_rows);
+        for _ in 0..permits.count {
+            let (units, next, failed, first_err, out, page_rows, worker_state) = (
+                &units,
+                &next,
+                &failed,
+                &first_err,
+                &out,
+                &page_rows,
+                &worker_state,
+            );
             s.spawn(move || {
-                let mut ws: Vec<RunWriter> = orders
-                    .iter()
-                    .map(|o| RunWriter::new(*o, spill, share))
-                    .collect();
-                let mut nulls = vec![0u64; indexes];
-                let mut err: Option<BuildError> = None;
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= sectors.len() || failed.lock().unwrap().is_some() {
-                        break;
-                    }
-                    for &vpid in &sectors[i].1 {
-                        let r = page_rows(vpid, &mut |ix, oid, key| match key {
-                            RowKey::Key(k) => {
-                                if let Err(e) = ws[ix].push(k, oid) {
-                                    err.get_or_insert(e.into());
+                let grant = memory.try_acquire(share);
+                let mut state = worker_state();
+                let mut done: Vec<(usize, Vec<IndexRuns<'m>>, Vec<u64>)> = Vec::new();
+                let mut cur: Option<Writers> = None;
+                let r = (|| -> Result<(), BuildError> {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= units.len() || failed.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let (c, from, to) = units[i];
+                        if cur.as_ref().is_none_or(|w| w.class != c) {
+                            if let Some(w) = cur.take() {
+                                done.push(finish(w, memory)?);
+                            }
+                            let orders = &classes[c].orders;
+                            let part = grant.bytes / orders.len().max(1);
+                            cur = Some(Writers {
+                                class: c,
+                                writers: orders
+                                    .iter()
+                                    .map(|o| RunWriter::new(*o, spill, part))
+                                    .collect(),
+                                nulls: vec![0; orders.len()],
+                            });
+                        }
+                        let w = cur.as_mut().unwrap();
+                        let mut err: Option<BuildError> = None;
+                        for (_, pages) in &classes[c].sectors[from..to] {
+                            for &vpid in pages {
+                                page_rows(&mut state, c, vpid, &mut |ix, oid, key| match key {
+                                    RowKey::Key(k) => {
+                                        if let Err(e) = w.writers[ix].push(k, oid) {
+                                            err.get_or_insert(e.into());
+                                        }
+                                    }
+                                    RowKey::AllNull => w.nulls[ix] += 1,
+                                    RowKey::NotNullViolation => {
+                                        err.get_or_insert(BuildError::NotNullViolation { oid });
+                                    }
+                                })?;
+                                if let Some(e) = err.take() {
+                                    return Err(e);
                                 }
                             }
-                            RowKey::AllNull => nulls[ix] += 1,
-                            RowKey::NotNullViolation => {
-                                err.get_or_insert(BuildError::NotNullViolation { oid });
-                            }
-                        });
-                        if let Some(e) = r.err().or(err.take()) {
-                            failed.lock().unwrap().get_or_insert(e);
-                            return;
                         }
                     }
-                }
-                let mut o = out.lock().unwrap();
-                for (ix, wr) in ws.into_iter().enumerate() {
-                    let g = grants[w * indexes + ix].lock().unwrap().take().unwrap();
-                    o.runs[ix].append(wr.finish(g));
-                    o.nulls[ix] += nulls[ix];
+                    if let Some(w) = cur.take() {
+                        done.push(finish(w, memory)?);
+                    }
+                    Ok(())
+                })();
+                drop(grant);
+                match r {
+                    Ok(()) => {
+                        let mut o = out.lock().unwrap();
+                        for (c, runs, nulls) in done {
+                            for (ix, (run, n)) in runs.into_iter().zip(nulls).enumerate() {
+                                o[c].runs[ix].append(run);
+                                o[c].nulls[ix] += n;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        failed.store(true, Ordering::Relaxed);
+                        first_err.lock().unwrap().get_or_insert(e);
+                    }
                 }
             });
         }
     });
-    match failed.into_inner().unwrap() {
+    match first_err.into_inner().unwrap() {
         Some(e) => Err(e),
         None => Ok(out.into_inner().unwrap()),
     }
+}
+
+/// A worker's writers of one class, finished: (class, runs per index, all-NULL rows per index).
+fn finish<'m>(
+    w: Writers,
+    memory: &'m MemoryLimit,
+) -> Result<(usize, Vec<IndexRuns<'m>>, Vec<u64>), BuildError> {
+    let runs = w
+        .writers
+        .into_iter()
+        .map(|wr| wr.finish_within(memory))
+        .collect::<std::io::Result<_>>()?;
+    Ok((w.class, runs, w.nulls))
 }

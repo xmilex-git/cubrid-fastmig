@@ -11,16 +11,26 @@ use fastmig_ondisk::{Vfid, Vpid};
 use std::io;
 use std::sync::{Mutex, OnceLock};
 
-pub type MakeSink<'a> = dyn Fn() -> io::Result<Box<dyn PageSink + Send>> + Sync + 'a;
+/// Creates the overflow key file and its sink, the first time a key overflows. The sink borrows the factory, so a
+/// factory over the target's space manager (`fill`) and a stand-alone one (a closure) both fit.
+pub trait MakeSink: Sync {
+    fn make(&self) -> io::Result<Box<dyn PageSink + Send + '_>>;
+}
+
+impl<F: Fn() -> io::Result<Box<dyn PageSink + Send>> + Sync> MakeSink for F {
+    fn make(&self) -> io::Result<Box<dyn PageSink + Send + '_>> {
+        self()
+    }
+}
 
 pub struct OvfKeyFile<'a> {
-    make: &'a MakeSink<'a>,
-    sink: OnceLock<Box<dyn PageSink + Send>>,
+    make: &'a dyn MakeSink,
+    sink: OnceLock<Box<dyn PageSink + Send + 'a>>,
     creating: Mutex<()>,
 }
 
 impl<'a> OvfKeyFile<'a> {
-    pub fn new(make: &'a MakeSink<'a>) -> Self {
+    pub fn new(make: &'a dyn MakeSink) -> Self {
         Self {
             make,
             sink: OnceLock::new(),
@@ -34,7 +44,7 @@ impl<'a> OvfKeyFile<'a> {
         }
         let _guard = self.creating.lock().unwrap();
         if self.sink.get().is_none() {
-            let _ = self.sink.set((self.make)()?);
+            let _ = self.sink.set(self.make.make()?);
         }
         Ok(self.sink.get().unwrap().as_ref())
     }

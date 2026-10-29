@@ -24,6 +24,11 @@ pub enum BuildError {
     NotNullViolation {
         oid: Oid,
     },
+    /// A heap page or record the key extractor cannot read (a damaged or unsupported source row).
+    Record {
+        oid: Oid,
+        what: String,
+    },
 }
 
 impl From<std::io::Error> for BuildError {
@@ -51,6 +56,7 @@ impl fmt::Display for BuildError {
             BuildError::NotNullViolation { oid } => {
                 write!(f, "row {oid:?} has a NULL in a NOT NULL key")
             }
+            BuildError::Record { oid, what } => write!(f, "row {oid:?}: {what}"),
         }
     }
 }

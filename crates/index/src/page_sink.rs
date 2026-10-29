@@ -15,7 +15,7 @@ pub trait PageSink: Sync {
     /// The file the pages belong to (root header `ovfid` names the overflow key file by it).
     fn vfid(&self) -> Vfid;
 
-    /// A new page of this file. The first page a B-tree sink hands out is the file's sticky first page, the root.
+    /// A new page of this file (a B-tree root is allocated with the file, before the build: `btree_file`).
     fn alloc_page(&self) -> io::Result<Vpid>;
 
     /// Writes a whole IO page at `vpid`, which `alloc_page` returned.
