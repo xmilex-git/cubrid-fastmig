@@ -49,9 +49,12 @@ pub fn value_to_develop(v: &Value) -> Value {
     }
 }
 
-/// Whether values of this domain are encoded differently in develop (CHAR, NCHAR, NUMERIC, or a collection of them):
-/// the test for a re-encoded class (R2 § 3 R7.1, workspace#474).
+/// Whether values of this domain are encoded differently in develop (CHAR, NCHAR, NUMERIC, a collection of them, or
+/// a collection without an element type, whose tagged elements may be any of them): the test for a re-encoded class
+/// (R2 § 3 R7.1, workspace#474; untyped collections workspace#499, release/11.4 `csql_grammar.y` `data_type: set_type`).
 pub fn changes_in_develop(d: &Domain) -> bool {
     matches!(d.ty, DbType::Char | DbType::Nchar | DbType::Numeric)
+        || matches!(d.ty, DbType::Set | DbType::Multiset | DbType::Sequence)
+            && d.set_domain.is_empty()
         || d.set_domain.iter().any(changes_in_develop)
 }

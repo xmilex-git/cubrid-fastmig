@@ -5,11 +5,13 @@
 //! Source: decisions workspace#482 1 (system class roles; a user domain on a reallocated system class refuses),
 //! 4 (re-encoded classes keep their repid), 5 (NCHAR(n) → CHAR(n), VARNCHAR(n) → VARCHAR(n), n > 2048 refuses);
 //! R3 § 5 rule A1 (a class is re-encoded when any representation has a type whose encoding changed: CHAR,
-//! NUMERIC, and NCHAR by decision 5); workspace#481 (pre-check refusals and warnings).
+//! NUMERIC, and NCHAR by decision 5; also a collection without an element type, workspace#499 — the test is
+//! `value::changes_in_develop`, shared with the record codec); workspace#481 (pre-check refusals and warnings).
 
-use fastmig_ondisk::Oid;
 use fastmig_ondisk::class_object::{ClassType, SchemaDomain};
-use fastmig_ondisk::value::DbType;
+use fastmig_ondisk::record::schema_domain;
+use fastmig_ondisk::value::{DbType, changes_in_develop};
+use fastmig_ondisk::{Oid, VersionLine};
 
 use crate::source_classes::SourceClass;
 use crate::system_classes::{SystemClassRole, source_role};
@@ -30,8 +32,8 @@ pub struct ClassPlan {
     pub oid: Oid,
     pub name: String,
     pub kind: ClassKind,
-    /// Every record is rewritten in the current representation (R3 rule C).
-    pub reencode: bool,
+    /// A re-encoded class (GLOSSARY): every record is rewritten in the current representation (R3 rule C).
+    pub re_encoded: bool,
     /// Reasons the migration must refuse.
     pub refusals: Vec<String>,
     /// Notices for the user.
@@ -43,6 +45,20 @@ fn walk<'a>(d: &'a SchemaDomain, out: &mut Vec<&'a SchemaDomain>) {
     for s in &d.set_domain {
         walk(s, out);
     }
+}
+
+/// The domain chain of every attribute: current attributes (all three kinds) and every representation's.
+fn attribute_domains(c: &SourceClass) -> Vec<(i32, &[SchemaDomain])> {
+    let k = &c.class;
+    let atts = k
+        .attributes
+        .iter()
+        .chain(&k.shared_attributes)
+        .chain(&k.class_attributes);
+    let reps = k.representations.iter().flat_map(|r| r.attributes.iter());
+    atts.map(|a| (a.id, a.domain.as_slice()))
+        .chain(reps.map(|a| (a.id, a.domain.as_slice())))
+        .collect()
 }
 
 /// Every domain node of the class: current attributes (all three kinds) and every representation.
@@ -98,20 +114,19 @@ pub fn classify(classes: &[SourceClass]) -> Vec<ClassPlan> {
             } else {
                 ClassKind::User
             };
-            let mut reencode = false;
+            let mut re_encoded = false;
+            for (att, chain) in attribute_domains(c) {
+                match schema_domain(VersionLine::V11_4, chain) {
+                    Ok(d) => re_encoded |= changes_in_develop(&d),
+                    Err(e) => refusals.push(format!("{name}: attribute id {att}: {e}")),
+                }
+            }
             for (att, d) in all_domains(c) {
-                match d.type_id {
-                    t if t == DbType::Char as i32 || t == DbType::Numeric as i32 => reencode = true,
-                    t if t == DbType::Nchar as i32 => {
-                        reencode = true;
-                        if d.precision > MAX_CHAR_PRECISION {
-                            refusals.push(format!(
-                                "{name}: attribute id {att} is NCHAR({}), above CHAR's {MAX_CHAR_PRECISION}",
-                                d.precision
-                            ));
-                        }
-                    }
-                    _ => {}
+                if d.type_id == DbType::Nchar as i32 && d.precision > MAX_CHAR_PRECISION {
+                    refusals.push(format!(
+                        "{name}: attribute id {att} is NCHAR({}), above CHAR's {MAX_CHAR_PRECISION}",
+                        d.precision
+                    ));
                 }
                 if kind == ClassKind::User
                     && !d.class_oid.is_null()
@@ -133,13 +148,13 @@ pub fn classify(classes: &[SourceClass]) -> Vec<ClassPlan> {
                 ));
             }
             // a view stores no records; its domains are still rewritten with the class object
-            reencode &= c.class.class_type != ClassType::Vclass;
+            re_encoded &= c.class.class_type != ClassType::Vclass;
             refusals.dedup();
             ClassPlan {
                 oid: c.oid,
                 name,
                 kind,
-                reencode,
+                re_encoded,
                 refusals,
                 warnings,
             }

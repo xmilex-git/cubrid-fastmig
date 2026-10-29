@@ -95,7 +95,7 @@ pub fn dry_run(
     let mut lines = Vec::new();
     for (c, p) in classes.iter().zip(&plans) {
         let what = match &p.kind {
-            ClassKind::User => format!("user{}", if p.reencode { ", re-encoded" } else { "" }),
+            ClassKind::User => format!("user{}", if p.re_encoded { ", re-encoded" } else { "" }),
             ClassKind::System(r) => format!("system {r:?}"),
         };
         let part = if c.class.partitions.is_empty() {
@@ -180,7 +180,7 @@ pub fn dry_run(
                 ClassKind::System(SystemClassRole::SameSlot { develop_name }) => {
                     format!("rows rewritten in the develop layout of {develop_name} in their slots")
                 }
-                _ if p.reencode => format!("records re-encoded to repid {}", c.class.repid),
+                _ if p.re_encoded => format!("records re-encoded to repid {}", c.class.repid),
                 _ => "records kept (patch)".into(),
             };
             lines.push(format!(

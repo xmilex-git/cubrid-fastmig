@@ -357,7 +357,7 @@ pub fn rewrite_user_class(
                     .is_some_and(|d| changes_in_develop(&d))
             })
         });
-    if plan.reencode || view_changes {
+    if plan.re_encoded || view_changes {
         // records are rewritten in the current representation, laid out as develop orders it
         let layout = RecordLayout::for_repid(FROM, c, c.repid as u32)?.to_develop();
         let mut ordered = Vec::with_capacity(o.attributes.len());
