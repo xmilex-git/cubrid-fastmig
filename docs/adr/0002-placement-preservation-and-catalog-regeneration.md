@@ -14,3 +14,4 @@
 - 페이지마다 하는 일은 복사 방식(clone/copy)과 페이지 처리 등급(그대로/patch/transform)의 두 축으로 정해진다([G1](https://github.com/xmilex-git/workspace/issues/481)).
 - 값 인코딩이 바뀐 타입(11.4→develop은 CHAR·NUMERIC·NCHAR/VARNCHAR)을 가진 클래스는 레코드를 같은 슬롯에 재인코딩한다([R2](https://github.com/xmilex-git/workspace/blob/research/fastmig-r2-heap-record/docs/research/fastmig/r2-heap-record.md)).
 - 출발·도착 식별자가 OID로 맞물려, 검증기가 기존 결함을 같은 식별자로 걸러낼 수 있다([ADR 0007](0007-rust-verifier-instead-of-checkdb.md)).
+- 원본 데이터를 담은 시스템 카탈로그 행(`_db_user`, `_db_password`, `_db_authorization`, `db_root`, `_db_trigger`, `_db_serial`, `_db_stored_procedure*`, `_db_synonym`, `_db_server`, `_db_ha_apply_info`)도 사용자 레코드처럼 같은 슬롯에 도착 레이아웃으로 재기록한다. 그래서 owner·트리거·grant가 가리키는 행 OID를 재매핑하지 않는다. 클래스 객체에서 파생되거나 정적인 카탈로그 테이블만 새로 할당한다([G2](https://github.com/xmilex-git/workspace/issues/482)).

@@ -52,6 +52,14 @@ _Avoid_: 스키마 버전, 레이아웃 버전
 도착 버전 포맷의 클래스 객체·`_db_*` 카탈로그 테이블·representation 디렉터리·시스템 뷰를 출발 DB의 클래스 객체에서 새로 쓰는 일. 출발 카탈로그 행을 바이트 그대로 옮기지 않는다.
 _Avoid_: 카탈로그 변환, 카탈로그 업그레이드(엔진 upgradedb와 섞인다)
 
+**카탈로그 템플릿 (catalog template)**:
+도착 버전과 charset마다 그 버전 엔진으로 새로 만든 DB에서 뽑아 이 저장소에 데이터로 둔 시스템 클래스 정의와 정적 카탈로그 행. 카탈로그 재생성의 재료다.
+_Avoid_: 템플릿 DB(파일 자체와 섞인다), 시드
+
+**재인코딩 클래스 (re-encoded class)**:
+어느 representation에든 값 인코딩이 바뀐 타입이 있어서, 모든 레코드를 현재 representation으로 다시 쓰는 클래스. 그 밖의 클래스는 레코드와 representation을 그대로 둔다.
+_Avoid_: TRANSFORM 클래스(페이지 처리 등급 transform과 섞인다), 변환 클래스
+
 **일반 인덱스 (plain index)**:
 키가 칼럼 값만으로 정해지는 인덱스. PK·unique·FK·일반 B-tree가 여기에 들고, 도구가 전부 다시 빌드한다.
 _Avoid_: 보통 인덱스, 기본 인덱스

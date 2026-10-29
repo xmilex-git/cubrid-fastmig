@@ -11,3 +11,4 @@
 - 엔진이 카탈로그를 만들어 주는 길이 사라져, 카탈로그 설계가 배치 보존 + Rust 재생성으로 바뀌었다([ADR 0002](0002-placement-preservation-and-catalog-regeneration.md)).
 - 식 평가(XASL)가 필요한 함수·필터 인덱스는 도구가 만들 수 없다([ADR 0006](0006-defer-function-and-filter-indexes.md)).
 - 온디스크 구조체는 버전마다 손으로 옮겨 적고, 기준 DB의 실제 페이지로 적합성을 확인한다.
+- 시스템 카탈로그 정의는 실행 시점이 아니라 빌드 시점의 엔진 산출물(카탈로그 템플릿)에서 가져온다. 이 결정의 경계는 [ADR 0011](0011-catalog-template-is-build-time-engine-output.md)이 정한다.
