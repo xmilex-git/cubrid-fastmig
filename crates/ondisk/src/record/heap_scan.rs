@@ -50,7 +50,7 @@ fn slotted(page: &[u8], vpid: Vpid) -> io::Result<SlottedPage<'_>> {
 
 /// Overflow page layouts (engine `OVERFLOW_FIRST_PART`: `next_vpid` @0, `length` i32 @8, data @12;
 /// `OVERFLOW_REST_PART`: `next_vpid` @0, data @8), in the DB area of each overflow page.
-fn read_overflow(vs: &VolumeSet, first: Vpid) -> io::Result<Vec<u8>> {
+pub(crate) fn read_overflow(vs: &VolumeSet, first: Vpid) -> io::Result<Vec<u8>> {
     let page = vs.read_page(first)?;
     let area = db_area(&page);
     let length = get_i32(area, 8);

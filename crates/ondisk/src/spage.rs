@@ -506,6 +506,23 @@ impl<'a> SpageEditor<'a> {
         Ok(())
     }
 
+    /// Engine `spage_vacuum_slot` (develop :4826-4865, same in 11.4): the slot keeps its id and length, loses its
+    /// offset, and becomes `REC_DELETED_WILL_REUSE` (`reusable`) or `REC_MARKDELETED`; only `total_free` and
+    /// `num_records` change, so a [`Self::compact`] usually follows.
+    pub fn vacuum_slot(&mut self, slotid: usize, reusable: bool) -> Result<(), SpageError> {
+        let mut s = self.live(slotid).ok_or(SpageError::NoRecord)?;
+        self.add_h(H_NUM_RECORDS, -1);
+        self.add_h(H_TOTAL_FREE, (s.length + self.waste(s.length)) as i32);
+        s.offset = SPAGE_EMPTY_OFFSET;
+        s.rtype = if reusable {
+            RecordType::DeletedWillReuse
+        } else {
+            RecordType::MarkDeleted
+        } as u32;
+        self.set_slot(slotid, s);
+        Ok(())
+    }
+
     /// Engine `spage_compact`: moves every record down in offset order so the free space is one area.
     pub fn compact(&mut self) -> Result<(), SpageError> {
         let n = self.num_slots();
