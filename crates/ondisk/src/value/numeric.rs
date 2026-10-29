@@ -7,6 +7,7 @@
 //! `object_primitive.c:117-157` (header layout, size tables), `:8722-8845` (`mr_data_writeval_numeric`,
 //! `mr_data_readval_numeric`), `:8945` (`mr_get_fixed_numeric_size`); R2 § 2.2 (CBRD-26006 #6486).
 
+use crate::value::domain::DEFAULT_NUMERIC_PRECISION_DEVELOP;
 use crate::value::or_buf::{DecodeResult, OrReader, OrWriter};
 
 /// Engine develop `NUMERIC_HEADER_SIZE`.
@@ -18,8 +19,6 @@ const FLOAT_PRECISION_TO_SIZE: [usize; 41] = [
     0, 4, 4, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 12, 12, 12, 12, 12, 12, 12, 12, 12, 16, 16, 16, 16, 16,
     16, 16, 16, 16, 16, 20, 20, 20, 20, 20, 20, 20, 20, 20,
 ];
-/// Engine develop `DB_DEFAULT_NUMERIC_PRECISION`: a domain of this precision is a floating NUMERIC.
-const DEVELOP_FLOATING_PRECISION: i32 = 40;
 
 /// A NUMERIC value: unscaled integer as sign + magnitude, with the precision and scale it is read under.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -29,6 +28,9 @@ pub struct Numeric {
     pub magnitude: [u8; 17],
     pub precision: i32,
     pub scale: i32,
+    /// Engine develop floating-NUMERIC mark of a `DB_VALUE`: read under a domain of `DB_DEFAULT_NUMERIC_PRECISION`.
+    /// The writer sizes such a value by its precision, not by its magnitude. Never set for an 11.4 value.
+    pub floating: bool,
 }
 
 impl Numeric {
@@ -50,6 +52,7 @@ pub fn read_numeric_11_4(r: &mut OrReader, precision: i32, scale: i32) -> Decode
         magnitude,
         precision,
         scale,
+        floating: false,
     })
 }
 
@@ -66,8 +69,9 @@ pub fn write_numeric_11_4(w: &mut OrWriter, n: &Numeric) {
 }
 
 /// Reads a develop NUMERIC: `[size | sign<<7][precision | scale_sign<<7][|scale|]` then the low `size - 3` magnitude
-/// bytes. Precision and scale come from the header.
-pub fn read_numeric_develop(r: &mut OrReader) -> DecodeResult<Numeric> {
+/// bytes. Precision and scale come from the header; the value is floating when `domain_precision` is the default
+/// precision (`mr_data_readval_numeric`).
+pub fn read_numeric_develop(r: &mut OrReader, domain_precision: i32) -> DecodeResult<Numeric> {
     let at = r.pos();
     let h = r.bytes(HEADER_SIZE)?;
     let size = (h[0] & 0x7F) as usize;
@@ -81,6 +85,10 @@ pub fn read_numeric_develop(r: &mut OrReader) -> DecodeResult<Numeric> {
     if !(HEADER_SIZE + 1..=20).contains(&size) {
         return Err(r.error(format!("NUMERIC size {size} at {at}")));
     }
+    let floating = domain_precision == DEFAULT_NUMERIC_PRECISION_DEVELOP;
+    if floating && precision as usize >= FLOAT_PRECISION_TO_SIZE.len() {
+        return Err(r.error(format!("floating NUMERIC precision {precision} at {at}")));
+    }
     let data = r.bytes(size - HEADER_SIZE)?;
     let mut magnitude = [0u8; 17];
     magnitude[17 - data.len()..].copy_from_slice(data);
@@ -89,12 +97,13 @@ pub fn read_numeric_develop(r: &mut OrReader) -> DecodeResult<Numeric> {
         magnitude,
         precision,
         scale,
+        floating,
     })
 }
 
 /// Writes a develop NUMERIC (engine `mr_data_writeval_numeric`); zero is written as positive.
 pub fn write_numeric_develop(w: &mut OrWriter, n: &Numeric) {
-    let size = if n.precision == DEVELOP_FLOATING_PRECISION {
+    let size = if n.floating {
         FLOAT_PRECISION_TO_SIZE[n.precision as usize]
     } else {
         BYTES_TO_SIZE[n.significant_bytes()]

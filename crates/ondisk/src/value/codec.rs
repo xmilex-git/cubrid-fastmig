@@ -81,7 +81,7 @@ pub fn decode_data(version: VersionLine, r: &mut OrReader, d: &Domain) -> Decode
         T::Enumeration => Value::Enumeration(r.u16()?),
         T::Numeric => Value::Numeric(match version {
             VersionLine::V11_4 => read_numeric_11_4(r, d.precision, d.scale)?,
-            VersionLine::Develop => read_numeric_develop(r)?,
+            VersionLine::Develop => read_numeric_develop(r, d.precision)?,
         }),
         T::Char | T::Nchar => {
             let s = match version {

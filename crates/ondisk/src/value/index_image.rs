@@ -418,7 +418,7 @@ pub fn decode_image(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<
         T::Enumeration => Value::Enumeration(u16::from_le_bytes([b[0], b[1]])),
         T::Numeric => Value::Numeric(match version {
             VersionLine::V11_4 => read_numeric_11_4(&mut OrReader::new(b), d.precision, d.scale)?,
-            VersionLine::Develop => read_numeric_develop(&mut OrReader::new(b))?,
+            VersionLine::Develop => read_numeric_develop(&mut OrReader::new(b), d.precision)?,
         }),
         T::Char | T::Nchar if fixed_char_11_4(version, d) => {
             let s = if d.precision == FLOATING_PRECISION {
