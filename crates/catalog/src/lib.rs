@@ -4,6 +4,8 @@ pub mod attr_default;
 pub mod class_rewrite;
 pub mod class_rows;
 pub mod classify;
+pub mod ct_index_rows;
+pub mod ct_rows;
 pub mod disk_repr_build;
 pub mod dry_run;
 pub mod output_sql;
