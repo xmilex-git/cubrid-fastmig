@@ -185,6 +185,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     let est = resource_estimate::estimate(
         &s.vols,
         plan.version_pair,
+        plan.source_version,
         limits::worker_limit(&p)?,
         limits::physical_memory()?,
     )?;

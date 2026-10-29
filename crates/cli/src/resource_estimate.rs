@@ -32,7 +32,7 @@ use fastmig_ondisk::class_object::class_properties;
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::heap_rewrite::{ClassReEncoder, ReEncode};
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Oid, VersionLine};
+use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 use fastmig_plan::version_pair::VersionPair;
 
 /// One index's pairs, by its owner class (a BTID shared by classes has one row per class).
@@ -63,6 +63,7 @@ fn invalid(e: impl std::fmt::Display) -> io::Error {
 pub fn estimate(
     vols: &VolumeSet,
     pair: VersionPair,
+    source: SourceVersion,
     workers: usize,
     physical_memory: u64,
 ) -> io::Result<ResourceEstimate> {
@@ -83,7 +84,7 @@ pub fn estimate(
             count(vols, &classes, &HashMap::new(), workers)?
         }
         VersionLine::V11_4 => {
-            let src = SourceCatalog::read(vols, VersionLine::V11_4)?;
+            let src = SourceCatalog::read(vols, source)?;
             let mut users = Vec::new();
             let mut re_encoders = HashMap::new();
             let mut allowance = Vec::new();
