@@ -284,6 +284,64 @@ pub fn same_slot_rows(
         out.push(("_db_authorization", Row { oid: auth, values }));
     }
 
+    // procedures develop's createdb installs (`sp_builtin_install`, public.dbms_output.*) that the source lacks — a
+    // pre-11.4 source (R12 § 4.6, workspace#529) — with their arguments, in the template's `args` order
+    let have: Vec<Vec<u8>> = out
+        .iter()
+        .filter(|(t, _)| *t == "_db_stored_procedure")
+        .filter_map(|(_, r)| str_of(r.values.get("unique_name")).map(<[u8]>::to_vec))
+        .collect();
+    let (spt, argt) = (
+        target("_db_stored_procedure")?,
+        target("_db_stored_procedure_args")?,
+    );
+    let targs = template_rows(i.template, "_db_stored_procedure_args")?;
+    for sp in template_rows(i.template, "_db_stored_procedure")? {
+        if str_of(sp.values.get("unique_name")).is_none_or(|n| have.iter().any(|h| h == n)) {
+            continue;
+        }
+        let oid = alloc("_db_stored_procedure");
+        let mut values = rewrite(
+            "_db_stored_procedure",
+            "_db_stored_procedure",
+            &spt.class,
+            &sp,
+            &i.now,
+        )?
+        .values;
+        if let Some(Value::Object(o)) = values.get("owner") {
+            values.insert("owner".into(), Value::Object((i.user)(*o)));
+        }
+        if let Some(Value::Set(s)) = values.get_mut("args") {
+            for e in &mut s.elements {
+                let Value::Object(a) = e.value else { continue };
+                let ta = targs
+                    .iter()
+                    .find(|r| r.oid == a)
+                    .ok_or_else(|| err(format!("template argument {a:?} missing")))?;
+                let aoid = alloc("_db_stored_procedure_args");
+                let mut av = rewrite(
+                    "_db_stored_procedure_args",
+                    "_db_stored_procedure_args",
+                    &argt.class,
+                    ta,
+                    &i.now,
+                )?
+                .values;
+                av.insert("sp_of".into(), Value::Object(oid));
+                out.push((
+                    "_db_stored_procedure_args",
+                    Row {
+                        oid: aoid,
+                        values: av,
+                    },
+                ));
+                e.value = Value::Object(aoid);
+            }
+        }
+        out.push(("_db_stored_procedure", Row { oid, values }));
+    }
+
     // grants: the template's system grants, then the source's grants on user classes and procedures
     let tgrants: HashMap<Oid, Vec<Vec<Value>>> = tauths
         .iter()

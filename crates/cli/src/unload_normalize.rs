@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use fastmig_catalog::sp_target_signature::split_target_signature;
 use fastmig_ondisk::{SourceVersion, VersionLine};
 
 /// Which side's entries a rule rewrites.
@@ -31,6 +32,14 @@ pub enum Rewrite {
     ClassIdNames,
     /// `|file:<digits>/ces_` → `|file:ces_`: drop a numeric directory in front of an LOB locator's `ces_` part.
     LobClassDir,
+    /// A pre-11.4 `call [change_sp_owner]('<name>', '<OWNER>') on class [db_root];` is folded into its
+    /// `CREATE FUNCTION|PROCEDURE [<name>]` entry as develop prints it: `[<owner>].[<name>]`, `AUTHID OWNER` before
+    /// `AS LANGUAGE`, and the NAME split and joined as `target_class.target_method`. The call entry is emptied.
+    SpOwnerAuthid,
+    /// 11.2's serial print: lower-case clause lines become develop's (`noCYCLE` as develop writes it), `create serial
+    /// [<name>]` with its `call [change_serial_owner] ('<name>', '<OWNER>')` becomes `CREATE SERIAL [<owner>].[<name>]`,
+    /// and the `call [find_user]` lines develop does not print are emptied.
+    Serial11_2,
 }
 
 pub struct Rule {
@@ -42,18 +51,33 @@ pub struct Rule {
 }
 
 /// The rules of one version pair, applied in order.
-pub fn rules(source: SourceVersion, target: VersionLine) -> &'static [Rule] {
+pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
     match (source, target) {
-        // 11.2 and 11.3 unloads matched 11.4's under these rules on a smoke DB (workspace#529); rules of their own
-        // join here when a baseline DB shows one
-        (
-            SourceVersion::V11_2 | SourceVersion::V11_3 | SourceVersion::V11_4,
-            VersionLine::Develop,
-        ) => V11_4_TO_DEVELOP,
+        (SourceVersion::V11_4, VersionLine::Develop) => V11_4_TO_DEVELOP.iter().collect(),
+        (SourceVersion::V11_3, VersionLine::Develop) => {
+            V11_4_TO_DEVELOP.iter().chain(PRE_11_4_TO_DEVELOP).collect()
+        }
+        (SourceVersion::V11_2, VersionLine::Develop) => V11_4_TO_DEVELOP
+            .iter()
+            .chain(PRE_11_4_TO_DEVELOP)
+            .chain(V11_2_TO_DEVELOP)
+            .collect(),
         // one line prints alike; a downgrade is out of scope (ADR 0003)
-        _ => &[],
+        _ => Vec::new(),
     }
 }
+
+// 11.2 and 11.3 print stored procedures the pre-11.4 way; 11.2 also prints serials its own way (smoke DBs, workspace#529)
+const PRE_11_4_TO_DEVELOP: &[Rule] = &[
+    // CBRD-25184 (1ea4a86e0, CUBRID/cubrid#5438): 11.4+ prints a procedure owner-qualified with its AUTHID and the
+    // NAME split into target_class.target_method; before, an unqualified name and a separate change_sp_owner call
+    Rule {
+        name: "sp-owner-authid",
+        files: &["schema"],
+        side: Side::Source,
+        rewrite: Rewrite::SpOwnerAuthid,
+    },
+];
 
 const V11_4_TO_DEVELOP: &[Rule] = &[
     // CBRD-27324 (develop 5de66400a, CUBRID/cubrid#8104) removed the DEDUPLICATE index feature; 11.4 prints level 0
@@ -105,7 +129,7 @@ const V11_4_TO_DEVELOP: &[Rule] = &[
 
 /// Applies `rules` to one file's entries of one side; returns how many entries each rule changed.
 pub fn normalize(
-    rules: &[Rule],
+    rules: &[&Rule],
     suffix: &str,
     source_side: bool,
     entries: &mut [Vec<u8>],
@@ -130,6 +154,8 @@ pub fn normalize(
                 Rewrite::NcharLiteral => entries.iter_mut().filter_map(drop_nchar_prefix).count(),
                 Rewrite::ClassIdNames => class_id_names(entries),
                 Rewrite::LobClassDir => entries.iter_mut().filter_map(drop_lob_class_dir).count(),
+                Rewrite::SpOwnerAuthid => sp_owner_authid(entries),
+                Rewrite::Serial11_2 => serial_11_2(entries),
             }
         })
         .collect()
@@ -257,4 +283,125 @@ fn drop_lob_class_dir(e: &mut Vec<u8>) -> Option<()> {
         e.drain(from..to);
     }
     Some(())
+}
+
+/// The byte string between `open` and the next `close` after it, and where it ends.
+fn between<'a>(e: &'a [u8], from: usize, open: &[u8], close: u8) -> Option<(&'a [u8], usize)> {
+    let start = from + e[from..].windows(open.len()).position(|w| w == open)? + open.len();
+    let len = e[start..].iter().position(|&b| b == close)?;
+    Some((&e[start..start + len], start + len))
+}
+
+/// See [`Rewrite::SpOwnerAuthid`]; returns how many entries changed (calls emptied and procedures rewritten).
+fn sp_owner_authid(entries: &mut [Vec<u8>]) -> usize {
+    const CALL: &[u8] = b"call [change_sp_owner]('";
+    let mut owner: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    let mut changed = 0;
+    for e in entries.iter_mut().filter(|e| e.starts_with(CALL)) {
+        let Some((name, end)) = between(e, 0, b"('", b'\'') else {
+            continue;
+        };
+        let Some((user, _)) = between(e, end, b", '", b'\'') else {
+            continue;
+        };
+        owner.insert(name.to_vec(), user.to_ascii_lowercase());
+        e.clear();
+        changed += 1;
+    }
+    for e in entries.iter_mut() {
+        let Some(rest) = e
+            .strip_prefix(b"CREATE FUNCTION [")
+            .or_else(|| e.strip_prefix(b"CREATE PROCEDURE ["))
+        else {
+            continue;
+        };
+        let Some(name_len) = rest.iter().position(|&b| b == b']') else {
+            continue;
+        };
+        let Some(user) = owner.get(&rest[..name_len]) else {
+            continue;
+        };
+        let at = e.len() - rest.len();
+        let mut out = [&e[..at], user.as_slice(), b"].[", &e[at..]].concat();
+        if replace(&mut out, b" AS LANGUAGE ", b" AUTHID OWNER AS LANGUAGE ").is_none() {
+            continue;
+        }
+        if let Some((target, end)) = between(&out, 0, b" NAME '", b'\'')
+            && let Some((class, method)) = split_target_signature(target)
+        {
+            let start = end - target.len();
+            out = [
+                &out[..start],
+                class.as_slice(),
+                b".",
+                method.as_slice(),
+                &out[end..],
+            ]
+            .concat();
+        }
+        *e = out;
+        changed += 1;
+    }
+    changed
+}
+
+const V11_2_TO_DEVELOP: &[Rule] = &[
+    // the serial print of release/11.2 (unload_schema.c), seen on an 11.2.9 smoke DB (workspace#529)
+    Rule {
+        name: "serial-11-2",
+        files: &["schema"],
+        side: Side::Source,
+        rewrite: Rewrite::Serial11_2,
+    },
+];
+
+/// See [`Rewrite::Serial11_2`]; returns how many entries changed.
+fn serial_11_2(entries: &mut [Vec<u8>]) -> usize {
+    const CLAUSES: [(&[u8], &[u8]); 9] = [
+        (b"\t increment by ", b"\t INCREMENT BY "),
+        (b"\t maxvalue ", b"\t MAXVALUE "),
+        (b"\t minvalue ", b"\t MINVALUE "),
+        (b"\t start with ", b"\t START WITH "),
+        (b"\t cache ", b"\t CACHE "),
+        (b"\t nocache", b"\t NOCACHE"),
+        (b"\t nocycle", b"\t noCYCLE"),
+        (b"\t cycle", b"\t CYCLE"),
+        (b"\t comment ", b"\t COMMENT "),
+    ];
+    const CALL: &[u8] = b"call [change_serial_owner] ('";
+    let mut owner: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    let mut changed = 0;
+    for e in entries.iter_mut() {
+        if e.starts_with(b"call [find_user](") {
+            e.clear();
+            changed += 1;
+        } else if e.starts_with(CALL) {
+            let Some((name, end)) = between(e, 0, b"('", b'\'') else {
+                continue;
+            };
+            let Some((user, _)) = between(e, end, b", '", b'\'') else {
+                continue;
+            };
+            owner.insert(name.to_vec(), user.to_ascii_lowercase());
+            e.clear();
+            changed += 1;
+        } else if let Some((from, to)) = CLAUSES.iter().find(|(f, _)| e.starts_with(f)) {
+            *e = [*to, &e[from.len()..]].concat();
+            changed += 1;
+        }
+    }
+    for e in entries.iter_mut() {
+        let Some(rest) = e.strip_prefix(b"create serial [") else {
+            continue;
+        };
+        let Some(name_len) = rest.iter().position(|&b| b == b']') else {
+            continue;
+        };
+        let Some(user) = owner.get(&rest[..name_len]) else {
+            continue;
+        };
+        *e = [b"CREATE SERIAL [", user.as_slice(), b"].[", rest].concat();
+        changed += 1;
+    }
+    changed
 }

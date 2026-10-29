@@ -29,6 +29,7 @@ pub mod same_version_catalog;
 pub mod serial_name;
 pub mod source_catalog;
 pub mod source_classes;
+pub mod sp_target_signature;
 pub mod static_rows;
 pub mod system_classes;
 pub mod target_classes;

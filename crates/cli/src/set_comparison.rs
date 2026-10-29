@@ -42,7 +42,7 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
         &[],
     )?;
     let pair = match (p.value("--source-version"), p.value("--target-version")) {
-        (None, None) => &[],
+        (None, None) => Vec::new(),
         (Some(s), Some(t)) => rules(source_version(s)?, version_line(t)?),
         _ => {
             return Err(CliError::Usage(
@@ -80,9 +80,12 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
             None => Vec::new(),
         };
         let (ns, nt) = (
-            normalize(pair, suffix, true, &mut s),
-            normalize(pair, suffix, false, &mut t),
+            normalize(&pair, suffix, true, &mut s),
+            normalize(&pair, suffix, false, &mut t),
         );
+        // an entry a rule emptied was folded into another (sp-owner-authid)
+        s.retain(|e| !e.is_empty());
+        t.retain(|e| !e.is_empty());
         for (n, (a, b)) in ns.into_iter().zip(nt).enumerate() {
             normalized[n].0 += a;
             normalized[n].1 += b;

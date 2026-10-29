@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::io;
 
-use fastmig_ondisk::value::DecodeResult;
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{SourceVersion, VersionLine};
 
@@ -57,16 +56,11 @@ impl SourceCatalog {
                 .ok_or_else(|| missing(name))?;
             read_rows(vs, line, c)
         };
-        let same_slot = same_slot(version)
-            .map(|(src, dev)| {
-                let shaped = rows(src)?
-                    .into_iter()
-                    .map(|r| to_11_4_shape(version, src, r))
-                    .collect::<DecodeResult<_>>()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.what))?;
-                Ok((*dev, shaped))
-            })
+        let mut same_slot = same_slot(version)
+            .map(|(src, dev)| Ok((*dev, rows(src)?)))
             .collect::<io::Result<_>>()?;
+        to_11_4_shape(version, &mut same_slot, &classes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.what))?;
         let static_source = FROM_SOURCE
             .iter()
             .map(|t| Ok((*t, rows(t)?)))

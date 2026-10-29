@@ -17,8 +17,9 @@ use crate::template::{CatalogTemplate, TemplateRecord};
 /// System classes whose rows the template carries: the static rows (`_db_data_type`, `dual`), the users,
 /// passwords, authorizations and grants of a fresh database (DBA, PUBLIC, INFORMATION_SCHEMA and their grants on
 /// system classes), `db_root` for its one row, and the built-in charsets and collations the source's rows are
-/// checked against (workspace#482 decision 3).
-pub const ROW_CLASSES: [&str; 9] = [
+/// checked against (workspace#482 decision 3), and the built-in procedures with their arguments a pre-11.4 source
+/// lacks (`public.dbms_output.*`, R12 § 4.6, workspace#529).
+pub const ROW_CLASSES: [&str; 11] = [
     "_db_data_type",
     "dual",
     "_db_user",
@@ -28,6 +29,8 @@ pub const ROW_CLASSES: [&str; 9] = [
     "db_root",
     "_db_charset",
     "_db_collation",
+    "_db_stored_procedure",
+    "_db_stored_procedure_args",
 ];
 
 pub fn extract(

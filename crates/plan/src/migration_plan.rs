@@ -20,6 +20,7 @@ use fastmig_catalog::deferred_indexes::{deferred_indexes, report_name};
 use fastmig_catalog::output_sql::{deferred_indexes_sql, plcsql_routines, recompile_plcsql_sql};
 use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
+use fastmig_catalog::sp_target_signature::{TARGET_CLASS_LEN, split_target_signature};
 use fastmig_catalog::system_classes::SystemClassRole;
 use fastmig_catalog::{attr_default, template_store};
 use fastmig_ondisk::boot_parm::BootDbParm;
@@ -295,15 +296,23 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
 
     // classes: roles and re-encoding only differ across lines (workspace#482)
     let classes = read_classes(i.vols, line)?;
-    if matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3)
-        && !rows_of(i.vols, line, &classes, b"_db_stored_procedure")?.is_empty()
-    {
-        // the pre-11.4 stored procedure rows wait for their develop mapping (R12)
-        refusals.push(format!(
-            "source {} has stored procedures: their catalog rows are not transformed yet (workspace#529, \
-             R12 workspace#521)",
-            version.name()
-        ));
+    if matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
+        // a pre-11.4 Java target must split into develop's target_class/target_method (R12 § 5.1 2)
+        for r in rows_of(i.vols, line, &classes, b"_db_stored_procedure")? {
+            let name = String::from_utf8_lossy(text(r.values.get("sp_name")).unwrap_or_default())
+                .into_owned();
+            let target = text(r.values.get("target")).unwrap_or_default();
+            match split_target_signature(target) {
+                None => refusals.push(format!(
+                    "stored procedure {name}: target {:?} has no Class.method(..) (workspace#529)",
+                    String::from_utf8_lossy(target)
+                )),
+                Some((c, _)) if c.len() > TARGET_CLASS_LEN => refusals.push(format!(
+                    "stored procedure {name}: target class over {TARGET_CLASS_LEN} bytes (workspace#529)"
+                )),
+                Some(_) => {}
+            }
+        }
     }
     let class_plans = regenerates.then(|| classify(&classes));
     let mut treatments = Vec::new();
