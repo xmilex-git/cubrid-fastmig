@@ -5,11 +5,15 @@
 //! Input: the target directory. Output: a marker that records created paths; [`IncompleteMarker::finish`] removes
 //! it once verification passed.
 //! Rules: a missing or empty target directory is used as is; a directory holding a marker is cleaned of the listed
-//! paths first; any other non-empty directory is refused.
-//! Source: decision G1 workspace#481 (no resume; rerun cleans what the tool made); ADR 0004.
+//! paths first; any other non-empty directory is refused. The run holds an exclusive lock on the marker until it
+//! ends, so a second run on the same target is refused before it cleans or writes anything; the lock goes with the
+//! process, so a rerun after a kill takes it. The lock is `flock(2)` (std `File::try_lock`), not an `fcntl` lock: a
+//! POSIX lock would be dropped as soon as any other descriptor of the marker in this process is closed.
+//! Source: decision G1 workspace#481 (no resume; rerun cleans what the tool made); ADR 0004; 1번 세션 decision on
+//! workspace#526 (two runs on one --dest).
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -26,12 +30,16 @@ impl IncompleteMarker {
     /// Prepares `target_dir` for a fresh run and writes the marker in it.
     pub fn prepare(target_dir: &Path) -> io::Result<Self> {
         let path = target_dir.join(MARKER_NAME);
-        if path.exists() {
-            remove_listed(&path)?;
-            fs::remove_file(&path)?;
-        }
+        let only_marker = |dir: &Path| -> io::Result<bool> {
+            for e in fs::read_dir(dir)? {
+                if e?.file_name() != MARKER_NAME {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
         if target_dir.exists() {
-            if fs::read_dir(target_dir)?.next().is_some() {
+            if !path.exists() && !only_marker(target_dir)? {
                 return Err(io::Error::other(format!(
                     "{} is not empty and holds no {MARKER_NAME}; refusing to write into it",
                     target_dir.display()
@@ -40,10 +48,36 @@ impl IncompleteMarker {
         } else {
             fs::create_dir_all(target_dir)?;
         }
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
+            .read(true)
             .append(true)
-            .create_new(true)
+            .create(true)
             .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::other(format!(
+                    "another migrate is running on this target ({} is locked)",
+                    path.display()
+                )));
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("{}: cannot lock: {e}", path.display()),
+                ));
+            }
+        }
+        let mut listed = String::new();
+        file.read_to_string(&mut listed)?;
+        remove_listed(&listed)?;
+        file.set_len(0)?;
+        if !only_marker(target_dir)? {
+            return Err(io::Error::other(format!(
+                "{} still holds files the previous run did not list; refusing to write into it",
+                target_dir.display()
+            )));
+        }
         Ok(IncompleteMarker {
             path,
             file: Mutex::new(file),
@@ -97,8 +131,7 @@ impl IncompleteMarker {
 }
 
 /// Removes the paths a previous run listed, newest first, so directories are empty by the time they are reached.
-fn remove_listed(marker: &Path) -> io::Result<()> {
-    let listed = fs::read_to_string(marker)?;
+fn remove_listed(listed: &str) -> io::Result<()> {
     for line in listed.lines().rev() {
         let p = Path::new(line.strip_prefix(SCRATCH).unwrap_or(line));
         let removed = match fs::symlink_metadata(p) {

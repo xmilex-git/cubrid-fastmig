@@ -61,7 +61,8 @@ use fastmig_index::temp_disk::TEMP_DISK;
 
 const HELP: &str = "\
 cubrid-fastmig migrate <db> --dest <dir> [options]
-  --dest <dir>                   target directory for the volumes (must be empty or hold FASTMIG_INCOMPLETE)
+  --dest <dir>                   target directory for the volumes (must be empty or hold FASTMIG_INCOMPLETE;
+                                 refused while another migrate holds its lock)
   --target-version 11.4|develop  target release line (default: develop; 11.4 is refused: no 11.4 layout
                                  B-tree builder)
   --log-dir <dir>                target log directory (default: --dest)
