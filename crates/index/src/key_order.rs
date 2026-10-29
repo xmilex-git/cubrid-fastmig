@@ -18,6 +18,13 @@ pub trait KeyOrder: Sync {
     /// Leading columns on which `a` and `b` are equal (0..=columns()), for the partial-key statistics.
     fn common_columns(&self, a: &[u8], b: &[u8]) -> usize;
 
+    /// Leading NULL columns of `key` (0 for a single-column key, whose NULL keys are not in the tree). The engine's
+    /// partial-key count starts from an all-NULL previous key, so these columns of the first key count as no new
+    /// prefix (`btree_get_stats_midxkey`: saved values start NULL, compared with total order).
+    fn leading_null_columns(&self, _key: &[u8]) -> usize {
+        0
+    }
+
     /// Radix words of `key` into `out` (cleared by the caller). The sort (`sort_run`) takes them a byte at a time,
     /// high byte first; the default gives none and the sort runs on `compare` alone. Format, after PR
     /// CUBRID/cubrid#8209 `btree_sort_radix.cpp` (`radix_sort_resolve_key`, `fixed_word_to_order`, `value_word`,

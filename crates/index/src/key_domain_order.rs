@@ -25,4 +25,14 @@ impl KeyOrder for KeyDomain {
     fn radix_words(&self, key: &[u8], out: &mut Vec<u64>) {
         KeyDomain::radix_words(self, key, out)
     }
+
+    fn leading_null_columns(&self, key: &[u8]) -> usize {
+        if !self.midxkey {
+            return 0;
+        }
+        // MIDXKEY null bitmap: bit i % 8 of byte i / 8 set = column i present
+        (0..self.n_columns())
+            .take_while(|&i| key.get(i / 8).is_some_and(|b| b & (1 << (i % 8)) == 0))
+            .count()
+    }
 }

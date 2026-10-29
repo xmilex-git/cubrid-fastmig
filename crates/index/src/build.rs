@@ -209,6 +209,12 @@ pub fn build_index(
         prev_last_key = Some(sh.last_key);
         leaves.extend(sh.leaves);
     }
+    // the first key's leading NULL columns are no new prefix to the engine (`KeyOrder::leading_null_columns`)
+    if let Some(first) = leaves.first() {
+        for n in &mut stats.pkeys[..order.leading_null_columns(&first.first_key)] {
+            *n -= 1;
+        }
+    }
     for p in held {
         p.write(sink)?;
     }
