@@ -202,9 +202,10 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         );
         let mib = |b: u64| b.div_ceil(1 << 20);
         println!(
-            "target space taken at the start: {} MiB byte-copied volumes + {} MiB reserved (upper bound of the rest); {} MiB free",
+            "target space taken at the start: {} MiB byte-copied volumes + {} MiB reserved (upper bound of the rest, held until the end: needs {} MiB free); {} MiB free",
             mib(t.copy_bytes),
             mib(t.extra_bytes),
+            mib(t.needed()),
             mib(plan.available_bytes)
         );
     }

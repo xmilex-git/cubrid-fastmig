@@ -69,10 +69,13 @@ Right after the incomplete marker, before the first byte of the target, `migrate
   when the catalog is regenerated, else the treated pages and the root heap), the new B-trees (a leaf record takes
   at most twice a pair's spill record, leaves at most 90 % full, non-leaf pages fewer than leaves:
   `5 · T_i / page + 4` pages per index), 64 pages of catalog slack, the referenced LOB and Java files and the new
-  log. Counting it twice while the run writes is accepted.
+  log. The file is removed only when the run ends, so while the run writes what it bounds the space is held twice
+  (accepted, 1번 세션 decision).
 
-The free-space check (with the temp limit when the spill directory is on the target filesystem) uses this total;
-`plan` prints it.
+The free-space check (with the temp limit when the spill directory is on the target filesystem) therefore needs
+the byte-copied volumes plus twice the reservation (`TargetSpace::needed`); `plan` prints it. A process that
+fills the filesystem while the run writes can still take the free space those writes need: only the byte-copied
+volumes and the spill arena are written inside space the run already holds.
 
 ## The spill arena
 

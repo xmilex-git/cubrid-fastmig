@@ -203,7 +203,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         &est,
         mem,
         o.verify,
-        target.total(),
+        target.needed(),
         plan.available_bytes,
         &o.limits.spill_dir,
         &o.plan.target_dir,

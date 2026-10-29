@@ -1,7 +1,8 @@
 //! The target space a migrate takes before its first write (workspace#526: no disk full during a run): the
 //! byte-copied volumes are allocated in full (`volume_copy::preallocate_targets`), and one reservation file holds an
 //! upper bound of everything else the run may write — pages a cloned volume unshares, new B-trees, added volumes,
-//! LOB and Java files, the new log — until the run ends (counted twice meanwhile, which the user accepted).
+//! LOB and Java files, the new log — until the run ends (held twice meanwhile, which 1번 세션 accepted: the
+//! free-space check needs twice the reservation).
 //!
 //! Input: the plan, the resource estimate, the IO page size, the size of the new log. Output: [`TargetSpace`] and
 //! the [`Reservation`] file, a scratch line of the marker (a rerun removes it, the fsync skips it), removed on drop.
@@ -33,8 +34,10 @@ pub struct TargetSpace {
 }
 
 impl TargetSpace {
-    pub fn total(&self) -> u64 {
-        self.copy_bytes + self.extra_bytes
+    /// Free space the run needs on the target filesystem: the reservation stays until the run ends while the writes
+    /// it bounds take up to as much again.
+    pub fn needed(&self) -> u64 {
+        self.copy_bytes + 2 * self.extra_bytes
     }
 }
 
