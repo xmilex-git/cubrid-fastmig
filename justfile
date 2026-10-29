@@ -31,5 +31,9 @@ fmt: _require-toolchain
 run *ARGS: _require-toolchain
     cargo run -q -p cubrid-fastmig -- "$@"
 
+# Build one baseline DB variant (basedb/README.md); needs BASEDB_INSTALL and a claimed BASEDB_PORT.
+basedb VERSION VARIANT:
+    bash basedb/build.sh {{VERSION}} "${BASEDB_INSTALL:?BASEDB_INSTALL required}" "${BASEDB_PORT:?BASEDB_PORT required}" {{VARIANT}}
+
 _require-toolchain:
     @test -x .toolchain/bin/cargo || { echo "error: .toolchain is missing; run 'just toolchain' first" >&2; exit 1; }
