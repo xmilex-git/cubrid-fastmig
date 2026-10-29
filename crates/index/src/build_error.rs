@@ -29,6 +29,9 @@ pub enum BuildError {
         oid: Oid,
         what: String,
     },
+    /// The temp disk limit is below the spill bound of the largest single index, or an index has no estimate
+    /// (workspace#526).
+    TempDisk(String),
 }
 
 impl From<std::io::Error> for BuildError {
@@ -57,6 +60,7 @@ impl fmt::Display for BuildError {
                 write!(f, "row {oid:?} has a NULL in a NOT NULL key")
             }
             BuildError::Record { oid, what } => write!(f, "row {oid:?}: {what}"),
+            BuildError::TempDisk(what) => write!(f, "temp disk limit: {what}"),
         }
     }
 }

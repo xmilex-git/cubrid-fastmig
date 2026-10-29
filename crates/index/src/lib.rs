@@ -32,6 +32,7 @@ pub mod sort_run;
 pub mod spill_dir;
 pub mod spill_run;
 pub mod splitter;
+pub mod temp_disk;
 pub mod volume_sink;
 pub mod worker_limit;
 

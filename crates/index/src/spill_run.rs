@@ -8,6 +8,7 @@
 use crate::key_order::KeyOrder;
 use crate::sort_run::Run;
 use crate::spill_dir::SpillDir;
+use crate::temp_disk::{TEMP_DISK, spill_record_bytes};
 use fastmig_ondisk::Oid;
 use std::cmp::Ordering;
 use std::fs::File;
@@ -28,6 +29,8 @@ pub struct SpillRun {
     path: PathBuf,
     len: usize,
     samples: Vec<Sample>,
+    /// Bytes of the file, counted in `TEMP_DISK` while the run lives.
+    bytes: u64,
 }
 
 /// A position in a spill file: entry index and byte offset.
@@ -38,17 +41,26 @@ pub struct SpillPos {
 }
 
 impl SpillRun {
-    /// Writes the sorted `run` to a new file in `dir`.
+    /// Writes the sorted `run` to a new file in `dir`; its bytes count in [`TEMP_DISK`] from before the first write
+    /// until the run is dropped (also when the write fails).
     pub fn write(dir: &SpillDir, run: &Run) -> io::Result<Self> {
-        let path = dir.new_file_path();
-        let mut w = BufWriter::with_capacity(1 << 20, File::create(&path)?);
-        let mut samples = Vec::with_capacity(run.len() / SAMPLE_EVERY + 1);
+        let bytes = (0..run.len())
+            .map(|i| spill_record_bytes(run.key(i).len() as u64))
+            .sum();
+        TEMP_DISK.add(bytes);
+        let mut me = Self {
+            path: dir.new_file_path(),
+            len: run.len(),
+            samples: Vec::with_capacity(run.len() / SAMPLE_EVERY + 1),
+            bytes,
+        };
+        let mut w = BufWriter::with_capacity(1 << 20, File::create(&me.path)?);
         let mut offset = 0u64;
         let mut hdr = [0u8; RECORD_HEADER];
         for i in 0..run.len() {
             let key = run.key(i);
             if i % SAMPLE_EVERY == 0 {
-                samples.push(Sample {
+                me.samples.push(Sample {
                     index: i,
                     offset,
                     key: key.to_vec(),
@@ -61,11 +73,7 @@ impl SpillRun {
             offset += (RECORD_HEADER + key.len()) as u64;
         }
         w.flush()?;
-        Ok(Self {
-            path,
-            len: run.len(),
-            samples,
-        })
+        Ok(me)
     }
 
     pub fn len(&self) -> usize {
@@ -126,6 +134,7 @@ impl SpillRun {
 impl Drop for SpillRun {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        TEMP_DISK.sub(self.bytes);
     }
 }
 

@@ -29,14 +29,18 @@ use crate::ovf_key_file::MakeSink;
 use crate::page_sink::PageSink;
 use crate::run_writer::IndexRuns;
 use crate::spill_dir::SpillDir;
+use crate::temp_disk::{TempDiskPlan, index_batches};
 use crate::volume_sink::VolumeFileSink;
 use crate::worker_limit::WorkerLimit;
 
-/// The worker limit, memory limit and spill directory one run shares (cli `--workers`, `--mem`, `--spill-dir`).
+/// The worker limit, memory limit, spill directory and temp disk limit one run shares (cli `--workers`, `--mem`,
+/// `--spill-dir`, `--temp-disk`).
 pub struct Limits<'a> {
     pub workers: &'a WorkerLimit,
     pub memory: &'a MemoryLimit,
     pub spill: &'a SpillDir,
+    /// None: one batch, as many spill files as the memory limit leaves (no `--temp-disk`).
+    pub temp_disk: Option<&'a TempDiskPlan>,
 }
 
 /// One filled index.
@@ -51,9 +55,62 @@ pub struct FilledIndex {
     pub nulls: u64,
 }
 
+/// Fills every definition: in one batch, or with a temp disk limit in batches whose spill bound fits it
+/// (`temp_disk::index_batches`), each its own heap scan and builds, its spill files gone before the next.
 pub fn fill_btrees(
     space: &SpaceManager,
     defs: &[IndexDef],
+    lim: &Limits,
+    progress: Option<Meter>,
+) -> Result<Vec<FilledIndex>, BuildError> {
+    let batches = match lim.temp_disk {
+        None => vec![(0..defs.len()).collect()],
+        Some(p) => {
+            let bytes = defs
+                .iter()
+                .map(|d| pair_bytes(p, d))
+                .collect::<Result<Vec<u64>, BuildError>>()?;
+            index_batches(&bytes, p.limit, lim.memory.limit() as u64).map_err(|min| {
+                BuildError::TempDisk(format!(
+                    "{} B is below {min} B, the spill bound of the largest index",
+                    p.limit
+                ))
+            })?
+        }
+    };
+    let mut out: Vec<Option<FilledIndex>> = vec![None; defs.len()];
+    for b in batches {
+        let part: Vec<&IndexDef> = b.iter().map(|&i| &defs[i]).collect();
+        for (&i, f) in b.iter().zip(fill_batch(space, &part, lim, progress)?) {
+            out[i] = Some(f);
+        }
+    }
+    Ok(out.into_iter().map(Option::unwrap).collect())
+}
+
+/// The pair bytes of one definition: the estimate of every owner (classes sharing one BTID feed one tree).
+fn pair_bytes(p: &TempDiskPlan, d: &IndexDef) -> Result<u64, BuildError> {
+    d.owners
+        .iter()
+        .map(|o| {
+            p.pair_bytes
+                .get(&(o.class_oid, o.constraint.name.clone()))
+                .copied()
+                .ok_or_else(|| {
+                    BuildError::TempDisk(format!(
+                        "no estimate for index {} of class {:?}",
+                        String::from_utf8_lossy(&o.constraint.name),
+                        o.class_oid
+                    ))
+                })
+        })
+        .sum()
+}
+
+/// One heap scan over the owner classes of `defs`, then their builds.
+fn fill_batch(
+    space: &SpaceManager,
+    defs: &[&IndexDef],
     lim: &Limits,
     progress: Option<Meter>,
 ) -> Result<Vec<FilledIndex>, BuildError> {
