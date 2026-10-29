@@ -108,33 +108,20 @@ impl KeyDomain {
 
     /// The column images of `img` (`None` = NULL column) and the image's total length.
     pub fn split<'a>(&self, img: &'a [u8]) -> DecodeResult<(Vec<Option<&'a [u8]>>, usize)> {
-        if !self.midxkey {
-            let c = &self.columns[0].domain;
-            let n = image_len(self.version, c, img)?;
-            let s = img
-                .get(..n)
-                .ok_or_else(|| err(format!("key image needs {n} bytes")))?;
-            return Ok((vec![Some(s)], n));
+        let mut cols = self.columns_of(img);
+        let out = cols.by_ref().collect::<DecodeResult<Vec<_>>>()?;
+        Ok((out, cols.pos))
+    }
+
+    /// The column images of `img` one at a time, without collecting them: a compare stops at the first column that
+    /// differs and allocates nothing (it runs once per pair in sorts and merges; workspace#509).
+    pub fn columns_of<'k, 'a>(&'k self, img: &'a [u8]) -> Columns<'k, 'a> {
+        Columns {
+            kd: self,
+            img,
+            i: 0,
+            pos: if self.midxkey { self.header_size() } else { 0 },
         }
-        let mut pos = self.header_size();
-        if img.len() < pos {
-            return Err(err("MIDXKEY image shorter than its header".into()));
-        }
-        let mut out = Vec::with_capacity(self.columns.len());
-        for (i, c) in self.columns.iter().enumerate() {
-            if img[i / 8] & (1 << (i % 8)) == 0 {
-                out.push(None);
-                continue;
-            }
-            let rest = &img[pos..];
-            let n = image_len(self.version, &c.domain, rest)?;
-            out.push(Some(
-                rest.get(..n)
-                    .ok_or_else(|| err(format!("column {i} needs {n} bytes")))?,
-            ));
-            pos += n;
-        }
-        Ok((out, pos))
     }
 
     /// Length of the image at the start of `img`, every column checked ([`KeyImage::image_len`]).
@@ -215,10 +202,14 @@ impl KeyDomain {
     /// `try_image_len` accepted them (leaf record reader, verify `key_of`); the index builder compares images it
     /// encoded itself. A sort comparator cannot return an error, so a broken invariant panics.
     pub fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
-        let (ca, _) = self.split(a).expect("key image checked before comparing");
-        let (cb, _) = self.split(b).expect("key image checked before comparing");
+        let (mut ca, mut cb) = (self.columns_of(a), self.columns_of(b));
         for i in 0..self.columns.len() {
-            let o = self.compare_column(i, ca[i], cb[i]);
+            let x = ca.next().and_then(Result::ok);
+            let y = cb.next().and_then(Result::ok);
+            let (Some(x), Some(y)) = (x, y) else {
+                panic!("key image checked before comparing");
+            };
+            let o = self.compare_column(i, x, y);
             if o != Ordering::Equal {
                 return o;
             }
@@ -260,5 +251,55 @@ impl KeyDomain {
 impl KeyImage for KeyDomain {
     fn image_len(&self, bytes: &[u8]) -> DecodeResult<usize> {
         self.try_image_len(bytes)
+    }
+}
+
+/// Iterator of [`KeyDomain::columns_of`]: each column's image (`None` = NULL); after the last, `pos` is the image's
+/// total length. A decode error ends the iteration.
+pub struct Columns<'k, 'a> {
+    kd: &'k KeyDomain,
+    img: &'a [u8],
+    i: usize,
+    pos: usize,
+}
+
+impl<'a> Iterator for Columns<'_, 'a> {
+    type Item = DecodeResult<Option<&'a [u8]>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (kd, i) = (self.kd, self.i);
+        if i >= kd.columns.len() || (!kd.midxkey && i > 0) {
+            return None;
+        }
+        self.i += 1;
+        if !kd.midxkey {
+            let r = image_len(kd.version, &kd.columns[0].domain, self.img).and_then(|n| {
+                self.pos = n;
+                self.img
+                    .get(..n)
+                    .map(Some)
+                    .ok_or_else(|| err(format!("key image needs {n} bytes")))
+            });
+            return Some(r);
+        }
+        if self.img.len() < kd.header_size() {
+            self.i = kd.columns.len();
+            return Some(Err(err("MIDXKEY image shorter than its header".into())));
+        }
+        if self.img[i / 8] & (1 << (i % 8)) == 0 {
+            return Some(Ok(None));
+        }
+        let rest = &self.img[self.pos..];
+        let r = image_len(kd.version, &kd.columns[i].domain, rest).and_then(|n| {
+            let s = rest
+                .get(..n)
+                .ok_or_else(|| err(format!("column {i} needs {n} bytes")))?;
+            self.pos += n;
+            Ok(Some(s))
+        });
+        if r.is_err() {
+            self.i = kd.columns.len();
+        }
+        Some(r)
     }
 }
