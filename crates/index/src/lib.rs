@@ -1,1 +1,29 @@
-//! Parallel B-tree rebuild of every index in the target database.
+//! Parallel B-tree rebuild of every index in the target database: the engine's no-logging parallel load path
+//! (R6, workspace#478) with the MSD radix run sort of CUBRID/cubrid#8209, writing develop-layout B-tree files.
+
+pub mod bt_stats;
+pub mod btree_page;
+pub mod build;
+pub mod build_error;
+pub mod index_shape;
+pub mod key_order;
+pub mod kway_merge;
+pub mod leaf_builder;
+pub mod nonleaf_builder;
+pub mod ovf_key_file;
+pub mod ovf_key_writer;
+pub mod ovf_oid_chain;
+pub mod page_sink;
+pub mod scratch_sink;
+pub mod sort_run;
+pub mod splitter;
+pub mod volume_sink;
+pub mod worker_budget;
+
+pub use build::{BuiltIndex, build_index};
+pub use build_error::BuildError;
+pub use index_shape::IndexShape;
+pub use key_order::KeyOrder;
+pub use page_sink::PageSink;
+pub use sort_run::Run;
+pub use worker_budget::WorkerBudget;
