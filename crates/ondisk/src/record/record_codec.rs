@@ -131,8 +131,10 @@ pub fn decode_record_attrs(
 }
 
 /// Writes `values` (storage order of `layout`) as a record in `version`'s encoding. `header` supplies the repid,
-/// CHN and MVCC fields; the bound-bit flag and offset size are recomputed. The offset size follows the engine's
-/// rule for a class that is (`mvcc_class`) or is not MVCC.
+/// CHN and MVCC fields; the bound-bit flag is recomputed. The offset size follows the engine's rule for a class that
+/// is (`mvcc_class`) or is not MVCC, but is never below `header.offset_size`: a catalog row passes 4, the size
+/// `catcls_put_or_value_into_buffer` writes and the only one the develop optdebug catcls reader takes besides 2
+/// (`catalog_class.c:catcls_get_or_value_from_buffer` assert, develop 682b080b2); a user record passes 1.
 pub fn encode_record(
     version: VersionLine,
     layout: &RecordLayout,
@@ -185,7 +187,8 @@ pub fn encode_record(
         2
     } else {
         4
-    };
+    }
+    .max(header.offset_size);
 
     let mut h = *header;
     h.offset_size = os;

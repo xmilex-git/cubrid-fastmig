@@ -134,7 +134,7 @@ impl ReEncode for ClassReEncoder {
         let header = RecordHeader {
             repid: self.target.repid,
             has_bound_bits: false,
-            offset_size: 4,
+            offset_size: 1, // the smallest the engine rule allows, as heap_attrinfo_transform_to_disk
             mvcc_flags: 0,
             chn: h.chn,
             insid: None,

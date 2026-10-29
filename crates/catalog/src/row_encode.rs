@@ -4,7 +4,8 @@
 //! attribute name. Output: the record bytes: the table's current repid, CHN 0, no MVCC fields (a target starts
 //! with no vacuum residue, workspace#472 Notes), values in the class's storage order; a missing name is NULL.
 //! Source: P1b `record::encode_record`; engine develop @682b080b2 `catalog_class.c:catcls_put_or_value_into_buffer`
-//! (catcls writes CHN 0; its 4-byte variable offsets are a writer choice, readers take any size, R4 § 3.1).
+//! (catcls writes CHN 0 and 4-byte variable offsets; the generic reader takes any size, but catcls on develop
+//! optdebug asserts 2 or 4 when DDL rewrites the row, workspace#537 — R4 § 3.1 "readers take any size" corrected).
 
 use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::class_object::ClassObject;
@@ -46,7 +47,7 @@ pub fn encode_row(table: &ClassObject, row: &Row) -> DecodeResult<Vec<u8>> {
     let header = RecordHeader {
         repid: table.repid as u32,
         has_bound_bits: false,
-        offset_size: 4,
+        offset_size: 4, // catcls writes 4-byte offsets; the develop optdebug catcls reader asserts 2 or 4 (workspace#537)
         mvcc_flags: 0,
         chn: 0,
         insid: None,
