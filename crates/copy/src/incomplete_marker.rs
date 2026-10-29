@@ -21,22 +21,22 @@ pub struct IncompleteMarker {
 }
 
 impl IncompleteMarker {
-    /// Prepares `dest` for a fresh run and writes the marker in it.
-    pub fn prepare(dest: &Path) -> io::Result<Self> {
-        let path = dest.join(MARKER_NAME);
+    /// Prepares `target_dir` for a fresh run and writes the marker in it.
+    pub fn prepare(target_dir: &Path) -> io::Result<Self> {
+        let path = target_dir.join(MARKER_NAME);
         if path.exists() {
             remove_listed(&path)?;
             fs::remove_file(&path)?;
         }
-        if dest.exists() {
-            if fs::read_dir(dest)?.next().is_some() {
+        if target_dir.exists() {
+            if fs::read_dir(target_dir)?.next().is_some() {
                 return Err(io::Error::other(format!(
                     "{} is not empty and holds no {MARKER_NAME}; refusing to write into it",
-                    dest.display()
+                    target_dir.display()
                 )));
             }
         } else {
-            fs::create_dir_all(dest)?;
+            fs::create_dir_all(target_dir)?;
         }
         let file = OpenOptions::new()
             .append(true)

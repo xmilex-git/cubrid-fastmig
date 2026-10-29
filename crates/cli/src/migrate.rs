@@ -44,8 +44,8 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
   --lob-dir <dir>                target lob-base-path (default: <dest>/lob)
   --lob-manifest <file>          referenced LOB files (<size>\\t<relative path> per line); without it no LOB
                                  file is copied (the locator scan that builds it comes with workspace#484)
-  --mem <size>                   memory cap for the whole run, e.g. 16G (default: physical memory / 4)
-  --spill-dir <dir>              where stages over the cap spill (default: <dest>/fastmig/spill)
+  --mem <size>                   memory limit for the whole run, e.g. 16G (default: physical memory / 4)
+  --spill-dir <dir>              where stages over the memory limit spill (default: <dest>/fastmig/spill)
   --no-clone                     byte-copy even where the filesystem could clone (measures the byte copy where clone would be chosen)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
@@ -78,7 +78,7 @@ const SWITCHES: &[&str] = &["--no-clone", "--volumes-in-first-dir", "--help"];
 
 struct Options {
     db: String,
-    dest: PathBuf,
+    target_dir: PathBuf,
     log_dir: PathBuf,
     worker_limit: usize,
     target_name: String,
@@ -103,7 +103,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             "migrate takes exactly one database name".into(),
         ));
     };
-    let dest = absolute(
+    let target_dir = absolute(
         p.value("--dest")
             .ok_or_else(|| CliError::Usage("--dest is required".into()))?,
     )?;
@@ -127,7 +127,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             .value("--log-dir")
             .map(absolute)
             .transpose()?
-            .unwrap_or_else(|| dest.clone()),
+            .unwrap_or_else(|| target_dir.clone()),
         worker_limit,
         target_name: p.value("--target-name").unwrap_or(db).to_string(),
         source_dbtxt: p
@@ -140,7 +140,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             .map_or_else(default_dbtxt, Ok)?,
         lob_dir: match p.value("--lob-dir") {
             Some(d) => absolute(d.strip_prefix("file:").unwrap_or(d))?,
-            None => dest.join("lob"),
+            None => target_dir.join("lob"),
         },
         lob_manifest: p.value("--lob-manifest").map(PathBuf::from),
         allow_clone: !p.switch("--no-clone"),
@@ -149,8 +149,8 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         } else {
             Locate::Recorded
         },
-        limits: Limits::from(&p, &dest)?,
-        dest,
+        limits: Limits::from(&p, &target_dir)?,
+        target_dir,
     };
     // the copy engine streams every volume through one fixed buffer per worker
     if (o.worker_limit as u64).saturating_mul(IO_BUF_BYTES as u64) > o.limits.memory_limit_bytes {
@@ -219,9 +219,10 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     let mut jobs = Vec::new();
     for v in vols.volumes() {
         let target = if v.volid == 0 {
-            o.dest.join(&o.target_name)
+            o.target_dir.join(&o.target_name)
         } else {
-            o.dest.join(format!("{}_x{:03}", o.target_name, v.volid))
+            o.target_dir
+                .join(format!("{}_x{:03}", o.target_name, v.volid))
         };
         jobs.push(VolumeJob {
             volid: v.volid,
@@ -237,7 +238,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     rep.progress.set_total(VOLUME_COPY, bytes);
     // until the copy shows what was cloned, assume every byte is written and synced
     rep.progress.set_total(DURABLE_SYNC, bytes);
-    let marker = IncompleteMarker::prepare(&o.dest)?;
+    let marker = IncompleteMarker::prepare(&o.target_dir)?;
     marker.create_dir_all(&o.log_dir)?;
     rep.lap("open_sources");
 
@@ -262,22 +263,22 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
 
     let java = out_of_volume_asset::copy_dir_tree(
         &src.vol_path.join("java"),
-        &o.dest.join("java"),
+        &o.target_dir.join("java"),
         o.worker_limit,
         &marker,
     )?;
     let java_static = out_of_volume_asset::copy_dir_tree(
         &src.vol_path.join("java_static"),
-        &o.dest.join("java_static"),
+        &o.target_dir.join("java_static"),
         o.worker_limit,
         &marker,
     )?;
     let keys = out_of_volume_asset::copy_one(
         &src.vol_path.join(format!("{}_keys", o.db)),
-        &o.dest.join(format!("{}_keys", o.target_name)),
+        &o.target_dir.join(format!("{}_keys", o.target_name)),
         &marker,
     )?;
-    let fastmig_dir = o.dest.join("fastmig");
+    let fastmig_dir = o.target_dir.join("fastmig");
     marker.create_dir_all(&fastmig_dir)?;
     let lob = copy_lobs(
         o,
@@ -305,7 +306,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         &o.target_dbtxt,
         &DatabaseEntry {
             name: o.target_name.clone(),
-            vol_path: o.dest.clone(),
+            vol_path: o.target_dir.clone(),
             hosts: src.hosts.clone(),
             log_path: o.log_dir.clone(),
             lob_base_path: Some(format!("file:{}", o.lob_dir.display())),

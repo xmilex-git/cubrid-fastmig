@@ -4,7 +4,7 @@
 //! Input: the parsed `--mem` / `--spill-dir` values and the target directory. Output: [`Limits`].
 //! `--mem` takes bytes with an optional K, M, G or T suffix (powers of 1024).
 //! Files under the spill directory are never fsynced (see `fastmig_copy::durable`).
-//! Source: decision G1 workspace#481 (one cap for the whole run, like `--workers`); the copy engine streams through
+//! Source: decision G1 workspace#481 (one memory limit for the whole run, like `--workers`); the copy engine streams through
 //! fixed per-worker buffers, the index builder and verifier spill (workspace#493, #495).
 
 use std::io;
@@ -20,14 +20,14 @@ pub struct Limits {
 }
 
 impl Limits {
-    pub fn from(p: &Parsed, dest: &Path) -> Result<Limits, CliError> {
+    pub fn from(p: &Parsed, target_dir: &Path) -> Result<Limits, CliError> {
         let memory_limit_bytes = match p.value("--mem") {
             Some(v) => parse_size(v).ok_or_else(|| CliError::Usage(format!("bad --mem {v}")))?,
             None => physical_memory()? / 4,
         };
         let spill_dir = match p.value("--spill-dir") {
             Some(d) => std::path::absolute(d)?,
-            None => dest.join("fastmig").join("spill"),
+            None => target_dir.join("fastmig").join("spill"),
         };
         Ok(Limits {
             memory_limit_bytes,

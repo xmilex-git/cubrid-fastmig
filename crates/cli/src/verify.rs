@@ -33,7 +33,7 @@ cubrid-fastmig verify <db | first-volume-path> [options]
   --report <file>                JSONL report (default: <target volume dir>/fastmig/verify.jsonl)
   --measured-classes <file>      classes whose heap header statistics are compared (volid|pageid|slotid lines)
   --workers <n>                  thread cap (default: CPUs / 2)
-  --mem <size>                   memory cap, e.g. 16G (default: physical memory / 4)
+  --mem <size>                   memory limit, e.g. 16G (default: physical memory / 4)
   --spill-dir <dir>              where sorted runs spill (default: <target volume dir>/fastmig/spill)";
 
 const FLAGS: &[&str] = &[
