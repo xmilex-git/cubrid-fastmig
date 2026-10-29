@@ -304,6 +304,8 @@ impl<'s, 'v> HeapState<'s, 'v> {
 
     /// Inserts `rec` as a REC_NEWHOME on the first page read so far (not `exclude`) with room, else on a new page at
     /// the chain end; returns its OID.
+    // shortcut: first fit scans every page read (O(pages) per relocated record); upgrade to a free-space index if a
+    // heap with many relocations makes the scan show up in measurements.
     pub fn insert_newhome(&mut self, rec: &[u8], exclude: Vpid) -> io::Result<Oid> {
         let header = self.hfid.vpid();
         let mut i = 0;

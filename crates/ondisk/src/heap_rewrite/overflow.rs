@@ -21,8 +21,8 @@ use crate::{Hfid, Oid, Vfid, Vpid};
 const FIRST_DATA: usize = 12;
 const REST_DATA: usize = 8;
 
-/// Writes `rec` as a new overflow chain of `ovf_vfid`; returns its first page.
-pub fn write_chain(space: &SpaceManager, ovf_vfid: Vfid, rec: &[u8]) -> io::Result<Vpid> {
+/// Writes `rec` as a new overflow chain of `ovf_vfid`; returns its first page and its page count.
+pub fn write_chain(space: &SpaceManager, ovf_vfid: Vfid, rec: &[u8]) -> io::Result<(Vpid, usize)> {
     let io_size = space.volumes().io_pagesize();
     let db = db_pagesize(io_size);
     let rest = rec.len().saturating_sub(db - FIRST_DATA);
@@ -51,7 +51,7 @@ pub fn write_chain(space: &SpaceManager, ovf_vfid: Vfid, rec: &[u8]) -> io::Resu
         data = &data[n..];
         space.volumes().write_page(vpid, &p)?;
     }
-    Ok(vpids[0])
+    Ok((vpids[0], npages))
 }
 
 /// The pages of the chain starting at `first`, in chain order (bounded by the length the first page records).

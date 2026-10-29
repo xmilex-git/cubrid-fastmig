@@ -47,12 +47,29 @@ pub(crate) fn home_slot(st: &HeapState, oid: Oid) -> io::Result<(RecordType, Vec
     slot_record(st, oid)?.ok_or_else(|| invalid(format!("{oid:?}: empty home slot")))
 }
 
+/// What releasing an object's old NEWHOME or overflow chain did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Released {
+    /// An old REC_NEWHOME slot was deleted.
+    pub newhome: bool,
+    /// Pages of an old overflow chain deallocated (0 when it had none).
+    pub overflow_pages: usize,
+}
+
+/// Where a placed record ended up and what it cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placed {
+    pub kind: HomeKind,
+    pub released: Released,
+    pub overflow_pages_written: usize,
+}
+
 /// Releases what the home slot of `oid` points at: the NEWHOME slot of a REC_RELOCATION, the overflow chain of a
-/// REC_BIGONE. Returns overflow pages released.
-pub(crate) fn release_target(st: &mut HeapState, oid: Oid) -> io::Result<usize> {
+/// REC_BIGONE.
+pub(crate) fn release_target(st: &mut HeapState, oid: Oid) -> io::Result<Released> {
     let (t, body) = home_slot(st, oid)?;
     match t {
-        RecordType::Home => Ok(0),
+        RecordType::Home => Ok(Released::default()),
         RecordType::Relocation => {
             let nh = Oid::read(&body, 0);
             st.edit(nh.vpid(), |p| {
@@ -60,11 +77,19 @@ pub(crate) fn release_target(st: &mut HeapState, oid: Oid) -> io::Result<usize> 
                     .vacuum_slot(nh.slotid as usize, true)
                     .map_err(|e| spage_err(nh.vpid(), e))
             })?;
-            Ok(0)
+            Ok(Released {
+                newhome: true,
+                overflow_pages: 0,
+            })
         }
-        RecordType::BigOne => {
-            overflow::release_chain(st.space, st.ovf_vfid, Oid::read(&body, 0).vpid())
-        }
+        RecordType::BigOne => Ok(Released {
+            newhome: false,
+            overflow_pages: overflow::release_chain(
+                st.space,
+                st.ovf_vfid,
+                Oid::read(&body, 0).vpid(),
+            )?,
+        }),
         t => Err(invalid(format!("{oid:?}: home slot holds {t:?}"))),
     }
 }
@@ -88,12 +113,7 @@ fn set_home(
 
 /// Places `rec` (whole record, header as it should be stored for a slotted record) under `oid`. `mvcc` says the
 /// class is MVCC, which decides the overflow header form.
-pub(crate) fn place(
-    st: &mut HeapState,
-    oid: Oid,
-    rec: &[u8],
-    mvcc: bool,
-) -> io::Result<(HomeKind, usize)> {
+pub(crate) fn place(st: &mut HeapState, oid: Oid, rec: &[u8], mvcc: bool) -> io::Result<Placed> {
     let released = release_target(st, oid)?;
     if rec.len() > max_slotted_len(st.db_pagesize()) {
         let big = if mvcc {
@@ -105,18 +125,25 @@ pub(crate) fn place(
         if st.ovf_vfid.is_null() {
             st.ovf_vfid = overflow::create_file(st.space, st.hfid, st.class_oid)?;
         }
-        let first = overflow::write_chain(st.space, st.ovf_vfid, &big)?;
+        let (first, written) = overflow::write_chain(st.space, st.ovf_vfid, &big)?;
         set_home(st, oid, RecordType::BigOne, &overflow::home_pointer(first))?
             .map_err(|e| spage_err(oid.vpid(), e))?;
-        return Ok((
-            HomeKind::Big {
+        return Ok(Placed {
+            kind: HomeKind::Big {
                 first_overflow: first,
             },
             released,
-        ));
+            overflow_pages_written: written,
+        });
     }
     match set_home(st, oid, RecordType::Home, rec)? {
-        Ok(()) => return Ok((HomeKind::Home, released)),
+        Ok(()) => {
+            return Ok(Placed {
+                kind: HomeKind::Home,
+                released,
+                overflow_pages_written: 0,
+            });
+        }
         Err(SpageError::DoesntFit) => {}
         Err(e) => return Err(spage_err(oid.vpid(), e)),
     }
@@ -124,5 +151,9 @@ pub(crate) fn place(
     let mut ptr = [0u8; 8];
     newhome.write(&mut ptr, 0);
     set_home(st, oid, RecordType::Relocation, &ptr)?.map_err(|e| spage_err(oid.vpid(), e))?;
-    Ok((HomeKind::Relocated { newhome }, released))
+    Ok(Placed {
+        kind: HomeKind::Relocated { newhome },
+        released,
+        overflow_pages_written: 0,
+    })
 }

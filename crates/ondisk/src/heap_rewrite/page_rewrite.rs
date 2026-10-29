@@ -14,7 +14,7 @@ use std::io;
 
 use crate::heap_rewrite::heap_state::{HeapState, editor, invalid, spage_err};
 use crate::heap_rewrite::overflow;
-use crate::heap_rewrite::placement::{self, home_slot, slot_record};
+use crate::heap_rewrite::placement::{self, Released, home_slot, slot_record};
 use crate::heap_rewrite::re_encode::ReEncode;
 use crate::heap_rewrite::record_patch::{
     OVERFLOW_FIRST_DATA, reset_overflow_header, strip_insid_and_prev,
@@ -35,28 +35,49 @@ pub enum PageTreatment<'a> {
     Transform(&'a dyn ReEncode),
 }
 
-/// What a rewrite did, summed over pages.
+/// What a rewrite did, summed over pages. Every transformed record counts in exactly one of `same_slot_*`,
+/// `relocated`, `big`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PageCounts {
     /// Committed deletes removed (home slot vacuumed).
     pub deleted: u64,
     /// Records whose INSID / previous-version LSA was dropped, or whose overflow header was reset.
     pub cleaned: u64,
-    /// Re-encoded records by where they ended up.
-    pub home: u64,
+    /// Transformed records back in their home slot, by new length against the old record's.
+    pub same_slot_shrunk: u64,
+    pub same_slot_same: u64,
+    pub same_slot_grown: u64,
+    /// Transformed records now REC_RELOCATION with a new REC_NEWHOME.
     pub relocated: u64,
+    /// Transformed records now REC_BIGONE with a new overflow chain.
     pub big: u64,
+    /// Old REC_NEWHOME slots deleted (re-placed or deleted objects).
+    pub old_newhome_released: u64,
+    /// Old overflow chains released and their pages.
+    pub old_overflow_chains_released: u64,
     pub overflow_pages_released: u64,
+    pub overflow_pages_written: u64,
 }
 
 impl PageCounts {
     pub fn add(&mut self, o: PageCounts) {
         self.deleted += o.deleted;
         self.cleaned += o.cleaned;
-        self.home += o.home;
+        self.same_slot_shrunk += o.same_slot_shrunk;
+        self.same_slot_same += o.same_slot_same;
+        self.same_slot_grown += o.same_slot_grown;
         self.relocated += o.relocated;
         self.big += o.big;
+        self.old_newhome_released += o.old_newhome_released;
+        self.old_overflow_chains_released += o.old_overflow_chains_released;
         self.overflow_pages_released += o.overflow_pages_released;
+        self.overflow_pages_written += o.overflow_pages_written;
+    }
+
+    fn released(&mut self, r: Released) {
+        self.old_newhome_released += r.newhome as u64;
+        self.old_overflow_chains_released += (r.overflow_pages > 0) as u64;
+        self.overflow_pages_released += r.overflow_pages as u64;
     }
 }
 
@@ -111,6 +132,7 @@ fn patch_object(
                 vacuum(st, nh, true)?;
                 vacuum(st, oid, reuse)?;
                 c.deleted += 1;
+                c.old_newhome_released += 1;
             } else if let Some(b) =
                 strip_insid_and_prev(&rec).map_err(|e| invalid(format!("{nh:?}: {e}")))?
             {
@@ -123,8 +145,10 @@ fn patch_object(
             let mut p = vs.read_page(first)?;
             let h = header_of(oid, &db_area(&p)[OVERFLOW_FIRST_DATA..])?;
             if h.is_deleted() {
-                c.overflow_pages_released +=
-                    overflow::release_chain(st.space, st.ovf_vfid, first)? as u64;
+                c.released(Released {
+                    newhome: false,
+                    overflow_pages: overflow::release_chain(st.space, st.ovf_vfid, first)?,
+                });
                 vacuum(st, oid, reuse)?;
                 c.deleted += 1;
             } else if h.mvcc_flags != 0 {
@@ -158,7 +182,7 @@ fn re_encode_object(
         }
     };
     if deleted {
-        c.overflow_pages_released += placement::release_target(st, oid)? as u64;
+        c.released(placement::release_target(st, oid)?);
         vacuum(st, oid, st.reuse_slots)?;
         c.deleted += 1;
         return Ok(());
@@ -166,10 +190,13 @@ fn re_encode_object(
     let new = re
         .re_encode(oid, &rec)
         .map_err(|e| invalid(format!("{oid:?}: re-encode: {e}")))?;
-    let (kind, released) = placement::place(st, oid, &new, re.mvcc())?;
-    c.overflow_pages_released += released as u64;
-    match kind {
-        HomeKind::Home => c.home += 1,
+    let placed = placement::place(st, oid, &new, re.mvcc())?;
+    c.released(placed.released);
+    c.overflow_pages_written += placed.overflow_pages_written as u64;
+    match placed.kind {
+        HomeKind::Home if new.len() < rec.len() => c.same_slot_shrunk += 1,
+        HomeKind::Home if new.len() == rec.len() => c.same_slot_same += 1,
+        HomeKind::Home => c.same_slot_grown += 1,
         HomeKind::Relocated { .. } => c.relocated += 1,
         HomeKind::Big { .. } => c.big += 1,
     }
