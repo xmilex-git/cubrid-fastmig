@@ -9,6 +9,7 @@ pub mod output_sql;
 pub mod serial_name;
 pub mod source_classes;
 pub mod system_classes;
+pub mod target_classes;
 pub mod template;
 pub mod template_class;
 pub mod template_extract;
