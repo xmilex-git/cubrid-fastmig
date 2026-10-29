@@ -15,6 +15,7 @@ use fastmig_ondisk::VersionLine;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Source,
+    Target,
     Both,
 }
 
@@ -28,6 +29,8 @@ pub enum Rewrite {
     /// `%id <class> <n>` → `%id <class>`, `@<n>|` → `@<class>|`: class ids are numbered per unload and the two lines
     /// number their system classes differently.
     ClassIdNames,
+    /// `|file:<digits>/ces_` → `|file:ces_`: drop a numeric directory in front of an LOB locator's `ces_` part.
+    LobClassDir,
 }
 
 pub struct Rule {
@@ -83,6 +86,16 @@ const V11_4_TO_DEVELOP: &[Rule] = &[
         side: Side::Both,
         rewrite: Rewrite::ClassIdNames,
     },
+    // CBRD-23700 (develop a59899038, CUBRID/cubrid#6833): develop keeps a class's LOB files under a directory named by
+    // its HFID and attribute id, so its locators read `file:<digits>/ces_NNN/<file>`; 11.4 wrote `file:ces_NNN/<file>`.
+    // Only the path notation is matched here: the `ces_NNN/<file>` part is still compared, and whether the files
+    // hold the same bytes is the e2e lob-contents step's check, not this one's.
+    Rule {
+        name: "lob-class-dir",
+        files: &["objects"],
+        side: Side::Target,
+        rewrite: Rewrite::LobClassDir,
+    },
 ];
 
 /// Applies `rules` to one file's entries of one side; returns how many entries each rule changed.
@@ -95,7 +108,12 @@ pub fn normalize(
     rules
         .iter()
         .map(|r| {
-            let applies = r.files.contains(&suffix) && (source_side || r.side == Side::Both);
+            let applies = r.files.contains(&suffix)
+                && match r.side {
+                    Side::Source => source_side,
+                    Side::Target => !source_side,
+                    Side::Both => true,
+                };
             if !applies {
                 return 0;
             }
@@ -106,6 +124,7 @@ pub fn normalize(
                     .count(),
                 Rewrite::NcharLiteral => entries.iter_mut().filter_map(drop_nchar_prefix).count(),
                 Rewrite::ClassIdNames => class_id_names(entries),
+                Rewrite::LobClassDir => entries.iter_mut().filter_map(drop_lob_class_dir).count(),
             }
         })
         .collect()
@@ -210,4 +229,27 @@ fn class_id_names(entries: &mut [Vec<u8>]) -> usize {
         changed += 1;
     }
     changed
+}
+
+/// Drops `<digits>/` where it follows `|file:` and precedes `ces_` (see rule lob-class-dir).
+fn drop_lob_class_dir(e: &mut Vec<u8>) -> Option<()> {
+    const HEAD: &[u8] = b"|file:";
+    let mut cuts = Vec::new();
+    let mut i = 0;
+    while let Some(at) = e[i..].windows(HEAD.len()).position(|w| w == HEAD) {
+        let start = i + at + HEAD.len();
+        let digits = e[start..].iter().take_while(|b| b.is_ascii_digit()).count();
+        let after = start + digits;
+        if digits > 0 && e[after..].starts_with(b"/ces_") {
+            cuts.push((start, after + 1));
+        }
+        i = start;
+    }
+    if cuts.is_empty() {
+        return None;
+    }
+    for (from, to) in cuts.into_iter().rev() {
+        e.drain(from..to);
+    }
+    Some(())
 }
