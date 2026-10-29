@@ -34,7 +34,8 @@ use crate::value::or_buf::{DecodeError, DecodeResult, OrReader, OrWriter};
 use crate::value::string::{MIN_LENGTH_FOR_COMPRESSION, str_size};
 
 /// Built-in collations whose order this module implements (engine `LANG_COLL_*` ids, the same in 11.4 and
-/// develop, `src/base/language_support.h:107-116`).
+/// develop, `src/base/language_support.h:107-116`). LDML locale collations (ids from 32) are not implemented:
+/// [`Collation::is_supported`] lets a pre-check refuse indexes that use them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Collation {
     /// `lang_fastcmp_byte` with the identity weights: iso88591_bin (0), utf8_bin (1), iso88591_en_cs (2),
@@ -42,9 +43,12 @@ pub enum Collation {
     ByteCs,
     /// `lang_fastcmp_byte` with 'a'..'z' weighed as 'A'..'Z': iso88591_en_ci (3), utf8_en_ci (5).
     ByteCi,
-    /// `lang_strcmp_utf8` with the EN_cs weights: utf8_ko_cs (7) — code points in order, below 256 by the
-    /// identity weight, a space weighing 0.
-    Utf8Cp,
+    /// `lang_strcmp_utf8` (code points) with the EN_cs weights: utf8_ko_cs (7).
+    Utf8En,
+    /// `lang_strcmp_utf8` with the Turkish weights of `lang_init_coll_Utf8_tr_cs`: utf8_tr_cs (6).
+    Utf8Tr,
+    /// `lang_fastcmp_ko`: euckr_bin (8).
+    EucKr,
     /// `lang_fastcmp_binary`: binary (9).
     Binary,
 }
@@ -71,21 +75,83 @@ fn utf8_cp(s: &[u8]) -> (u32, usize) {
     )
 }
 
+/// Engine `LANG_CHAR_COUNT_TR`: code points the Turkish table weighs.
+const TR_COUNT: usize = 352;
+
+/// The weights `lang_init_coll_Utf8_tr_cs` builds: identity, then each Turkish letter moved right after its Latin
+/// base letter, the weights between shifted up by one.
+fn tr_weights() -> &'static [u32; TR_COUNT] {
+    static W: std::sync::OnceLock<[u32; TR_COUNT]> = std::sync::OnceLock::new();
+    W.get_or_init(|| {
+        let mut w = [0u32; TR_COUNT];
+        for (i, x) in w.iter_mut().enumerate() {
+            *x = i as u32;
+        }
+        let upper = [
+            (0xC7, b'C'),
+            (0x11E, b'G'),
+            (0x130, b'I'),
+            (0xD6, b'O'),
+            (0x15E, b'S'),
+            (0xDC, b'U'),
+        ];
+        let lower = [
+            (0xE7, b'c'),
+            (0x11F, b'g'),
+            (0x131, b'h'),
+            (0xF6, b'o'),
+            (0x15F, b's'),
+            (0xFC, b'u'),
+        ];
+        for (cp, prev) in upper.into_iter().chain(lower) {
+            let repl = prev as usize + 1;
+            let w_repl = w[repl];
+            w[cp] = w_repl;
+            for x in w.iter_mut().take(cp).skip(repl) {
+                if *x >= w_repl {
+                    *x += 1;
+                }
+            }
+        }
+        w
+    })
+}
+
 impl Collation {
-    /// The order of collation `id`, or `None` for the collations this module does not implement (utf8_tr_cs 6,
-    /// euckr_bin 8, LDML locales from 32).
+    /// The order of collation `id`, or `None` for an LDML locale collation (id 32 and up) or an unknown id.
     pub fn from_id(id: i32) -> Option<Collation> {
         match id {
             0 | 1 | 2 | 4 => Some(Collation::ByteCs),
             3 | 5 => Some(Collation::ByteCi),
-            7 => Some(Collation::Utf8Cp),
+            6 => Some(Collation::Utf8Tr),
+            7 => Some(Collation::Utf8En),
+            8 => Some(Collation::EucKr),
             9 => Some(Collation::Binary),
             _ => None,
         }
     }
 
-    fn compare_utf8(a: &[u8], b: &[u8], ti: bool) -> Ordering {
-        let w = |cp: u32| if cp == b' ' as u32 { 0 } else { cp };
+    /// Whether keys of collation `id` can be ordered here (a plan pre-check refuses indexes on the rest).
+    pub fn is_supported(id: i32) -> bool {
+        Self::from_id(id).is_some()
+    }
+
+    /// `lang_strmatch_utf8` without pattern matching: a code point below the table size by its weight, above it by
+    /// itself, a space 0; with `ti`, a tail of code points whose `weights_ti` are 0 does not count.
+    fn compare_utf8(self, a: &[u8], b: &[u8], ti: bool) -> Ordering {
+        let tr = self == Collation::Utf8Tr;
+        let w = |cp: u32| -> u32 {
+            if cp == b' ' as u32 {
+                0
+            } else if tr && (cp as usize) < TR_COUNT {
+                tr_weights()[cp as usize]
+            } else {
+                // EN_cs weights: the identity below 256, the code point above
+                cp
+            }
+        };
+        // `weights_ti` 0: the NUL code point, and the space under EN_cs (`lang_init_coll_en_cs`), not under TR
+        let zero_ti = |cp: u32| cp == 0 || (!tr && cp == b' ' as u32);
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
             let (x, n) = utf8_cp(&a[i..]);
@@ -99,21 +165,60 @@ impl Collation {
         }
         let (ra, rb) = (&a[i..], &b[j..]);
         if ra.is_empty() && rb.is_empty() {
-            Ordering::Equal
-        } else if !ti {
-            if ra.is_empty() {
-                Ordering::Less
-            } else {
-                Ordering::Greater
-            }
-        } else if ra.iter().chain(rb).all(|c| *c == b' ') {
-            // `lang_str_utf8_trail_zero_weights`: only spaces weigh 0 under the EN_cs weights
-            Ordering::Equal
-        } else if ra.is_empty() {
-            Ordering::Less
-        } else {
-            Ordering::Greater
+            return Ordering::Equal;
         }
+        let (tail, longer) = if ra.is_empty() {
+            (rb, Ordering::Less)
+        } else {
+            (ra, Ordering::Greater)
+        };
+        if !ti {
+            return longer;
+        }
+        let mut k = 0;
+        while k < tail.len() {
+            let (cp, n) = utf8_cp(&tail[k..]);
+            if !zero_ti(cp) {
+                return longer;
+            }
+            k += n;
+        }
+        Ordering::Equal
+    }
+
+    /// `lang_fastcmp_ko`: bytes as they are, an ASCII space or an EUC space pair (A1 A1) weighing 0; past the common
+    /// part, the first non-zero unit of the longer string decides (a space weighs 0 there only with `ti`).
+    fn compare_euckr(a: &[u8], b: &[u8], ti: bool) -> Ordering {
+        fn next(s: &[u8], i: &mut usize, space: u32) -> u32 {
+            let c = s[*i];
+            *i += 1;
+            if c == b' ' {
+                space
+            } else if c == 0xA1 && *i < s.len() && s[*i] == 0xA1 {
+                *i += 1;
+                space
+            } else {
+                c as u32
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            let (x, y) = (next(a, &mut i, 0), next(b, &mut j, 0));
+            if x != y {
+                return x.cmp(&y);
+            }
+        }
+        let tail_space = if ti { 0 } else { b' ' as u32 };
+        let first_nonzero = |s: &[u8], mut k: usize| -> u32 {
+            while k < s.len() {
+                let c = next(s, &mut k, tail_space);
+                if c != 0 {
+                    return c;
+                }
+            }
+            0
+        };
+        first_nonzero(a, i).cmp(&first_nonzero(b, j))
     }
 
     fn weight(self, c: u8) -> u32 {
@@ -126,8 +231,10 @@ impl Collation {
 
     /// Engine `fastcmp` of the collation; `ti` ignores trailing spaces.
     pub fn compare(self, a: &[u8], b: &[u8], ti: bool) -> Ordering {
-        if self == Collation::Utf8Cp {
-            return Self::compare_utf8(a, b, ti);
+        match self {
+            Collation::Utf8En | Collation::Utf8Tr => return self.compare_utf8(a, b, ti),
+            Collation::EucKr => return Self::compare_euckr(a, b, ti),
+            _ => {}
         }
         if self == Collation::Binary {
             let n = a.len().min(b.len());
