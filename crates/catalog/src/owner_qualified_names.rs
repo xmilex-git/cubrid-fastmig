@@ -22,8 +22,6 @@ use fastmig_ondisk::value::Value;
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 
-/// Engine `SM_CLASSFLAG_SYSTEM`.
-const CLASSFLAG_SYSTEM: i32 = 0x1;
 /// develop's longest class, serial or trigger name without its owner (P1, P2).
 const NAME_MAX: usize = 222;
 /// develop `_db_stored_procedure.unique_name varchar(255)` (P6).
@@ -162,7 +160,7 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
             .cloned()
             .unwrap_or_default()
     };
-    let user_classes = || heads.iter().filter(|c| c.flags & CLASSFLAG_SYSTEM == 0);
+    let user_classes = || heads.iter().filter(|c| !c.is_system_class());
 
     let mut out = Vec::new();
     let mut name_rules = |kind: &str, name: &[u8]| {

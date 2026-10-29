@@ -57,14 +57,22 @@ impl VolumePlace {
     }
 }
 
+/// A volume just added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AddedVolume {
+    pub volid: i16,
+    /// Sectors it has free (its system sectors excluded).
+    pub free_sectors: i32,
+}
+
 /// Engine `disk_add_volume` + `disk_format` of a permanent data volume of `nsect_total` sectors that may grow to
-/// `nsect_max` (both rounded up to a STAB unit). Returns (volid, free sectors). Refuses an existing file.
+/// `nsect_max` (both rounded up to a STAB unit). Refuses an existing file.
 pub fn add_volume(
     vols: &VolumeSet,
     nsect_total: i32,
     nsect_max: i32,
     place: &VolumePlace,
-) -> io::Result<(i16, i32)> {
+) -> io::Result<AddedVolume> {
     let io_size = vols.io_pagesize();
     let nsect_total = sector_table::round_up_sectors(nsect_total);
     let nsect_max = sector_table::round_up_sectors(nsect_max);
@@ -132,8 +140,8 @@ pub fn add_volume(
         page::init_header(&mut sp, Vpid::new(volid, pageid), PageType::VolBitmap);
         if i == 0 {
             for s in 0..nsys {
-                let (_, unit, bit) = sector_table::bit_position(&vh, io_size, s);
-                sector_table::set_bit(&mut sp, unit, bit, true);
+                let at = sector_table::bit_position(&vh, io_size, s);
+                sector_table::set_bit(&mut sp, at, true);
             }
         }
         file.write_all_at(&sp, pageid as u64 * io_size as u64)?;
@@ -153,7 +161,10 @@ pub fn add_volume(
         writeln!(f, "{volid:4} {fullname}")?;
     }
     BootDbParm::write_volume_counts(vols, volid + 1, volid)?;
-    Ok((volid, nsect_total - nsys))
+    Ok(AddedVolume {
+        volid,
+        free_sectors: nsect_total - nsys,
+    })
 }
 
 fn now_secs() -> i64 {

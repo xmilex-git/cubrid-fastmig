@@ -64,6 +64,29 @@ impl HeapChain {
     pub fn is_bestspace(&self) -> bool {
         self.flags & FLAG_BESTSPACE != 0
     }
+
+    pub fn vacuum_status(&self) -> VacuumStatus {
+        match self.flags & FLAG_VACUUM_STATUS_MASK {
+            0 => VacuumStatus::None,
+            FLAG_VACUUM_ONCE => VacuumStatus::Once,
+            _ => VacuumStatus::Unknown,
+        }
+    }
+
+    /// Marks the page vacuumed; the develop BESTSPACE and NOT_IN_HEAP bits stay (11.4 has no other bits).
+    pub fn clear_vacuum_status(&mut self) {
+        self.flags &= !FLAG_VACUUM_STATUS_MASK;
+    }
+}
+
+/// Engine vacuum status of a heap page (`HEAP_PAGE_FLAG_VACUUM_STATUS_MASK` bits of [`HeapChain::flags`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VacuumStatus {
+    /// Vacuumed.
+    None,
+    /// One vacuum pass away from clean.
+    Once,
+    Unknown,
 }
 
 /// The header page's link to the first data page: `HEAP_HDR_STATS.next_vpid` @16 (11.4 and develop).

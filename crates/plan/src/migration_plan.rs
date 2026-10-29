@@ -39,9 +39,6 @@ use crate::lob_scan::{self, LobScan};
 use crate::system_view_refs;
 use crate::version_pair::VersionPair;
 
-/// Engine `SM_CLASSFLAG_SYSTEM`.
-const CLASSFLAG_SYSTEM: i32 = 1;
-
 pub struct PlanInputs<'a> {
     pub source: &'a DatabaseEntry,
     /// Where the source is registered (other databases sharing its lob-base-path are named from it).
@@ -318,7 +315,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     let mut treatments = Vec::new();
     for (n, c) in classes.iter().enumerate() {
         let name = String::from_utf8_lossy(&c.class.name).into_owned();
-        let system = c.class.flags & CLASSFLAG_SYSTEM != 0;
+        let system = c.class.is_system_class();
         if c.class.tde_algorithm != 0 {
             // a class created ENCRYPT=AES|ARIA, even one whose files are already gone (R9 workspace#510)
             refusals.push(format!(
@@ -356,10 +353,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     }
 
     // indexes: plain indexes need a collation this tool orders (workspace#491); function/filter ones are deferred
-    for c in classes
-        .iter()
-        .filter(|c| c.class.flags & CLASSFLAG_SYSTEM == 0)
-    {
+    for c in classes.iter().filter(|c| !c.class.is_system_class()) {
         let props = class_properties(&c.class.properties, line).map_err(|e| {
             invalid(format!(
                 "{} properties: {e}",
@@ -462,10 +456,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         }
         // user SQL text naming 11.4 system views (G1)
         let mut texts: Vec<(String, Vec<u8>)> = Vec::new();
-        for c in classes
-            .iter()
-            .filter(|c| c.class.flags & CLASSFLAG_SYSTEM == 0)
-        {
+        for c in classes.iter().filter(|c| !c.class.is_system_class()) {
             for q in &c.class.query_specs {
                 texts.push((
                     format!("view {}", String::from_utf8_lossy(&c.class.name)),

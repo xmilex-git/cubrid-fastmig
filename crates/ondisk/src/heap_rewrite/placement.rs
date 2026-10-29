@@ -16,6 +16,7 @@ use crate::Oid;
 use crate::heap_rewrite::heap_state::{HeapState, editor, invalid, spage_err};
 use crate::heap_rewrite::overflow;
 use crate::heap_rewrite::record_patch::{residue_free_overflow_header, with_header};
+use crate::overflow_part::OverflowChain;
 use crate::page::db_area;
 use crate::record::HomeKind;
 use crate::record::heap_chain::HeapChain;
@@ -125,7 +126,10 @@ pub(crate) fn place(st: &mut HeapState, oid: Oid, rec: &[u8], mvcc: bool) -> io:
         if st.ovf_vfid.is_null() {
             st.ovf_vfid = overflow::create_file(st.space, st.hfid, st.class_oid)?;
         }
-        let (first, written) = overflow::write_chain(st.space, st.ovf_vfid, &big)?;
+        let OverflowChain {
+            first,
+            pages: written,
+        } = overflow::write_chain(st.space, st.ovf_vfid, &big)?;
         set_home(st, oid, RecordType::BigOne, &overflow::home_pointer(first))?
             .map_err(|e| spage_err(oid.vpid(), e))?;
         return Ok(Placed {

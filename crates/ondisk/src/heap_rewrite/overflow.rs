@@ -15,14 +15,14 @@ use std::io;
 use crate::file_alloc::{SpaceManager, perm_tablespace};
 use crate::file_header::{FILE_DESCRIPTORS_SIZE, FileType};
 use crate::overflow_part::{
-    FIRST_DATA_OFFSET as FIRST_DATA, OverflowFirstPart, OverflowRestPart,
+    FIRST_DATA_OFFSET as FIRST_DATA, OverflowChain, OverflowFirstPart, OverflowRestPart,
     REST_DATA_OFFSET as REST_DATA,
 };
 use crate::page::{self, PageType, db_area, db_area_mut, db_pagesize};
 use crate::{Hfid, Oid, Vfid, Vpid};
 
-/// Writes `rec` as a new overflow chain of `ovf_vfid`; returns its first page and its page count.
-pub fn write_chain(space: &SpaceManager, ovf_vfid: Vfid, rec: &[u8]) -> io::Result<(Vpid, usize)> {
+/// Writes `rec` as a new overflow chain of `ovf_vfid`.
+pub fn write_chain(space: &SpaceManager, ovf_vfid: Vfid, rec: &[u8]) -> io::Result<OverflowChain> {
     let io_size = space.volumes().io_pagesize();
     let db = db_pagesize(io_size);
     let rest = rec.len().saturating_sub(db - FIRST_DATA);
@@ -48,7 +48,10 @@ pub fn write_chain(space: &SpaceManager, ovf_vfid: Vfid, rec: &[u8]) -> io::Resu
         data = &data[n..];
         space.volumes().write_page(vpid, &p)?;
     }
-    Ok((vpids[0], npages))
+    Ok(OverflowChain {
+        first: vpids[0],
+        pages: npages,
+    })
 }
 
 /// The pages of the chain starting at `first`, in chain order (bounded by the length the first page records).

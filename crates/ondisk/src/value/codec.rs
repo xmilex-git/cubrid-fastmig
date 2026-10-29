@@ -17,7 +17,7 @@ use crate::value::numeric::{
     read_numeric_11_4, read_numeric_develop, write_numeric_11_4, write_numeric_develop,
 };
 use crate::value::or_buf::{DecodeResult, OrReader, OrWriter};
-use crate::value::packed_domain::{decode_value_tag, encode_packed_domain};
+use crate::value::packed_domain::{ValueTag, decode_value_tag, encode_packed_domain};
 use crate::value::set::{decode_set, encode_set};
 use crate::value::string::{
     read_fixed_char_11_4, read_string, str_size, write_fixed_char_11_4, write_string,
@@ -221,7 +221,7 @@ pub fn decode_tagged(
     expected: Option<usize>,
 ) -> DecodeResult<(Domain, Value)> {
     let start = r.pos();
-    let (mut chain, is_null) = decode_value_tag(version, r)?;
+    let ValueTag { mut chain, is_null } = decode_value_tag(version, r)?;
     if chain.is_empty() {
         return Err(r.error("empty domain tag"));
     }

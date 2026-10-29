@@ -12,18 +12,12 @@ use fastmig_ondisk::class_object::{ClassObject, Constraint, class_properties};
 
 use crate::source_classes::SourceClass;
 
-/// Engine `SM_CLASSFLAG_SYSTEM`.
-const CLASSFLAG_SYSTEM: i32 = 1;
-
 pub fn deferred_indexes(
     classes: &[SourceClass],
     line: VersionLine,
 ) -> io::Result<Vec<(&ClassObject, Constraint)>> {
     let mut out = Vec::new();
-    for c in classes
-        .iter()
-        .filter(|c| c.class.flags & CLASSFLAG_SYSTEM == 0)
-    {
+    for c in classes.iter().filter(|c| !c.class.is_system_class()) {
         let props = class_properties(&c.class.properties, line).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,

@@ -172,7 +172,7 @@ impl<'s, 'v> HeapWriter<'s, 'v> {
             self.st.ovf_vfid =
                 overflow::create_file(self.st.space, self.st.hfid, self.st.class_oid)?;
         }
-        let (first, _) = overflow::write_chain(self.st.space, self.st.ovf_vfid, &big)?;
+        let first = overflow::write_chain(self.st.space, self.st.ovf_vfid, &big)?.first;
         self.st.insert_first_fit(
             RecordType::BigOne,
             &overflow::home_pointer(first),

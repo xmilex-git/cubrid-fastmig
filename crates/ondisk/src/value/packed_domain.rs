@@ -86,23 +86,23 @@ enum Bit40 {
 /// Reads one packed domain chain whose 0x40 bit means DESC (engine `or_get_domain` with `is_null == NULL`): index
 /// key domains, set domains, XASL domains.
 pub fn decode_packed_domain(version: VersionLine, r: &mut OrReader) -> DecodeResult<Vec<Domain>> {
-    Ok(decode_chain(version, r, Bit40::Desc)?.0)
+    Ok(decode_chain(version, r, Bit40::Desc)?.chain)
+}
+
+/// The packed domain chain that tags a value, and whether its first carrier marks the value NULL.
+#[derive(Clone, Debug)]
+pub struct ValueTag {
+    pub chain: Vec<Domain>,
+    pub is_null: bool,
 }
 
 /// Reads the packed domain that tags a value (engine `or_get_domain` with `is_null`): the chain, never DESC, and
 /// whether the first carrier marks the value NULL.
-pub fn decode_value_tag(
-    version: VersionLine,
-    r: &mut OrReader,
-) -> DecodeResult<(Vec<Domain>, bool)> {
+pub fn decode_value_tag(version: VersionLine, r: &mut OrReader) -> DecodeResult<ValueTag> {
     decode_chain(version, r, Bit40::Null)
 }
 
-fn decode_chain(
-    version: VersionLine,
-    r: &mut OrReader,
-    bit40: Bit40,
-) -> DecodeResult<(Vec<Domain>, bool)> {
+fn decode_chain(version: VersionLine, r: &mut OrReader, bit40: Bit40) -> DecodeResult<ValueTag> {
     let mut chain = Vec::new();
     let mut is_null = false;
     loop {
@@ -119,7 +119,7 @@ fn decode_chain(
                 .and_then(|t| builtin_type(version, t))
                 .ok_or_else(|| r.error(format!("bad built-in domain index {index}")))?;
             chain.push(Domain::builtin(version, ty));
-            return Ok((chain, is_null));
+            return Ok(ValueTag { chain, is_null });
         }
         let ty = DbType::from_id(version, id)
             .ok_or_else(|| r.error(format!("unknown domain type id {id}")))?;
@@ -198,7 +198,7 @@ fn decode_chain(
         }
         chain.push(d);
         if carrier & NEXT_FLAG == 0 {
-            return Ok((chain, is_null));
+            return Ok(ValueTag { chain, is_null });
         }
     }
 }

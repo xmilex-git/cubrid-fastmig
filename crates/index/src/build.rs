@@ -15,7 +15,7 @@ use crate::key_order::KeyOrder;
 use crate::kway_merge::{Cursor, KwayMerge};
 use crate::leaf_builder::{ShardLeaves, build_shard};
 use crate::memory_limit::MemoryLimit;
-use crate::nonleaf_builder::{build_nonleaf_levels, write_empty_root};
+use crate::nonleaf_builder::{NonleafLevels, build_nonleaf_levels, write_empty_root};
 use crate::ovf_key_file::{MakeSink, OvfKeyFile};
 use crate::page_sink::PageSink;
 use crate::run_writer::IndexRuns;
@@ -238,9 +238,15 @@ pub fn build_index(
         creator_mvccid: 0,
         packed_key_domain: shape.packed_key_domain.clone(),
     };
-    let (height, upper_pages) = if leaves.is_empty() {
+    let NonleafLevels {
+        height,
+        pages: upper_pages,
+    } = if leaves.is_empty() {
         write_empty_root(sink, root, &mut root_header, shape.db_pagesize())?;
-        (1, 1)
+        NonleafLevels {
+            height: 1,
+            pages: 1,
+        }
     } else {
         build_nonleaf_levels(shape, sink, &ovf_keys, root, leaves, &mut root_header)?
     };

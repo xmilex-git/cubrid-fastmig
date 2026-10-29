@@ -16,8 +16,6 @@ use fastmig_ondisk::{Oid, VersionLine};
 use crate::source_classes::SourceClass;
 use crate::system_classes::{SystemClassRole, source_role};
 
-/// Engine `SM_CLASSFLAG_SYSTEM`.
-const CLASSFLAG_SYSTEM: i32 = 1;
 /// Engine `DB_MAX_CHAR_PRECISION`, the same in 11.4 and develop.
 const MAX_CHAR_PRECISION: i32 = 2048;
 
@@ -89,7 +87,7 @@ fn all_domains(c: &SourceClass) -> Vec<(i32, &SchemaDomain)> {
 pub fn classify(classes: &[SourceClass]) -> Vec<ClassPlan> {
     let role_of = |oid: Oid| {
         classes.iter().find(|c| c.oid == oid).and_then(|c| {
-            (c.class.flags & CLASSFLAG_SYSTEM != 0).then(|| {
+            c.class.is_system_class().then(|| {
                 source_role(
                     &String::from_utf8_lossy(&c.class.name),
                     c.class.class_type == ClassType::Vclass,
@@ -103,7 +101,7 @@ pub fn classify(classes: &[SourceClass]) -> Vec<ClassPlan> {
             let name = String::from_utf8_lossy(&c.class.name).into_owned();
             let mut refusals = Vec::new();
             let mut warnings = Vec::new();
-            let kind = if c.class.flags & CLASSFLAG_SYSTEM != 0 {
+            let kind = if c.class.is_system_class() {
                 match source_role(&name, c.class.class_type == ClassType::Vclass) {
                     Some(r) => ClassKind::System(r),
                     None => {

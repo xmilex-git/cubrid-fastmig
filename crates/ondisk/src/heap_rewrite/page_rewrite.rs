@@ -21,7 +21,7 @@ use crate::heap_rewrite::record_patch::{
 };
 use crate::page::{db_area, db_area_mut};
 use crate::record::HomeKind;
-use crate::record::heap_chain::{FLAG_VACUUM_STATUS_MASK, HeapChain};
+use crate::record::heap_chain::HeapChain;
 use crate::record::heap_scan::read_overflow;
 use crate::record::mvcc_header::RecordHeader;
 use crate::spage::{RecordType, SlottedPage};
@@ -252,8 +252,7 @@ pub(crate) fn rewrite_current_page(
                 .unwrap_or_default();
             if let Some(mut chain) = HeapChain::read(&rec) {
                 chain.max_mvccid = 0;
-                // vacuum status only: develop BESTSPACE and NOT_IN_HEAP bits stay (11.4 has no other bits)
-                chain.flags &= !FLAG_VACUUM_STATUS_MASK;
+                chain.clear_vacuum_status();
                 chain.write(&mut rec);
                 ed.update(0, &rec).map_err(|e| spage_err(vpid, e))?;
             }

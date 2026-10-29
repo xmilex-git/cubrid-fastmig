@@ -11,6 +11,7 @@ use crate::btree_page::BtreePage;
 use crate::page_sink::PageSink;
 use fastmig_ondisk::btree::leaf_record::put_fixed_object;
 use fastmig_ondisk::btree::ovf_oid_page::{OvfDirEntry, OvfHeader, dir_max_entries};
+use fastmig_ondisk::overflow_part::OverflowChain;
 use fastmig_ondisk::{Oid, Vpid, db_pagesize};
 use std::io;
 
@@ -21,8 +22,8 @@ fn objects_per_page(db: usize) -> usize {
     p.max_space_for_new_record() / fastmig_ondisk::btree::object_fixed_size(false)
 }
 
-/// Writes the chain; returns its first page and the number of pages written (data + directory).
-pub fn write_overflow_oids(sink: &dyn PageSink, oids: &[Oid]) -> io::Result<(Vpid, usize)> {
+/// Writes the chain; its pages count data and directory pages.
+pub fn write_overflow_oids(sink: &dyn PageSink, oids: &[Oid]) -> io::Result<OverflowChain> {
     let io_size = sink.io_pagesize();
     let db = db_pagesize(io_size);
     let chunks: Vec<&[Oid]> = oids.chunks(objects_per_page(db)).collect();
@@ -86,5 +87,8 @@ pub fn write_overflow_oids(sink: &dyn PageSink, oids: &[Oid]) -> io::Result<(Vpi
         page.push(rec);
         sink.write_page(v, &page.to_io_page(io_size))?;
     }
-    Ok((data[0], data.len() + dir_pages.len()))
+    Ok(OverflowChain {
+        first: data[0],
+        pages: data.len() + dir_pages.len(),
+    })
 }

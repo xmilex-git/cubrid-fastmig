@@ -284,13 +284,29 @@ fn err(at: usize, what: String) -> DecodeError {
     DecodeError { at, what }
 }
 
-/// Develop CHAR and every VARCHAR image: header length and payload length.
-fn string_header(b: &[u8]) -> DecodeResult<(usize, usize, usize, usize)> {
+/// The header of a develop CHAR or any VARCHAR image.
+struct StringHeader {
+    /// Header length: 1, or 9 when the length byte says a compressed-length pair follows.
+    header_len: usize,
+    /// Payload bytes stored after the header.
+    stored: usize,
+    /// LZ4-compressed length, 0 when stored uncompressed.
+    compressed_len: usize,
+    /// Uncompressed length.
+    len: usize,
+}
+
+fn string_header(b: &[u8]) -> DecodeResult<StringHeader> {
     let first = *b
         .first()
         .ok_or_else(|| err(0, "empty string image".into()))?;
     if (first as usize) < MIN_LENGTH_FOR_COMPRESSION {
-        return Ok((1, first as usize, 0, first as usize));
+        return Ok(StringHeader {
+            header_len: 1,
+            stored: first as usize,
+            compressed_len: 0,
+            len: first as usize,
+        });
     }
     if b.len() < 9 {
         return Err(err(0, "short compressed string header".into()));
@@ -298,11 +314,21 @@ fn string_header(b: &[u8]) -> DecodeResult<(usize, usize, usize, usize)> {
     let mut r = OrReader::new(&b[1..]);
     let clen = r.i32()?.max(0) as usize;
     let len = r.i32()?.max(0) as usize;
-    Ok((9, if clen > 0 { clen } else { len }, clen, len))
+    Ok(StringHeader {
+        header_len: 9,
+        stored: if clen > 0 { clen } else { len },
+        compressed_len: clen,
+        len,
+    })
 }
 
 fn string_bytes(b: &[u8]) -> DecodeResult<Cow<'_, [u8]>> {
-    let (h, stored, clen, len) = string_header(b)?;
+    let StringHeader {
+        header_len: h,
+        stored,
+        compressed_len: clen,
+        len,
+    } = string_header(b)?;
     let data = b
         .get(h..h + stored)
         .ok_or_else(|| err(h, "string image past its buffer".into()))?;
@@ -341,8 +367,8 @@ pub fn image_len(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<usi
             }
         }
         T::Char | T::Varchar | T::Varnchar => {
-            let (h, stored, _, _) = string_header(b)?;
-            h + stored
+            let s = string_header(b)?;
+            s.header_len + s.stored
         }
         T::Bit => {
             if d.precision == FLOATING_PRECISION {

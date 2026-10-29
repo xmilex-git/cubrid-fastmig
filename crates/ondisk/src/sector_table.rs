@@ -27,16 +27,27 @@ pub fn sectors_per_page(io_pagesize: usize) -> i32 {
     (db_pagesize(io_pagesize) * 8) as i32
 }
 
-/// Where sector `sectid`'s bit lives: (STAB page, byte offset of its u64 unit in the IO page, bit in the unit).
-pub fn bit_position(vh: &VolumeHeader, io_pagesize: usize, sectid: i32) -> (Vpid, usize, u32) {
+/// Where one sector's bit lives in the sector table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StabBit {
+    /// The STAB page.
+    pub page: Vpid,
+    /// Byte offset of the bit's u64 unit in the IO page.
+    pub unit_off: usize,
+    /// The bit in that unit.
+    pub bit: u32,
+}
+
+/// Where sector `sectid`'s bit lives.
+pub fn bit_position(vh: &VolumeHeader, io_pagesize: usize, sectid: i32) -> StabBit {
     let per_page = sectors_per_page(io_pagesize);
     let page = vh.stab_first_page + sectid / per_page;
     let in_page = sectid % per_page;
-    (
-        Vpid::new(vh.volid, page),
-        IO_RESERVED_SIZE + (in_page / 64) as usize * 8,
-        (in_page % 64) as u32,
-    )
+    StabBit {
+        page: Vpid::new(vh.volid, page),
+        unit_off: IO_RESERVED_SIZE + (in_page / 64) as usize * 8,
+        bit: (in_page % 64) as u32,
+    }
 }
 
 /// The volume's system sectors (header and STAB pages): 0..=`SECTOR_FROM_PAGEID(sys_lastpage)`, always set.
@@ -80,18 +91,22 @@ pub fn used_sectors(vols: &VolumeSet, volid: i16) -> io::Result<Vec<i32>> {
 }
 
 /// Reads one sector's bit from its STAB page.
-pub fn is_set(stab_page: &[u8], unit_off: usize, bit: u32) -> bool {
-    get_u64(stab_page, unit_off) >> bit & 1 != 0
+pub fn is_set(stab_page: &[u8], at: StabBit) -> bool {
+    get_u64(stab_page, at.unit_off) >> at.bit & 1 != 0
 }
 
 /// Sets or clears one sector's bit in its STAB page; returns the old value.
-pub fn set_bit(stab_page: &mut [u8], unit_off: usize, bit: u32, on: bool) -> bool {
-    let u = get_u64(stab_page, unit_off);
-    let old = u >> bit & 1 != 0;
+pub fn set_bit(stab_page: &mut [u8], at: StabBit, on: bool) -> bool {
+    let u = get_u64(stab_page, at.unit_off);
+    let old = u >> at.bit & 1 != 0;
     put_u64(
         stab_page,
-        unit_off,
-        if on { u | 1 << bit } else { u & !(1 << bit) },
+        at.unit_off,
+        if on {
+            u | 1 << at.bit
+        } else {
+            u & !(1 << at.bit)
+        },
     );
     old
 }

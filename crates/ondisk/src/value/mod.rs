@@ -31,6 +31,6 @@ pub use index_image::Collation;
 pub use key_domain::{KeyColumn, KeyDomain};
 pub use numeric::Numeric;
 pub use or_buf::{DecodeError, DecodeResult, OrReader, OrWriter};
-pub use packed_domain::{decode_packed_domain, decode_value_tag, encode_packed_domain};
+pub use packed_domain::{ValueTag, decode_packed_domain, decode_value_tag, encode_packed_domain};
 pub use set::{decode_set, encode_set};
 pub use string::{read_string, read_varchar, write_string};

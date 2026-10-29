@@ -19,7 +19,9 @@ mod representation;
 mod sub_set;
 
 pub use attribute::Attribute;
-pub use class_record::{ClassHead, ClassObject, ClassType, decode, decode_10_2, decode_head};
+pub use class_record::{
+    CLASSFLAG_SYSTEM, ClassHead, ClassObject, ClassType, decode, decode_10_2, decode_head,
+};
 pub use constraint::{
     ClassProperties, Constraint, ConstraintKind, ForeignKeyInfo, class_properties, format_btid,
     parse_btid,

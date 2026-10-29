@@ -21,7 +21,7 @@ use fastmig_ondisk::class_object::{ClassObject, Constraint};
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::heap_rewrite::record_patch::residue_free_overflow_header;
 use fastmig_ondisk::page::{self, PageType, db_pagesize};
-use fastmig_ondisk::record::heap_chain::{FLAG_VACUUM_ONCE, FLAG_VACUUM_STATUS_MASK, HeapChain};
+use fastmig_ondisk::record::heap_chain::{HeapChain, VacuumStatus};
 use fastmig_ondisk::record::{
     ExtractedKey, HeapHdrStats, RecordHeader, RecordLayout, decode_record, extract_key,
     resolve_record,
@@ -309,10 +309,9 @@ fn scan_page(
         // page below the source's horizon was vacuumed (`page_needs_patch`, workspace#484), and without `--source`
         // ONCE stays a defect: the horizon that would clear it is unknown
         if db.role == Role::Target {
-            let status = chain.flags & FLAG_VACUUM_STATUS_MASK;
             let residue = chain.max_mvccid >= db.mvcc_next_id
                 || match db.source_horizon {
-                    None => status == FLAG_VACUUM_ONCE,
+                    None => chain.vacuum_status() == VacuumStatus::Once,
                     Some(h) => h.pending && h.page_needs_patch(&chain),
                 };
             if residue {

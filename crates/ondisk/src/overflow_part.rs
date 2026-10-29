@@ -60,3 +60,10 @@ impl OverflowRestPart {
             .0
     }
 }
+
+/// A chain just written: its first page and how many pages it took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverflowChain {
+    pub first: crate::Vpid,
+    pub pages: usize,
+}

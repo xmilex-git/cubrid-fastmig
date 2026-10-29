@@ -110,9 +110,9 @@ impl Builder<'_, '_> {
         };
         let max = self.shape.max_objects_in_leaf_record();
         let ovf = if oids.len() > max {
-            let (first, pages) = write_overflow_oids(self.sink, &oids[max..])?;
-            self.out.counts.ovf_oid_pages += pages as u64;
-            Some(first)
+            let chain = write_overflow_oids(self.sink, &oids[max..])?;
+            self.out.counts.ovf_oid_pages += chain.pages as u64;
+            Some(chain.first)
         } else {
             None
         };

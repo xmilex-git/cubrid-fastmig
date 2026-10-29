@@ -70,7 +70,7 @@ fn default_value(packed: &[u8], line: VersionLine) -> DecodeResult<Vec<u8>> {
         return Ok(Vec::new());
     }
     let mut r = OrReader::new(packed);
-    let (_, is_null) = decode_value_tag(line, &mut r)?;
+    let is_null = decode_value_tag(line, &mut r)?.is_null;
     Ok(if is_null {
         Vec::new()
     } else {

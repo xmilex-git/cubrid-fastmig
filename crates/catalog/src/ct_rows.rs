@@ -30,8 +30,7 @@ use crate::ct_index_rows::index_rows;
 use crate::target_classes::TargetClass;
 
 const LINE: VersionLine = VersionLine::Develop;
-/// Engine `SM_CLASSFLAG_SYSTEM`.
-const CLASSFLAG_SYSTEM: i32 = 1;
+use fastmig_ondisk::class_object::CLASSFLAG_SYSTEM;
 /// Engine `SM_ATTFLAG_*` and the `DB_ATTOPT_*` bits `catcls_filter_attflag` maps them to.
 const ATTFLAG_NON_NULL: i32 = 4;
 const ATTFLAG_AUTO_INCREMENT: i32 = 256;

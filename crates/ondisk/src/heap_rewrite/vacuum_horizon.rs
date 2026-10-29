@@ -20,7 +20,7 @@ use crate::Vfid;
 use crate::ids::VpidLe;
 use crate::log_header::LogHeader;
 use crate::page::db_area;
-use crate::record::heap_chain::{FLAG_VACUUM_STATUS_MASK, HeapChain};
+use crate::record::heap_chain::{HeapChain, VacuumStatus};
 use crate::volume_set::VolumeSet;
 
 /// Engine `struct vacuum_data_page` up to its first entry.
@@ -95,6 +95,6 @@ impl VacuumHorizon {
     /// interrupted by a shutdown and re-ran (engine `vacuum_heap_page`, develop @5b1867174 vacuum.c:1813-1816), so a
     /// source with no pending vacuum work can still hold ONCE pages (R2 § 3 R2.2; workspace#484, V1 cbrd_24871).
     pub fn page_needs_patch(&self, chain: &HeapChain) -> bool {
-        chain.flags & FLAG_VACUUM_STATUS_MASK != 0 && chain.max_mvccid >= self.oldest_unvacuumed
+        chain.vacuum_status() != VacuumStatus::None && chain.max_mvccid >= self.oldest_unvacuumed
     }
 }

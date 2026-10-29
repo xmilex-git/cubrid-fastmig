@@ -106,6 +106,21 @@ pub fn decode_10_2(record: &[u8]) -> DecodeResult<ClassObject> {
     decode_fixed(record, VersionLine::V11_4, false)
 }
 
+/// Engine `SM_CLASSFLAG_SYSTEM`: bit of a class object's `flags` set on system classes.
+pub const CLASSFLAG_SYSTEM: i32 = 0x1;
+
+impl ClassObject {
+    pub fn is_system_class(&self) -> bool {
+        self.flags & CLASSFLAG_SYSTEM != 0
+    }
+}
+
+impl ClassHead {
+    pub fn is_system_class(&self) -> bool {
+        self.flags & CLASSFLAG_SYSTEM != 0
+    }
+}
+
 /// The fields of a class object that name it: enough for a pre-check that must not decode the rest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassHead {

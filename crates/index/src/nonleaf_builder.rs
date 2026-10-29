@@ -26,8 +26,17 @@ struct Pending {
     max_key_len: i16,
 }
 
+/// What the non-leaf levels came to.
+#[derive(Clone, Copy, Debug)]
+pub struct NonleafLevels {
+    /// Tree height (the root's `node_level`).
+    pub height: i16,
+    /// Non-leaf pages, the root included.
+    pub pages: u64,
+}
+
 /// Builds every non-leaf level and writes the root at `root`. `level` (the leaves) is non-empty. Fills
-/// `root_header`'s node header and `ovfid`. Returns (height, non-leaf pages including the root).
+/// `root_header`'s node header and `ovfid`.
 pub fn build_nonleaf_levels(
     shape: &IndexShape,
     sink: &dyn PageSink,
@@ -35,7 +44,7 @@ pub fn build_nonleaf_levels(
     root: Vpid,
     mut level: Vec<ChildSummary>,
     root_header: &mut RootHeader,
-) -> io::Result<(i16, u64)> {
+) -> io::Result<NonleafLevels> {
     let db = shape.db_pagesize();
     let io_size = sink.io_pagesize();
     let mut node_level = 2i16;
@@ -83,7 +92,10 @@ pub fn build_nonleaf_levels(
             root_header.ovfid = ovf_keys.vfid().unwrap_or(fastmig_ondisk::Vfid::NULL);
             page.records[0] = root_header.to_bytes();
             sink.write_page(root, &page.to_io_page(io_size))?;
-            return Ok((node_level, pages_written + 1));
+            return Ok(NonleafLevels {
+                height: node_level,
+                pages: pages_written + 1,
+            });
         }
         let mut next = Vec::with_capacity(pages.len());
         for mut p in pages {

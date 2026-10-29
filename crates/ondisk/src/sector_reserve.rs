@@ -170,7 +170,10 @@ impl DiskCache {
                 Some(p) => p.clone(),
                 None => VolumePlace::beside_first(vols)?,
             };
-            let (volid, free) = volume_addition::add_volume(vols, nsect_total, vol_max, &place)?;
+            let volume_addition::AddedVolume {
+                volid,
+                free_sectors: free,
+            } = volume_addition::add_volume(vols, nsect_total, vol_max, &place)?;
             let v = volid as usize;
             debug_assert_eq!(v, self.free.len());
             self.data.push(true);
@@ -205,7 +208,7 @@ impl DiskCache {
         for (from, to) in [(start, total), (0, start)] {
             let mut s = from;
             while s < to && left > 0 {
-                let (vpid, _, _) = sector_table::bit_position(&vh, vols.io_pagesize(), s);
+                let vpid = sector_table::bit_position(&vh, vols.io_pagesize(), s).page;
                 let page_first = (vpid.pageid - vh.stab_first_page)
                     * sector_table::sectors_per_page(vols.io_pagesize());
                 let page_end =
@@ -213,9 +216,9 @@ impl DiskCache {
                 let mut p = vols.read_page(vpid)?;
                 let mut changed = false;
                 while s < page_end && left > 0 {
-                    let (_, unit, bit) = sector_table::bit_position(&vh, vols.io_pagesize(), s);
-                    if !sector_table::is_set(&p, unit, bit) {
-                        sector_table::set_bit(&mut p, unit, bit, true);
+                    let at = sector_table::bit_position(&vh, vols.io_pagesize(), s);
+                    if !sector_table::is_set(&p, at) {
+                        sector_table::set_bit(&mut p, at, true);
                         out.push(Vsid::new(v as i16, s));
                         changed = true;
                         last = s;
@@ -243,15 +246,15 @@ impl DiskCache {
     /// Refuses a sector that is not reserved.
     pub fn release(&mut self, vols: &VolumeSet, vsid: Vsid) -> io::Result<()> {
         let vh = vols.volume(vsid.volid)?.header.clone();
-        let (vpid, unit, bit) = sector_table::bit_position(&vh, vols.io_pagesize(), vsid.sectid);
-        let mut p = vols.read_page(vpid)?;
-        if !sector_table::set_bit(&mut p, unit, bit, false) {
+        let at = sector_table::bit_position(&vh, vols.io_pagesize(), vsid.sectid);
+        let mut p = vols.read_page(at.page)?;
+        if !sector_table::set_bit(&mut p, at, false) {
             return Err(io::Error::other(format!(
                 "sector {}|{} released but not reserved",
                 vsid.volid, vsid.sectid
             )));
         }
-        vols.write_page(vpid, &p)?;
+        vols.write_page(at.page, &p)?;
         self.free[vsid.volid as usize] += 1;
         Ok(())
     }
