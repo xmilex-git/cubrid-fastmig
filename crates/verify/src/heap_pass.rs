@@ -19,7 +19,8 @@ use fastmig_index::heap_scan::{ClassRuns, RowKey, ScanClass, scan_classes};
 use fastmig_index::{KeyOrder, MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{ClassObject, Constraint};
 use fastmig_ondisk::file_table::FileTable;
-use fastmig_ondisk::page::{self, PageType};
+use fastmig_ondisk::heap_rewrite::record_patch::residue_free_overflow_header;
+use fastmig_ondisk::page::{self, PageType, db_pagesize};
 use fastmig_ondisk::record::heap_chain::{FLAG_VACUUM_ONCE, FLAG_VACUUM_STATUS_MASK, HeapChain};
 use fastmig_ondisk::record::{
     ExtractedKey, HeapHdrStats, RecordHeader, RecordLayout, decode_record, extract_key,
@@ -369,11 +370,18 @@ fn scan_page(
         if let fastmig_ondisk::record::HomeKind::Relocated { newhome } = r.kind {
             o.relocations.push((oid, newhome));
         }
+        // engine `spage_collect_statistics`: a REC_BIGONE counts as two pages, whatever its length
+        let stat_len = match r.kind {
+            fastmig_ondisk::record::HomeKind::Big { .. } => {
+                2 * db_pagesize(db.vols.io_pagesize()) as u64
+            }
+            _ => r.bytes.len() as u64,
+        };
         let Some(class) = t.class else {
             // root heap: class objects, not MVCC records
             o.live.push(oid);
             o.num_recs += 1;
-            o.recs_sumlen += r.bytes.len() as u64;
+            o.recs_sumlen += stat_len;
             continue;
         };
         let header = match RecordHeader::read(&r.bytes) {
@@ -384,7 +392,11 @@ fn scan_page(
                 continue;
             }
         };
-        if db.role == Role::Target && header.mvcc_flags != 0 {
+        // a big MVCC record keeps the maximum header with no residue in it (engine
+        // `heap_insert_adjust_recdes_header`; workspace#499 `residue_free_overflow_header`)
+        let big_clean = matches!(r.kind, fastmig_ondisk::record::HomeKind::Big { .. })
+            && residue_free_overflow_header(&header) == header;
+        if db.role == Role::Target && header.mvcc_flags != 0 && !big_clean {
             o.defects.push(
                 d(t, "record-mvcc-residue", vpid)
                     .object(OidText(oid))
@@ -397,7 +409,7 @@ fn scan_page(
         }
         o.live.push(oid);
         o.num_recs += 1;
-        o.recs_sumlen += r.bytes.len() as u64;
+        o.recs_sumlen += stat_len;
         let layout = match layouts.get(&header.repid) {
             Some(Ok(l)) => l,
             Some(Err(e)) => {
