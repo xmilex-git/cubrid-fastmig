@@ -4,7 +4,8 @@
 //! Input: the progress state, this tick's estimate, the heap reading. Output: ANSI cursor-up and erase-line
 //! sequences plus the lines, each cut to the terminal width. The terminal's modes and cursor are never changed,
 //! so an interrupted run (Ctrl-C) leaves nothing to restore; the last frame stays on screen.
-//! Source: ECMA-48 CUU (`ESC [ n A`) and EL (`ESC [ 2 K`); Linux `TIOCGWINSZ` (asm-generic/ioctls.h 0x5413).
+//! A warning is written above the frame: the frame is erased, the warning printed, the frame redrawn below it.
+//! Source: ECMA-48 CUU (`ESC [ n A`), EL (`ESC [ 2 K`) and ED (`ESC [ J`); Linux `TIOCGWINSZ` (asm-generic/ioctls.h 0x5413).
 
 use std::io::Write;
 use std::sync::atomic::Ordering::Relaxed;
@@ -24,6 +25,23 @@ pub struct Screen {
 impl Screen {
     pub fn new() -> Screen {
         Screen { drawn: 0 }
+    }
+
+    /// Erases the drawn frame, writes `lines` where it stood (they scroll up with the output), and leaves the
+    /// next [`Screen::draw`] to redraw the frame below them.
+    pub fn print_above(&mut self, lines: &[String]) {
+        let mut out = String::new();
+        if self.drawn > 0 {
+            out += &format!("\x1b[{}A\r\x1b[J", self.drawn);
+        }
+        for l in lines {
+            out += l;
+            out += "\n";
+        }
+        self.drawn = 0;
+        let mut err = std::io::stderr().lock();
+        let _ = err.write_all(out.as_bytes());
+        let _ = err.flush();
     }
 
     pub fn draw(&mut self, p: &Progress, e: &Estimate, heap: &Heap, now: Instant) {

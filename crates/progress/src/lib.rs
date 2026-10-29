@@ -1,5 +1,5 @@
 //! Progress of a run: the phases it goes through, how far each has come, and its display (an in-place screen on
-//! a terminal, one line per interval and per phase boundary otherwise).
+//! a terminal, one line per interval otherwise).
 //!
 //! Workers only add to per-thread counters ([`Meter::add`]); one monitor thread reads them, times them, estimates
 //! the remaining time and prints. Nothing here knows an on-disk layout.

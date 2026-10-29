@@ -2,7 +2,8 @@
 //!
 //! Input: the progress state, this tick's estimate, the heap reading. Output: lines such as
 //! `[phase 3/8 volumes] 42.1% (198 MiB/470 MiB, 1.1 GiB/s) ETA phase 0:02 total ~0:05 done ~22:41 heap 2.1 MiB/max 3.0 MiB of --mem 16 GiB`
-//! and, at a boundary, `[phase 3/8 volumes] done in 0.41 s (470 MiB, 1.1 GiB/s)`.
+//! followed by ` (since last: volume-copy done 1.78 s 4.2 GiB 2.4 GiB/s, volume-paths done)` naming the phases
+//! that ended since the previous line.
 //! Source: user request relayed in workspace#472 (line format).
 
 use std::sync::atomic::Ordering::Relaxed;
@@ -109,16 +110,25 @@ pub(crate) fn finished_amount(ph: &Phase, now: Instant) -> String {
     format!("({}{rate})", ph.spec.unit.amount(done))
 }
 
-pub fn finished(p: &Progress, i: usize, now: Instant) -> String {
+/// `volume-copy done 1.78 s 4.2 GiB 2.4 GiB/s`, or `volume-paths done` for a step.
+pub fn ended_brief(p: &Progress, i: usize, now: Instant) -> String {
     let ph = &p.phases[i];
+    if ph.spec.unit == Unit::Step {
+        return format!("{} done", ph.spec.name);
+    }
+    let el = elapsed(ph, now);
+    let done = ph.done();
+    let rate = if el > 0.0 {
+        format!(" {}", ph.spec.unit.rate(done as f64 / el))
+    } else {
+        String::new()
+    };
     format!(
-        "{} done in {} {}",
-        tag(p, i),
-        secs(elapsed(ph, now)),
-        finished_amount(ph, now)
+        "{} done {} {}{rate}",
+        ph.spec.name,
+        secs(el),
+        ph.spec.unit.amount(done)
     )
-    .trim_end()
-    .to_string()
 }
 
 /// The last line: total time against the first estimate, and the heap peak.

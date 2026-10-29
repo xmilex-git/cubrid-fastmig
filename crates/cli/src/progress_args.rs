@@ -1,5 +1,5 @@
 //! The progress options every long subcommand shares: `--progress auto|tty|plain|none` (default auto) and
-//! `--progress-interval <seconds>` (plain lines, default 5).
+//! `--progress-interval <seconds>` (plain lines, default 10).
 //!
 //! Input: the parsed flags. Output: a started [`Monitor`] over the command's [`Progress`].
 //! Source: user request relayed in workspace#472.
@@ -16,8 +16,8 @@ pub const FLAGS: &[&str] = &["--progress", "--progress-interval"];
 
 pub const HELP: &str = "\
   --progress <auto|tty|plain|none>  progress display on stderr (default auto: the in-place screen when stdout and
-                                 stderr are terminals, else one line every --progress-interval and per phase)
-  --progress-interval <seconds>  plain-line interval (default 5)";
+                                 stderr are terminals, else one line every --progress-interval)
+  --progress-interval <seconds>  plain-line interval (default 10)";
 
 pub fn start(
     p: &Parsed,
@@ -33,7 +33,7 @@ pub fn start(
             .ok()
             .filter(|s| *s > 0.0 && s.is_finite())
             .ok_or_else(|| CliError::Usage(format!("bad --progress-interval {v}")))?,
-        None => 5.0,
+        None => 10.0,
     };
     Ok(Monitor::start(
         progress,

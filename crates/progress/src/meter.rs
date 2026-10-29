@@ -10,7 +10,7 @@
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::Thread;
 use std::time::Instant;
 
@@ -74,8 +74,11 @@ pub struct Progress {
     pub(crate) run_started: Instant,
     /// Elapsed + estimated remaining seconds when the first measured phase began (the plan's totals known).
     pub(crate) start_estimate: OnceLock<f64>,
-    /// The monitor thread, woken at each boundary so a plain display prints it at once.
+    /// The monitor thread, woken at each boundary (and by a warning) so the screen redraws at once.
     pub(crate) waker: OnceLock<Thread>,
+    /// Warnings for the running monitor to print between its frames; `None` while no monitor runs, so
+    /// [`Progress::warn`] prints directly.
+    pub(crate) warnings: Mutex<Option<Vec<String>>>,
 }
 
 impl Progress {
@@ -103,6 +106,7 @@ impl Progress {
             run_started: now,
             start_estimate: OnceLock::new(),
             waker: OnceLock::new(),
+            warnings: Mutex::new(None),
         })
     }
 
@@ -142,6 +146,31 @@ impl Progress {
         while self.current.load(Relaxed) < self.phases.len() {
             self.advance();
         }
+    }
+
+    /// Prints a warning line on stderr at once: through the monitor while one runs (the screen is cleared,
+    /// the warning written above it, the screen redrawn), directly otherwise.
+    pub fn warn(&self, msg: String) {
+        let mut q = self.warnings.lock().unwrap_or_else(|e| e.into_inner());
+        match q.as_mut() {
+            Some(q) => {
+                q.push(msg);
+                if let Some(t) = self.waker.get() {
+                    t.unpark();
+                }
+            }
+            None => eprintln!("{msg}"),
+        }
+    }
+
+    /// Takes the queued warnings; `Some` while a monitor runs. `close` hands printing back to [`Progress::warn`].
+    pub(crate) fn take_warnings(&self, close: bool) -> Vec<String> {
+        let mut q = self.warnings.lock().unwrap_or_else(|e| e.into_inner());
+        let out = q.as_mut().map(std::mem::take).unwrap_or_default();
+        if close {
+            *q = None;
+        }
+        out
     }
 
     pub fn current(&self) -> usize {

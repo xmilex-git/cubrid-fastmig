@@ -279,7 +279,13 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     )?;
     let fastmig_dir = o.dest.join("fastmig");
     marker.create_dir_all(&fastmig_dir)?;
-    let lob = copy_lobs(o, src_lob_base.as_deref(), &fastmig_dir, &marker)?;
+    let lob = copy_lobs(
+        o,
+        src_lob_base.as_deref(),
+        &fastmig_dir,
+        &marker,
+        &rep.progress,
+    )?;
     rep.lap("assets");
 
     // The new log comes last (workspace#482): a crash before it leaves no bootable target.
@@ -375,11 +381,13 @@ fn copy_lobs(
     src_base: Option<&Path>,
     fastmig_dir: &Path,
     marker: &IncompleteMarker,
+    progress: &Progress,
 ) -> io::Result<AssetOutcome> {
     let Some(manifest) = &o.lob_manifest else {
         if src_base.is_some_and(Path::exists) {
-            eprintln!(
+            progress.warn(
                 "warning: no --lob-manifest: LOB files are not copied (locator scan lands with workspace#484)"
+                    .into(),
             );
         }
         return Ok(AssetOutcome::default());
