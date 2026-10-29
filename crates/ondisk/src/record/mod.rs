@@ -5,6 +5,7 @@
 //! Source: engine `src/storage/heap_file.c`, `src/base/object_representation_sr.c` (release/11.4 @46212adcd,
 //! develop @5b1867174); R2 § 1.
 
+pub mod bestspace_page;
 pub mod develop_layout;
 pub mod extract_key;
 pub mod heap_chain;
