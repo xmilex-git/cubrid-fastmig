@@ -15,7 +15,14 @@ use fastmig_ondisk::file_header::{FileDescriptor, FileHeader, FileType};
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, VersionLine, file_tracker};
 
+use fastmig_ondisk::class_object::{class_properties, encode_develop, format_btid};
+use fastmig_ondisk::value::Value;
+
+use crate::class_rewrite::{RewriteInputs, rewrite_user_class};
+use crate::class_rows::read_rows;
 use crate::classify::{ClassKind, classify};
+use crate::output_sql::plcsql_routines;
+use crate::serial_name::{name_11_4, name_develop};
 use crate::source_classes::{SourceClass, read_classes};
 use crate::system_classes::{SystemClassRole, target_role};
 use crate::template::CatalogTemplate;
@@ -42,6 +49,10 @@ impl fmt::Display for DryRun {
         }
         Ok(())
     }
+}
+
+fn invalid(msg: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
 fn o(oid: Oid) -> String {
@@ -180,6 +191,60 @@ pub fn dry_run(
     }
     d.sections.push(("3 heaps kept in place".into(), lines));
 
+    // 4. index builds: every plain constraint index of the kept and template classes; function/filter deferred
+    let mut lines = Vec::new();
+    let mut deferred = Vec::new();
+    for (c, p) in classes.iter().zip(&plans) {
+        if p.kind != ClassKind::User {
+            continue;
+        }
+        let props = class_properties(&c.class.properties, line)
+            .map_err(|e| invalid(format!("{} properties: {e}", p.name)))?;
+        for k in &props.constraints {
+            if k.has_filter || k.has_function {
+                deferred.push((&c.class, k.clone()));
+            } else if k.btid.is_some() {
+                lines.push(format!(
+                    "build {:?} {}.{} keys {:?} (old BTID {})",
+                    k.kind,
+                    p.name,
+                    String::from_utf8_lossy(&k.name),
+                    k.keys,
+                    format_btid(k.btid)
+                ));
+            }
+        }
+    }
+    for t in &tclasses {
+        let name = String::from_utf8_lossy(&t.class.name).into_owned();
+        let props = class_properties(&t.class.properties, VersionLine::Develop)
+            .map_err(|e| invalid(format!("template {name} properties: {e}")))?;
+        for k in props.constraints.iter().filter(|k| k.btid.is_some()) {
+            lines.push(format!(
+                "build {:?} {name}.{} keys {:?} (system table, template definition)",
+                k.kind,
+                String::from_utf8_lossy(&k.name),
+                k.keys
+            ));
+        }
+    }
+    let deferred_names: Vec<String> = deferred
+        .iter()
+        .filter(|(c, _)| !c.partitions.iter().any(|p| p.pname.is_some()))
+        .map(|(c, k)| {
+            format!(
+                "deferred {}.{}",
+                String::from_utf8_lossy(&c.name),
+                String::from_utf8_lossy(&k.name)
+            )
+        })
+        .collect();
+    lines.extend(deferred_names.iter().cloned());
+    d.sections.push((
+        "4 index builds (workspace#493) and deferred indexes".into(),
+        lines,
+    ));
+
     // 5. class objects in the root heap, then the catalog
     let mut lines = Vec::new();
     let mut targets = 0usize;
@@ -188,10 +253,24 @@ pub fn dry_run(
         let action = match &p.kind {
             ClassKind::User => {
                 targets += 1;
+                let tried = rewrite_user_class(
+                    c,
+                    p,
+                    &RewriteInputs {
+                        rep_dir: Oid::NULL,
+                        new_btid: &|_| None,
+                    },
+                )
+                .map(|o| encode_develop(&o).len());
                 target_atts += c.class.attributes.len()
                     + c.class.shared_attributes.len()
                     + c.class.class_attributes.len();
-                "rewrite in place (new rep_dir and BTIDs, develop constraint sequences)".to_string()
+                match tried {
+                    Ok(n) => {
+                        format!("rewrite in place, {n} B develop record (new rep_dir and BTIDs)")
+                    }
+                    Err(e) => format!("rewrite in place: PENDING {}", e.what),
+                }
             }
             ClassKind::System(SystemClassRole::SameSlot { .. } | SystemClassRole::Reallocated) => {
                 let dn = develop_name_or_same(&p.kind, &p.name);
@@ -252,15 +331,54 @@ pub fn dry_run(
     d.sections.push(("5 catalog table rows".into(), lines));
 
     // 6. files written next to the target
+    let serial = classes.iter().find(|c| c.class.name == b"db_serial");
+    let mut renames = Vec::new();
+    if let Some(sc) = serial {
+        let cs = vs.volume(0)?.header.db_charset as u8;
+        for r in read_rows(vs, line, sc)? {
+            let (Some(Value::Varchar(un)), Some(Value::Varchar(cn)), Some(Value::Varchar(an))) = (
+                r.values.get("unique_name"),
+                r.values.get("class_name"),
+                r.values.get("attr_name"),
+            ) else {
+                continue;
+            };
+            let owner = un.split(|&b| b == b'.').next().unwrap_or_default();
+            let class = [owner, b".", cn].concat();
+            let new = name_develop(&class, an, cs);
+            if new != name_11_4(&class, an) {
+                renames.push(format!(
+                    "rename serial {} -> {}",
+                    String::from_utf8_lossy(un),
+                    String::from_utf8_lossy(&new)
+                ));
+            }
+        }
+    }
+    let plcsql = match classes
+        .iter()
+        .find(|c| c.class.name == b"_db_stored_procedure")
+    {
+        Some(c) => plcsql_routines(&read_rows(vs, line, c)?),
+        None => Vec::new(),
+    };
+    let mut lines = renames;
+    lines.push(format!(
+        "<dest>/fastmig/deferred-indexes.sql: {} CREATE INDEX (workspace#486)",
+        deferred_names.len()
+    ));
+    lines.push(format!(
+        "<dest>/fastmig/recompile-plcsql.sql: {} routines (workspace#488)",
+        plcsql.len()
+    ));
     d.sections.push((
         "6 output files and the end".into(),
         vec![
             "<dest>/fastmig/update-statistics.sql: UPDATE STATISTICS ON ALL CLASSES; (workspace#482 7)".into(),
-            "<dest>/fastmig/deferred-indexes.sql: CREATE INDEX for function and filter indexes (workspace#486)".into(),
-            "<dest>/fastmig/recompile-plcsql.sql: PL/CSQL routines to recompile (workspace#488)".into(),
             "volume header paths, then _lgat last with sysmeta_version 1 (workspace#482 10)".into(),
         ],
     ));
+    d.sections.last_mut().unwrap().1.splice(0..0, lines);
     Ok(d)
 }
 

@@ -53,6 +53,13 @@ cli      → all of the above; the only binary
 These are the allowed edges, not yet all wired. An edge outside this list, or a new crate,
 updates this map (and README § Layout for a crate) in the same commit.
 
+External crates, each with the reason it is not a few lines of our own (add a row with a new one):
+
+| Crate | Used by | Why |
+|---|---|---|
+| `lz4_flex` | `ondisk::value` | LZ4 block format of compressed strings (engine `cubcompress::LZ4`) |
+| `md-5` | `catalog::serial_name` | develop names long auto_increment serials with an MD5 of the 11.4 name |
+
 ## Files and modules
 
 - **One module, one job.** Name the file after that job (`heap_hdr_stats.rs`, `patch_page.rs`),
