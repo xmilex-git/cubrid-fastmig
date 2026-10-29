@@ -15,7 +15,7 @@ use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::heap_rewrite::VacuumHorizon;
 use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
-use fastmig_ondisk::{Oid, VersionLine};
+use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 
 /// Source rules (vacuum residue allowed) or target rules (vacuum residue is a defect, G3 Q5 (v), Q2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,17 +43,9 @@ pub struct Database {
 
 fn read_log(log: &Path) -> io::Result<LogHeader> {
     let page = std::fs::read(log)?;
-    if page.len() < log_header::LOG_HEADER_SIZE {
-        return Err(io::Error::other(format!("{}: too short", log.display())));
-    }
-    let lh = LogHeader::read(&page);
-    if lh.magic != log_header::MAGIC {
-        return Err(io::Error::other(format!(
-            "{}: not an active log",
-            log.display()
-        )));
-    }
-    Ok(lh)
+    log_header::read_source(&page)
+        .map(|(_, lh)| lh)
+        .map_err(|e| io::Error::other(format!("{}: {} at {}", log.display(), e.what, e.at)))
 }
 
 /// The vacuum horizon of the database with this first volume and active log.
@@ -96,10 +88,12 @@ impl Database {
         role: Role,
         lob_base: Option<PathBuf>,
     ) -> io::Result<Database> {
-        let line = VersionLine::from_db_compatibility(lh.db_compatibility).ok_or_else(|| {
+        let version = SourceVersion::identify(lh.db_compatibility, &lh.db_release);
+        let line = version.and_then(SourceVersion::line).ok_or_else(|| {
             io::Error::other(format!(
-                "unsupported db_compatibility {}",
-                lh.db_compatibility
+                "no reader for this database: db_compatibility {} db_release {:?} (`cubrid-fastmig plan` names the \
+                 ticket that opens it)",
+                lh.db_compatibility, lh.db_release
             ))
         })?;
         let vols = VolumeSet::open(first_volume, locate, Access::ReadOnly)?;

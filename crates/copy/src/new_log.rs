@@ -37,7 +37,8 @@ pub fn new_header(
         cdc_arv_num_to_keep: 0,
         // the volumes keep their db_creation, so the log keeps the source's (workspace#485)
         db_creation: src.db_creation,
-        vol_creation: src.vol_creation,
+        // a 10.2..11.3 source has none; 11.4 createdb writes db_creation there too (11.4.6 `_lgat`, workspace#522)
+        vol_creation: Some(src.vol_creation.unwrap_or(src.db_creation)),
         db_release: target.db_release().to_string(),
         db_compatibility: target.db_compatibility(),
         db_iopagesize: src.db_iopagesize,

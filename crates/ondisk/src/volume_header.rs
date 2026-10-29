@@ -5,6 +5,10 @@
 //! Source: engine `src/storage/disk_manager.c:74-111` (`DISK_VOLUME_HEADER`), `disk_vhdr_set_vol_fullname` /
 //! `disk_vhdr_set_next_vol_fullname` (:5328-5355); identical in release/11.4 @46212adcd and develop @5b1867174
 //! (R1 § 2.3, R5 § 2.2). Offsets checked on T1 volume 0 of fm114_clean (workspace#490).
+//! 10.2..11.3 write the 128 B layout: no `vol_creation`, every field from `chkpt_lsa` on and `var_fields` 8 B lower;
+//! the three var offsets are relative to `var_fields` and keep their values (disk_manager.c:74@release/11.3 @8acbed10e,
+//! R8 § 2.3; checked on a createdb volume 0 of 10.2.18, 11.0.16, 11.2.9 and 11.3.6, workspace#522).
+//! [`VolumeHeader::read_layout`] decodes either layout.
 
 use std::io;
 
@@ -12,6 +16,7 @@ use crate::ids::Hfid;
 use crate::le_field::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::lsa::Lsa;
 use crate::page::{IO_RESERVED_SIZE, IO_TRAILER_SIZE};
+use crate::source_version::HeaderLayout;
 
 /// Engine magic `CUBRID_MAGIC_DATABASE_VOLUME`.
 pub const MAGIC: &str = "CUBRID/Volume";
@@ -61,7 +66,8 @@ pub struct VolumeHeader {
     pub stab_first_page: i32,
     pub sys_lastpage: i32,
     pub db_creation: i64,
-    pub vol_creation: i64,
+    /// `None` in a 10.2..11.3 header (the field does not exist).
+    pub vol_creation: Option<i64>,
     pub chkpt_lsa: Lsa,
     /// The boot parameter heap; meaningful on volume 0 only.
     pub boot_hfid: Hfid,
@@ -83,7 +89,30 @@ fn cstr_at(buf: &[u8], off: usize) -> String {
 }
 
 impl VolumeHeader {
-    /// Decodes page 0 of a volume; refuses a page whose magic is not `CUBRID/Volume`.
+    /// Decodes page 0 of a volume written in `layout` (the source version's, [`crate::SourceVersion::header_layout`]).
+    pub fn read_layout(page: &[u8], layout: HeaderLayout) -> io::Result<Self> {
+        match layout {
+            HeaderLayout::Since11_4 => Self::read(page),
+            HeaderLayout::Before11_4 => {
+                // the 128 B layout is the 136 B one without vol_creation: open its 8 B again and decode the result
+                let gap = IO_RESERVED_SIZE + off::VOL_CREATION;
+                let Some((head, tail)) = page.split_at_checked(gap) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "volume page 0 too short",
+                    ));
+                };
+                let wide = [head, &[0u8; 8], tail].concat();
+                Ok(VolumeHeader {
+                    vol_creation: None,
+                    ..Self::read(&wide)?
+                })
+            }
+        }
+    }
+
+    /// Decodes page 0 of a volume in the 136 B layout (11.4, develop); refuses a page whose magic is not
+    /// `CUBRID/Volume`.
     pub fn read(page: &[u8]) -> io::Result<Self> {
         let d = db(page);
         if cstr_at(d, off::MAGIC) != MAGIC {
@@ -108,7 +137,7 @@ impl VolumeHeader {
             stab_first_page: i32_at(off::STAB_FIRST_PAGE),
             sys_lastpage: i32_at(off::SYS_LASTPAGE),
             db_creation: get_i64(d, off::DB_CREATION),
-            vol_creation: get_i64(d, off::VOL_CREATION),
+            vol_creation: Some(get_i64(d, off::VOL_CREATION)),
             chkpt_lsa: Lsa::read(d, off::CHKPT_LSA),
             boot_hfid: Hfid::read(d, off::BOOT_HFID),
             next_volid: get_i16(d, off::NEXT_VOLID),

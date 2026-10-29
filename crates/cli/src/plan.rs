@@ -12,11 +12,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use fastmig_copy::{open_locked_log, register_db};
-use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::databases_txt::{self, DatabaseEntry};
 use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
-use fastmig_plan::version_pair::parse_line;
+use fastmig_ondisk::{SourceVersion, VersionLine};
+use fastmig_plan::version_pair::{parse_line, source_line};
 use fastmig_plan::{Plan, PlanInputs};
 
 use crate::args::{CliError, Parsed, parse};
@@ -122,7 +122,9 @@ impl OpenSource {
         let entry = databases_txt::lookup(&o.source_dbtxt, &o.db)?;
         let lgat_path = entry.log_path.join(format!("{}_lgat", o.db));
         let lgat = open_locked_log(&lgat_path)?;
-        let log = read_log_header(&lgat, &lgat_path)?;
+        let (version, log) = read_log_header(&lgat, &lgat_path)?;
+        // refused before the volumes are opened: a version not yet opened has no volume reader (workspace#522)
+        source_line(version).map_err(io::Error::other)?;
         let vols = VolumeSet::open_entry(&entry, o.locate, Access::ReadOnly)?;
         Ok(OpenSource {
             entry,
@@ -134,18 +136,13 @@ impl OpenSource {
     }
 }
 
-/// Reads the header through the locked handle `f` (the header lies in the first 512 bytes of the log page).
-pub fn read_log_header(f: &fs::File, path: &Path) -> io::Result<LogHeader> {
+/// Reads the header, in the layout of the release that wrote it, through the locked handle `f` (the header lies in
+/// the first 512 bytes of the log page).
+pub fn read_log_header(f: &fs::File, path: &Path) -> io::Result<(SourceVersion, LogHeader)> {
     let mut page = vec![0u8; 512];
     std::os::unix::fs::FileExt::read_exact_at(f, &mut page, 0)?;
-    let h = LogHeader::read(&page);
-    if h.magic != log_header::MAGIC {
-        return Err(io::Error::other(format!(
-            "{}: not an active log",
-            path.display()
-        )));
-    }
-    Ok(h)
+    log_header::read_source(&page)
+        .map_err(|e| io::Error::other(format!("{}: {} at {}", path.display(), e.what, e.at)))
 }
 
 /// The plan, with the target-side refusal the plan crate cannot see (the target name already registered).

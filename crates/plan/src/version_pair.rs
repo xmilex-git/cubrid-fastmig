@@ -1,12 +1,12 @@
 //! The version pair of a migration: the source's release line and the target's, chosen once by the plan.
 //!
-//! Input: the source line (log header `db_compatibility`) and `--target-version`. Output: a [`VersionPair`] and, for
+//! Input: the source version (log header `db_compatibility`, `db_release`) and `--target-version`. Output: a [`VersionPair`] and, for
 //! a pair the tool cannot migrate, the refusal. Later stages read the pair and never re-derive the target line.
 //! Source: workspace#505 (target version `11.4|develop`, default develop, decided by the plan; relayed decision of
 //! the map supervisor 2026-10-29); ADR 0003 (direct pairs only, no downgrade); target 11.4 refused while the index
 //! builder writes the develop layout only (map supervisor 2026-10-29, workspace#472 Not yet specified).
 
-use fastmig_ondisk::VersionLine;
+use fastmig_ondisk::{SourceVersion, VersionLine};
 
 /// (source line, target line).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +38,22 @@ impl VersionPair {
     pub fn regenerates_catalog(self) -> bool {
         (self.source, self.target) == (VersionLine::V11_4, VersionLine::Develop)
     }
+}
+
+/// The codec line of a source version, or why the tool does not migrate that version yet. Each refusal names the
+/// ticket that opens the version (map supervisor 2026-10-30, workspace#522); the order is G7 workspace#514.
+pub fn source_line(v: SourceVersion) -> Result<VersionLine, String> {
+    v.line().ok_or_else(|| {
+        let opened_by = match v {
+            SourceVersion::V11_3 | SourceVersion::V11_2 => "workspace#529",
+            SourceVersion::V10_2 => "workspace#520",
+            SourceVersion::V11_0 => {
+                return format!("source {}: not in scope (workspace#514)", v.name());
+            }
+            SourceVersion::V11_4 | SourceVersion::Develop => unreachable!("a line of its own"),
+        };
+        format!("source {} not supported yet ({opened_by})", v.name())
+    })
 }
 
 /// The `--target-version` spelling of a line.

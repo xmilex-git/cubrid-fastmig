@@ -16,6 +16,10 @@ _Avoid_: 대상 DB, 신규 DB, 결과 DB
 출발 DB의 버전과 도착 DB의 버전의 조합. 페이지마다 무엇을 고칠지는 버전쌍마다 정해진다. 중간 버전을 거치지 않는 직행 쌍만 있다. 도착 버전은 plan이 `--target-version`(기본 develop)으로 한 번 정하고, 이후 단계는 그 값만 읽는다([workspace#505](https://github.com/xmilex-git/workspace/issues/505)).
 _Avoid_: 업그레이드 경로, 홉
 
+**출발 버전 (source version)**:
+출발 DB를 쓴 엔진 릴리스(10.2, 11.0(11.1 포함), 11.2, 11.3, 11.4, develop). 출발 로그 헤더의 `db_compatibility`로 정하고, 11.2와 11.3처럼 값이 같으면 `db_release`로 가른다. 출발 버전은 헤더 레이아웃(11.4 미만은 볼륨 헤더 128 B·로그 헤더 376 B)과 그 페이지를 읽을 코덱 줄을 정한다. 코덱 줄이 아직 없는 출발 버전은 plan이 그 버전을 여는 티켓 번호와 함께 거부한다([workspace#522](https://github.com/xmilex-git/workspace/issues/522)).
+_Avoid_: 소스 버전, DB 버전
+
 **기준 DB (baseline database)**:
 실제로 쓰이는 기능만 담아 버전마다 엔진으로 만들어 둔 소형 DB. 온디스크 구조의 적합성 검사와 마이그레이션 합격 판정에 쓴다.
 _Avoid_: 테스트 DB, 샘플 DB

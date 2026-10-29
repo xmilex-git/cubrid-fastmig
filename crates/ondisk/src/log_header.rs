@@ -5,17 +5,24 @@
 //! Source: engine `src/transaction/log_storage.hpp:113-169` (develop @5b1867174; release/11.4 @46212adcd the same
 //! except bytes 102..104, `dummy3`/`dummy4` in 11.4 and `sysmeta_version` in develop, CUBRID/cubrid#7773);
 //! R5 § 2.7. Size 384 B in both. Offsets checked on the T1 fm114_clean `_lgat` (append_lsa 9205|304, workspace#490).
+//! 10.2..11.3 write the 376 B layout: no `vol_creation`, every later field 8 B lower, `dummy` at +28 and
+//! `dummy3`/`dummy4` at +94 (R8 § 2.14, gdb `ptype /o` per install; checked on a createdb `_lgat` of 10.2.18,
+//! 11.0.16, 11.2.9 and 11.3.6, workspace#522). [`read_source`] decodes either layout.
 
 use crate::le_field::{
     get_f32, get_i16, get_i32, get_i64, get_u16, put_f32, put_i16, put_i32, put_i64, put_u16,
 };
 use crate::log_page::LOG_PAGE_HEADER_SIZE;
 use crate::lsa::Lsa;
+use crate::source_version::{HeaderLayout, SourceVersion};
+use crate::value::{DecodeError, DecodeResult};
 
 /// Engine magic `CUBRID_MAGIC_LOG_ACTIVE`.
 pub const MAGIC: &str = "CUBRID/LogActive";
 /// `sizeof (LOG_HEADER)`.
 pub const LOG_HEADER_SIZE: usize = 384;
+/// `sizeof (LOG_HEADER)` in 10.2..11.3.
+pub const LOG_HEADER_SIZE_BEFORE_11_4: usize = 376;
 /// Engine `REL_MAX_RELEASE_LENGTH`.
 const DB_RELEASE_LEN: usize = 15;
 /// Engine `MAXLOGNAME`.
@@ -78,7 +85,8 @@ pub struct LogHeader {
     pub magic: String,
     pub cdc_arv_num_to_keep: i32,
     pub db_creation: i64,
-    pub vol_creation: i64,
+    /// `None` in a 10.2..11.3 header (the field does not exist).
+    pub vol_creation: Option<i64>,
     pub db_release: String,
     pub db_compatibility: f32,
     pub db_iopagesize: i16,
@@ -134,8 +142,46 @@ fn put_cstr(buf: &mut [u8], s: &str) {
     buf[..n].copy_from_slice(&s.as_bytes()[..n]);
 }
 
+/// Decodes a source's header in the layout its release wrote, with the [`SourceVersion`] the header names. Refuses a
+/// page shorter than its layout or whose magic is not [`MAGIC`].
+pub fn read_source(page: &[u8]) -> DecodeResult<(SourceVersion, LogHeader)> {
+    let magic_at = LOG_PAGE_HEADER_SIZE + off::MAGIC;
+    if page.get(magic_at..magic_at + MAGIC.len()) != Some(MAGIC.as_bytes()) {
+        return Err(DecodeError {
+            at: magic_at,
+            what: "not an active log (magic)".into(),
+        });
+    }
+    let version = SourceVersion::detect(page)?;
+    let size = match version.header_layout() {
+        HeaderLayout::Since11_4 => LOG_HEADER_SIZE,
+        HeaderLayout::Before11_4 => LOG_HEADER_SIZE_BEFORE_11_4,
+    };
+    let Some(area) = page.get(..LOG_PAGE_HEADER_SIZE + size) else {
+        return Err(DecodeError {
+            at: page.len(),
+            what: format!("log header page shorter than {size} B"),
+        });
+    };
+    let header = match version.header_layout() {
+        HeaderLayout::Since11_4 => LogHeader::read(area),
+        HeaderLayout::Before11_4 => {
+            // the 376 B layout is the 384 B one without vol_creation: open its 8 B again and decode the result
+            let gap = LOG_PAGE_HEADER_SIZE + off::VOL_CREATION;
+            let mut wide = vec![0u8; LOG_PAGE_HEADER_SIZE + LOG_HEADER_SIZE];
+            wide[..gap].copy_from_slice(&area[..gap]);
+            wide[gap + 8..].copy_from_slice(&area[gap..]);
+            LogHeader {
+                vol_creation: None,
+                ..LogHeader::read(&wide)
+            }
+        }
+    };
+    Ok((version, header))
+}
+
 impl LogHeader {
-    /// Decodes the header from the active log's header page (whole log page).
+    /// Decodes the 384 B header (11.4, develop) from the active log's header page (whole log page).
     pub fn read(page: &[u8]) -> Self {
         let h = &page[LOG_PAGE_HEADER_SIZE..LOG_PAGE_HEADER_SIZE + LOG_HEADER_SIZE];
         let mut bkinfo = [0u8; BKINFO_LEN];
@@ -144,7 +190,7 @@ impl LogHeader {
             magic: cstr(&h[off::MAGIC..off::MAGIC + 25]),
             cdc_arv_num_to_keep: get_i32(h, off::CDC_ARV_NUM_TO_KEEP),
             db_creation: get_i64(h, off::DB_CREATION),
-            vol_creation: get_i64(h, off::VOL_CREATION),
+            vol_creation: Some(get_i64(h, off::VOL_CREATION)),
             db_release: cstr(&h[off::DB_RELEASE..off::DB_RELEASE + DB_RELEASE_LEN]),
             db_compatibility: get_f32(h, off::DB_COMPATIBILITY),
             db_iopagesize: get_i16(h, off::DB_IOPAGESIZE),
@@ -199,7 +245,10 @@ impl LogHeader {
         put_cstr(&mut h[off::MAGIC..off::MAGIC + 25], &self.magic);
         put_i32(h, off::CDC_ARV_NUM_TO_KEEP, self.cdc_arv_num_to_keep);
         put_i64(h, off::DB_CREATION, self.db_creation);
-        put_i64(h, off::VOL_CREATION, self.vol_creation);
+        let vol_creation = self
+            .vol_creation
+            .expect("the tool writes the 384 B layout only");
+        put_i64(h, off::VOL_CREATION, vol_creation);
         put_cstr(
             &mut h[off::DB_RELEASE..off::DB_RELEASE + DB_RELEASE_LEN],
             &self.db_release,

@@ -189,13 +189,15 @@ pub fn lob_base_dir(source: &DatabaseEntry) -> Result<Option<PathBuf>, String> {
 }
 
 pub fn build(i: &PlanInputs) -> io::Result<Plan> {
-    let line = fastmig_ondisk::VersionLine::from_db_compatibility(i.log.db_compatibility)
-        .ok_or_else(|| {
-            invalid(format!(
-                "unsupported source db_compatibility {}",
-                i.log.db_compatibility
-            ))
-        })?;
+    let version =
+        fastmig_ondisk::SourceVersion::identify(i.log.db_compatibility, &i.log.db_release)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "unknown source: db_compatibility {} db_release {:?}",
+                    i.log.db_compatibility, i.log.db_release
+                ))
+            })?;
+    let line = crate::version_pair::source_line(version).map_err(invalid)?;
     let pair = VersionPair {
         source: line,
         target: i.target_line,

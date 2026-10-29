@@ -43,7 +43,7 @@ fn refuse(msg: String) -> CliError {
 fn current(f: &SourceFingerprint) -> io::Result<SourceFingerprint> {
     // the read lock refuses a source whose server is up
     let lgat = open_locked_log(&f.log)?;
-    let lh = read_log_header(&lgat, &f.log)?;
+    let (_, lh) = read_log_header(&lgat, &f.log)?;
     let volumes = f
         .volumes
         .iter()
