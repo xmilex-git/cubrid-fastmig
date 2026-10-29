@@ -8,6 +8,7 @@ pub mod build_error;
 pub mod build_many;
 pub mod heap_scan;
 pub mod index_shape;
+pub mod key_domain_order;
 pub mod key_order;
 pub mod kway_merge;
 pub mod leaf_builder;
