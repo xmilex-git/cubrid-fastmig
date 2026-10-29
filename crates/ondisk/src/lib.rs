@@ -5,7 +5,9 @@ pub mod le_field;
 pub mod lsa;
 pub mod page;
 pub mod spage;
+pub mod version_line;
 
 pub use ids::{Btid, Ehid, FileAndPage, Hfid, Oid, Vfid, Vpid, Vsid};
 pub use lsa::Lsa;
 pub use page::{IO_PAGESIZE_DEFAULT, IO_RESERVED_SIZE, IO_TRAILER_SIZE, PageType, db_pagesize};
+pub use version_line::VersionLine;
