@@ -42,9 +42,10 @@ pub const INDEX_KEYS: DefaultRate = DefaultRate {
     max_workers: 16,
 };
 
-/// Heap record re-encoding (P1b workspace#491). Not measured; decode+encode of a ~100 B record.
-pub const REENCODE_RECORDS: DefaultRate = DefaultRate {
-    per_worker: 1.0e6,
+/// Heap pages walked by the page treatment (patch or re-encode): T1 11.4 -> develop, 4 workers, 544 / 885 pages in
+/// 0.26 s (clean / dirty, phase time with the catalog reads and frees, workspace#508). Not yet measured on a large DB.
+pub const HEAP_PAGES: DefaultRate = DefaultRate {
+    per_worker: 1.0e3,
     max_workers: 64,
 };
 

@@ -13,3 +13,4 @@
 - 새 볼륨·확장 페이지의 내용은 엔진 `fileio_initialize_res`와 같은 미기록 페이지(0, NULL LSA, pageid/volid −1)이고, 볼륨 헤더·STAB 페이지의 LSA는 NULL이다(G2).
 - 엔진 디스크 캐시(볼륨별 여유 섹터, hint)는 도구 프로세스 안에서만 들고 볼륨 헤더의 `hint_allocsect`는 쓰지 않는다. 엔진도 hint 변경을 dirty로 남기지 않는다.
 - 파티션 여유 공간 사전 검사(`fileio_get_number_of_partition_free_sectors`)는 하지 않는다. 디스크가 차면 쓰기 오류로 실패하고 미완료 표지가 남는다.
+- `migrate`은 새 볼륨을 도착 디렉터리에 도착 DB 이름으로 만들고, 크기 상한은 `--db-volume-size`(기본 512 MiB, 도착 서버의 `db_volume_size`와 맞춘다)로 받는다. 추가된 볼륨은 미완료 표지(단계가 실패해도)·끝의 fsync·최종 볼륨 목록으로 쓰는 `_vinf`에 들어간다. 새 볼륨 헤더의 `chkpt_lsa`·`db_creation`은 볼륨 0 값을 복사하므로 복사된 볼륨들과 같다([workspace#508](https://github.com/xmilex-git/workspace/issues/508)).

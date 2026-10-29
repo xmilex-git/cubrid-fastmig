@@ -36,7 +36,7 @@ impl Limits {
     }
 }
 
-fn parse_size(v: &str) -> Option<u64> {
+pub fn parse_size(v: &str) -> Option<u64> {
     let (num, shift) = match v.chars().last()?.to_ascii_uppercase() {
         'K' => (&v[..v.len() - 1], 10),
         'M' => (&v[..v.len() - 1], 20),

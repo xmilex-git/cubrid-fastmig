@@ -37,6 +37,9 @@ pub struct HeapJob<'a> {
     pub re_encode: Option<&'a dyn ReEncode>,
     /// The root class heap (one bestspace shard).
     pub root: bool,
+    /// Called with 1 for every page of a walked heap (header and chain pages, the heap file's user pages): the
+    /// page-treatment progress, whose total the plan sums from the same pages (workspace#508).
+    pub pages_walked: Option<&'a dyn Fn(u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -99,7 +102,13 @@ pub fn rewrite_heap(
     let mut rewritten = 0;
     // the header page is read first: NEWHOME first-fit order is read order
     st.load(hv)?;
+    let page_walked = || {
+        if let Some(f) = job.pages_walked {
+            f(1)
+        }
+    };
     if walk {
+        page_walked();
         let stop = src.last_vpid;
         let limit: u64 = vs
             .volumes()
@@ -110,6 +119,7 @@ pub fn rewrite_heap(
         let mut walked = 0u64;
         while !v.is_null() {
             walked += 1;
+            page_walked();
             if walked > limit {
                 return Err(invalid(format!(
                     "heap {hv:?}: chain longer than the volume set"

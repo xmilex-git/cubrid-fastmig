@@ -3,7 +3,7 @@
 //! (patch). Heaps run in parallel, one heap per worker at a time.
 //!
 //! Input: the target's [`SpaceManager`], the [`SourceCatalog`], the source's [`VacuumHorizon`], the worker limit and
-//! the meter of the page-treatment phase (unit: records of re-encoded classes). Output: one [`HeapReport`] per user
+//! the meter of the page-treatment phase (unit: pages of the walked heaps, workspace#508). Output: one [`HeapReport`] per user
 //! heap, in class order.
 //! Source: workspace#482 decision 10.3 (after the old files are freed, before the index builds); workspace#499
 //! hand-over (`rewrite_heap` per heap with `ClassReEncoder` for a re-encoded class; heaps are independent because the
@@ -91,7 +91,7 @@ fn treat_one(
             })
         })
         .map_err(|e| invalid(format!("{}: {e}", plan.name)))?;
-    let report = rewrite_heap(
+    rewrite_heap(
         space,
         horizon,
         &HeapJob {
@@ -99,12 +99,8 @@ fn treat_one(
             source_line: VersionLine::V11_4,
             re_encode: re_encoder.as_ref().map(|r| r as _),
             root: false,
+            pages_walked: Some(&|n| meter.add(n)),
         },
     )
-    .map_err(|e| invalid(format!("{} heap: {e}", plan.name)))?;
-    if re_encoder.is_some() {
-        let k = &report.counts;
-        meter.add(k.same_slot_shrunk + k.same_slot_same + k.same_slot_grown + k.relocated + k.big);
-    }
-    Ok(report)
+    .map_err(|e| invalid(format!("{} heap: {e}", plan.name)))
 }

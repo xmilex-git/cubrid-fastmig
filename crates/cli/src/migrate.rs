@@ -8,8 +8,8 @@
 //! (the phases in `PHASES`) goes to stderr. The source is only read; its active log is read-locked for the whole run.
 //! Order: the plan refuses before anything is written; the new log comes last of the writes; verify runs on the
 //! durable target; only a target with 0 migration defects is registered and loses its incomplete marker.
-//! Scope today: the plan's version pair is a same-version pair (pages copied as is). Page treatment, index rebuild
-//! and catalog regeneration are wired by workspace#503 and #504 into their phases here.
+//! Between the copy and the new log: page treatment, index rebuild and catalog regeneration (workspace#503, #504);
+//! a target out of space grows like the engine, and added volumes join `_vinf`, the marker and the fsync pass (#508).
 //! Source: decisions G1 workspace#481 (command surface, plan, registration after verify, marker), G4 workspace#485
 //! (new log), G6 workspace#488 (LOB and Java assets), workspace#495 (verify), workspace#505 (this wiring).
 
@@ -32,6 +32,8 @@ use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::databases_txt::DatabaseEntry;
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::log_header::LogHeader;
+use fastmig_ondisk::sector_reserve::{VolumeGrowth, sectors_of_bytes};
+use fastmig_ondisk::volume_addition::VolumePlace;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
@@ -61,11 +63,13 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
   --lob-dir <dir>                target lob-base-path (default: <dest>/lob)
   --mem <size>                   memory limit for the whole run, e.g. 16G (default: physical memory / 4)
   --spill-dir <dir>              where stages over the memory limit spill (default: <dest>/fastmig/spill)
+  --db-volume-size <size>        the target server's db_volume_size: size cap of a volume the run adds when the
+                                 target runs out of space, e.g. 512M (default: 512M, the engine default)
   --no-clone                     byte-copy even where the filesystem could clone (measures the byte copy where clone would be chosen)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
 
-const FLAGS: &[&str] = &["--log-dir", "--workers", "--lob-dir"];
+const FLAGS: &[&str] = &["--log-dir", "--workers", "--lob-dir", "--db-volume-size"];
 /// The run's phases, one per `Report::lap` in `migrate`, in order (GLOSSARY "phase").
 const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("precheck"),
@@ -74,8 +78,8 @@ const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("volume-paths"),
     PhaseSpec::work(
         "page-treatment",
-        Unit::Count("records"),
-        default_rates::REENCODE_RECORDS,
+        Unit::Count("pages"),
+        default_rates::HEAP_PAGES,
     ),
     PhaseSpec::work(
         "index-build",
@@ -90,7 +94,7 @@ const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("register"),
 ];
 const VOLUME_COPY: usize = 2;
-/// Meter of the heap patch and re-encoding (workspace#503, #504): records done.
+/// Meter of the heap patch and re-encoding (workspace#503, #504): heap pages walked, total from the plan (#508).
 const PAGE_TREATMENT: usize = 4;
 /// Meter of the index build (workspace#503): keys done.
 const INDEX_BUILD: usize = 5;
@@ -104,6 +108,8 @@ struct Options {
     worker_limit: usize,
     lob_dir: PathBuf,
     limits: Limits,
+    /// The target server's `db_volume_size` in bytes: size cap of an added volume (ADR 0013).
+    db_volume_size: u64,
 }
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
@@ -134,6 +140,11 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             None => plan.target_dir.join("lob"),
         },
         limits: Limits::from(&p, &plan.target_dir)?,
+        db_volume_size: match p.value("--db-volume-size") {
+            Some(v) => limits::parse_size(v)
+                .ok_or_else(|| CliError::Usage(format!("bad --db-volume-size {v}")))?,
+            None => 512 << 20,
+        },
         plan,
     };
     // the copy engine streams every volume through one fixed buffer per worker
@@ -219,6 +230,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     }
     let bytes = plan.volumes.iter().map(|v| v.bytes).sum();
     rep.progress.set_total(VOLUME_COPY, bytes);
+    rep.progress.set_total(PAGE_TREATMENT, plan.treated_pages);
     // until the copy shows what was cloned, assume every byte is written and synced
     rep.progress.set_total(DURABLE_SYNC, bytes);
     let marker = IncompleteMarker::prepare(&po.target_dir)?;
@@ -250,7 +262,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         .sum();
     rep.progress.set_total(DURABLE_SYNC, copied);
     rep.lap("volumes");
-    let targets: Vec<PathBuf> = jobs.iter().map(|j| j.target.clone()).collect();
+    let mut targets: Vec<PathBuf> = jobs.iter().map(|j| j.target.clone()).collect();
     volume_paths::rewrite(&targets, src.vols.io_pagesize())?;
     rep.lap("volume_paths");
 
@@ -259,48 +271,71 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     let mut measured: BTreeSet<Oid> = BTreeSet::new();
     let vols = VolumeSet::open(&targets[0], Locate::Recorded, Access::ReadWrite)?;
     let trk = BootDbParm::read(&vols)?.1.trk_vfid;
-    let space = SpaceManager::new(&vols, pair.target, trk);
-    marker.create_dir_all(&o.limits.spill_dir)?;
-    let catalog = if pair.regenerates_catalog() {
-        let prepared = catalog_regeneration::prepare(
-            &space,
-            &src.log,
-            src_lob_base.as_deref(),
-            o.worker_limit,
-            rep.progress.meter(PAGE_TREATMENT),
-        )?;
-        measured.extend(prepared.measured());
-        rep.lap("page_treatment");
-        let c = catalog_regeneration::finish(
-            &space,
-            prepared,
-            &o.limits,
-            o.worker_limit,
-            rep.progress.meter(INDEX_BUILD),
-        )?;
-        rep.lap("index_build");
-        c
-    } else {
-        // the same-version path: patch, deferred indexes out, every index rebuilt (workspace#501, #503, #504)
-        let prepared = catalog_regeneration::same_version_prepare(
-            &space,
-            &src.log,
-            rep.progress.meter(PAGE_TREATMENT),
-        )?;
-        measured.extend(prepared.measured());
-        rep.lap("page_treatment");
-        let c = catalog_regeneration::same_version_finish(
-            &space,
-            prepared,
-            &o.limits,
-            o.worker_limit,
-            rep.progress.meter(INDEX_BUILD),
-        )?;
-        rep.lap("index_build");
-        c
+    // a target out of space grows like the engine would: volumes added next to volume 0 (ADR 0013, workspace#508)
+    let growth = VolumeGrowth {
+        nsect_vol_max: sectors_of_bytes(vols.io_pagesize(), o.db_volume_size),
+        place: Some(VolumePlace {
+            dir: po.target_dir.clone(),
+            db_name: po.target_name.clone(),
+            vinf: None,
+        }),
     };
+    let space = SpaceManager::new(&vols, pair.target, trk).with_growth(growth);
+    marker.create_dir_all(&o.limits.spill_dir)?;
+    let mut regenerate = || {
+        if pair.regenerates_catalog() {
+            let prepared = catalog_regeneration::prepare(
+                &space,
+                &src.log,
+                src_lob_base.as_deref(),
+                o.worker_limit,
+                rep.progress.meter(PAGE_TREATMENT),
+            )?;
+            measured.extend(prepared.measured());
+            rep.lap("page_treatment");
+            let c = catalog_regeneration::finish(
+                &space,
+                prepared,
+                &o.limits,
+                o.worker_limit,
+                rep.progress.meter(INDEX_BUILD),
+            )?;
+            rep.lap("index_build");
+            Ok(c)
+        } else {
+            // the same-version path: patch, deferred indexes out, every index rebuilt (workspace#501, #503, #504)
+            let prepared = catalog_regeneration::same_version_prepare(
+                &space,
+                &src.log,
+                rep.progress.meter(PAGE_TREATMENT),
+            )?;
+            measured.extend(prepared.measured());
+            rep.lap("page_treatment");
+            let c = catalog_regeneration::same_version_finish(
+                &space,
+                prepared,
+                &o.limits,
+                o.worker_limit,
+                rep.progress.meter(INDEX_BUILD),
+            )?;
+            rep.lap("index_build");
+            Ok::<_, io::Error>(c)
+        }
+    };
+    let catalog = regenerate();
+    // added volumes join the marker even when the phase failed, so a rerun removes them
+    let added: Vec<PathBuf> = vols.volumes()[targets.len()..]
+        .iter()
+        .map(|v| v.path.clone())
+        .collect();
+    for p in &added {
+        marker.record(p)?;
+    }
+    let catalog = catalog?;
     drop(space);
     drop(vols);
+    let added_volumes = added.len();
+    targets.extend(added);
     rep.lap("catalog_regeneration");
 
     let java = out_of_volume_asset::copy_dir_tree(
@@ -410,6 +445,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         &lob,
         &summary,
         &catalog.json(),
+        added_volumes,
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;
     if !passed {
@@ -477,6 +513,7 @@ fn report_json(
     lob: &AssetOutcome,
     verify_summary: &str,
     catalog: &str,
+    added_volumes: usize,
 ) -> String {
     let steps: Vec<String> = rep
         .steps
@@ -502,7 +539,7 @@ fn report_json(
         )
     };
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"catalog\": {catalog},\n  \"heap_peak_bytes\": {},\n  \"progress\": {}\n}}",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"added_volumes\": {added_volumes},\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"catalog\": {catalog},\n  \"heap_peak_bytes\": {},\n  \"progress\": {}\n}}",
         line_name(plan.version_pair.source),
         line_name(plan.version_pair.target),
         o.worker_limit,

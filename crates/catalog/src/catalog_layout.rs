@@ -418,6 +418,7 @@ pub fn plan_catalog(
                 unmapped: Unmapped::Keep,
             }),
             root: true,
+            pages_walked: None,
         },
     )
     .map_err(|e| invalid(format!("root heap: {e}")))?;
@@ -524,6 +525,7 @@ pub fn plan_catalog(
                     unmapped: Unmapped::Refuse,
                 }),
                 root: false,
+                pages_walked: None,
             },
         )
         .map_err(|e| invalid(format!("{dev} heap: {e}")))?;

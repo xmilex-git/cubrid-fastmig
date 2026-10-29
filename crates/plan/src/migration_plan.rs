@@ -25,10 +25,11 @@ use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::class_object::{ClassType, class_properties};
 use fastmig_ondisk::databases_txt::DatabaseEntry;
 use fastmig_ondisk::file_header::{FileHeader, FileType};
+use fastmig_ondisk::heap_rewrite::VacuumHorizon;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::value::{Collation, DbType, Value};
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Oid, VersionLine, file_tracker};
+use fastmig_ondisk::{Hfid, Oid, VersionLine, file_tracker};
 
 use crate::copy_method::{self, CopyMethod};
 use crate::free_space;
@@ -101,6 +102,10 @@ pub struct Plan {
     pub version_pair: VersionPair,
     pub volumes: Vec<VolumePlan>,
     pub classes: Vec<ClassTreatment>,
+    /// Pages the page-treatment phase walks (its progress total, workspace#508): every page of a heap whose chain
+    /// is walked — a re-encoded user class always, any other treated heap only when the source had vacuum work
+    /// pending ([`fastmig_ondisk::heap_rewrite::rewrite_heap`]).
+    pub treated_pages: u64,
     /// `class.index` per deferred index (partitions' copies left out).
     pub deferred_indexes: Vec<String>,
     /// `<dest>/fastmig/deferred-indexes.sql`.
@@ -491,6 +496,27 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         ));
     }
 
+    // page-treatment progress total: the heaps whose chains rewrite_heap walks (11.4 path: user heaps only, the
+    // system ones belong to the catalog regeneration; same-version path: every class heap and the root heap)
+    let pending = VacuumHorizon::read(i.vols, i.log, boot.vacuum_data_vfid)?.pending;
+    let pages_of = |h: Hfid| heap_pages.get(&(h.vfid.volid, h.vfid.fileid)).copied();
+    let mut treated_pages: u64 = classes
+        .iter()
+        .zip(&treatments)
+        .filter(|(_, t)| matches!(t.heap, HeapTreatment::InPlace(_)))
+        .filter(|(_, t)| {
+            if regenerates {
+                !t.system && (t.re_encoded || pending)
+            } else {
+                pending
+            }
+        })
+        .filter_map(|(c, _)| pages_of(c.class.heap))
+        .sum();
+    if !regenerates && pending {
+        treated_pages += pages_of(boot.rootclass_hfid).unwrap_or(0);
+    }
+
     // target space: a copied volume is written whole; a cloned one only where pages change (G1)
     let io_page = i.vols.io_pagesize() as u64;
     let transformed_pages: u64 = classes
@@ -523,6 +549,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         version_pair: pair,
         volumes,
         classes: treatments,
+        treated_pages,
         deferred_indexes: deferred_names,
         deferred_indexes_sql,
         recompile_plcsql_sql: recompile_plcsql_sql(&routines),

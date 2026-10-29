@@ -113,10 +113,10 @@ pub fn patch_heaps(
                 source_line: LINE,
                 re_encode: None,
                 root,
+                pages_walked: Some(&|n| meter.add(n)),
             },
         )
         .map_err(|e| invalid(format!("heap {hfid:?}: {e}")))?;
-        meter.add(r.pages_rewritten);
         out.push(r);
     }
     Ok(out)
