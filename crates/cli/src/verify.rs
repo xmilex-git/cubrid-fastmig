@@ -172,7 +172,14 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         memory: &mb,
         spill: &spill,
     };
-    let tdb = open(&target, role)?;
+    let mut tdb = open(&target, role)?;
+    if let Some(s) = &source {
+        tdb.source_horizon = Some(fastmig_verify::database::vacuum_horizon(
+            &s.first_volume,
+            s.locate,
+            &s.log,
+        )?);
+    }
     let tres = verify_database(&tdb, &measured, &limits)?;
     drop(tdb);
     let sres = match &source {

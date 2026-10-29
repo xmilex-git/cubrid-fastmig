@@ -20,7 +20,7 @@ use fastmig_index::{KeyOrder, MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{ClassObject, Constraint};
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::page::{self, PageType};
-use fastmig_ondisk::record::heap_chain::{FLAG_VACUUM_STATUS_MASK, HeapChain};
+use fastmig_ondisk::record::heap_chain::{FLAG_VACUUM_ONCE, FLAG_VACUUM_STATUS_MASK, HeapChain};
 use fastmig_ondisk::record::{
     ExtractedKey, HeapHdrStats, RecordHeader, RecordLayout, decode_record, extract_key,
     resolve_record,
@@ -241,19 +241,36 @@ fn scan_page(
                     .actual(OidText(chain.class_oid)),
             );
         }
-        // the target starts with no vacuum residue (G3 Q5 (v))
-        if db.role == Role::Target
-            && (chain.max_mvccid != 0 || chain.flags & FLAG_VACUUM_STATUS_MASK != 0)
-        {
-            o.defects.push(
-                d(t, "page-vacuum-residue", vpid)
-                    .object(VpidText(vpid))
-                    .expected("max_mvccid 0, vacuum origin none")
-                    .actual(format!(
-                        "max_mvccid {} flags {:#x}",
-                        chain.max_mvccid, chain.flags
-                    )),
-            );
+        // the target starts with no vacuum residue (G3 Q5 (v)): patch targets were reset, the other pages kept
+        // their chain and must look vacuumed with every MVCCID before the new log's (workspace#499, #501)
+        if db.role == Role::Target {
+            let status = chain.flags & FLAG_VACUUM_STATUS_MASK;
+            let residue = status == FLAG_VACUUM_ONCE
+                || chain.max_mvccid >= db.mvcc_next_id
+                || db
+                    .source_horizon
+                    .is_some_and(|h| h.pending && h.page_needs_patch(&chain));
+            if residue {
+                o.defects.push(
+                    d(t, "page-vacuum-residue", vpid)
+                        .object(VpidText(vpid))
+                        .expected(format!(
+                            "vacuum status not ONCE, max_mvccid < {}{}",
+                            db.mvcc_next_id,
+                            db.source_horizon.filter(|h| h.pending).map_or(
+                                String::new(),
+                                |h| format!(
+                                    ", UNKNOWN only below the source's oldest unvacuumed {}",
+                                    h.oldest_unvacuumed
+                                )
+                            )
+                        ))
+                        .actual(format!(
+                            "max_mvccid {} flags {:#x}",
+                            chain.max_mvccid, chain.flags
+                        )),
+                );
+            }
         }
         o.links.push(PageLink {
             vpid,

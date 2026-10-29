@@ -28,6 +28,12 @@ target defects with the same identity are the same defect, because placement pre
 
 ᵀ target rules only (`--role target`, the default for `<target-db>`). ᴹ only for classes in `--measured-classes`.
 
+`page-vacuum-residue` follows the patch-target page selection (workspace#499, #501): a data page is a defect when
+its vacuum status is ONCE, when its `max_mvccid` is not below the target log's `mvcc_next_id`, or — with
+`--source` — when the source's vacuum horizon still makes it a patch target (UNKNOWN with `max_mvccid` ≥ the
+source's oldest unvacuumed MVCCID while vacuum work was pending). Pages the migration did not need to patch keep
+their chain record and pass.
+
 ## What is not compared
 
 - Deferred indexes (function and filter): structure and the OIDs of their entries only; listed under
