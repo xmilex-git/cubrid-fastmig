@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use fastmig_copy::asset_copy::{self, AssetOutcome};
-use fastmig_copy::volume_copy::CHUNK_BYTES;
+use fastmig_copy::volume_copy::IO_BUF_BYTES;
 use fastmig_copy::{
     IncompleteMarker, NoPatch, VolumeJob, VolumeOutcome, copy_volumes, durable, lob_manifest,
     new_log, new_log_start, open_locked_log, open_source, register_db, volinfo, volume_paths,
@@ -135,11 +135,11 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         dest,
     };
     // the copy engine streams every volume through one fixed buffer per worker
-    if (o.workers as u64).saturating_mul(CHUNK_BYTES) > o.limits.mem_bytes {
+    if (o.workers as u64).saturating_mul(IO_BUF_BYTES as u64) > o.limits.mem_bytes {
         return Err(CliError::Usage(format!(
-            "--workers {} needs {} MiB of copy buffers, over --mem",
+            "--workers {} needs {} KiB of copy buffers, over --mem",
             o.workers,
-            (o.workers as u64 * CHUNK_BYTES) >> 20
+            (o.workers * IO_BUF_BYTES) >> 10
         )));
     }
     migrate(&o).map_err(CliError::Failed)

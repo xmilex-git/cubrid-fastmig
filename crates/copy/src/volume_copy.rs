@@ -17,8 +17,12 @@ use crate::clone_file::try_clone;
 use crate::incomplete_marker::IncompleteMarker;
 use crate::worker_pool;
 
-/// Bytes one copy task moves; also each worker's buffer size, the copy engine's only per-worker memory.
-pub const CHUNK_BYTES: u64 = 8 << 20;
+/// Bytes one copy task moves (the unit the workers slide over).
+const CHUNK_BYTES: u64 = 8 << 20;
+/// Each worker's I/O buffer, the copy engine's only per-worker memory. Small enough to stay in the CPU cache
+/// between the read and the write: copying 1 GiB took 0.35 s with 256 KiB blocks and 0.99 s with 8 MiB blocks on
+/// the dev host (dd, page cache warm, workspace#494). A multiple of every IO page size (4..64 KiB).
+pub const IO_BUF_BYTES: usize = 256 << 10;
 
 pub struct VolumeJob {
     pub volid: i16,
@@ -92,7 +96,7 @@ pub fn copy_volumes(
         }
     }
     let bufs: Vec<Mutex<Vec<u8>>> = (0..workers.clamp(1, chunks.len().max(1)))
-        .map(|_| Mutex::new(vec![0u8; CHUNK_BYTES as usize]))
+        .map(|_| Mutex::new(vec![0u8; IO_BUF_BYTES]))
         .collect();
     worker_pool::run(chunks.len(), workers, |c| {
         let (i, start, end) = chunks[c];
