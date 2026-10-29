@@ -68,18 +68,26 @@ Right after the incomplete marker, before the first byte of the target, `migrate
 
 - every volume the plan byte-copies is created and allocated in full (`volume_copy::preallocate_targets`); the
   copy then writes into it and never clones it;
+- the new log `<target>_lgat` is created at its full size and allocated (`new_log::allocate`); its header is
+  written last, so until then page 0 has no log magic and the target does not boot (copydb leaves the other pages
+  as holes; here they are zero);
 - one reservation file, `<dest>/fastmig/reserve-target`, holds an upper bound of everything else the run may
   write, until the run ends: the pages a cloned volume unshares (`Plan::rewritten_pages_bound` — every heap page
   when the catalog is regenerated, else the treated pages and the root heap), the new B-trees (a leaf record takes
   at most twice a pair's spill record, leaves at most 90 % full, non-leaf pages fewer than leaves:
-  `5 · T_i / page + 4` pages per index), 64 pages of catalog slack, the referenced LOB and Java files and the new
-  log. The file is removed only when the run ends, so while the run writes what it bounds the space is held twice
-  (accepted, 1번 세션 decision).
+  `5 · T_i / page + 4` pages per index), 64 pages of catalog slack, the referenced LOB and Java files. The file is
+  removed only when the run ends, so while the run writes what it bounds the space is held twice (accepted,
+  1번 세션 decision).
 
 The free-space check (with the temp limit when the spill directory is on the target filesystem) therefore needs
-the byte-copied volumes plus twice the reservation (`TargetSpace::needed`); `plan` prints it. A process that
-fills the filesystem while the run writes can still take the free space those writes need: only the byte-copied
-volumes and the spill arena are written inside space the run already holds.
+the byte-copied volumes, the new log and twice the reservation (`TargetSpace::needed`); `plan` prints it, refuses
+when the target filesystem has less, and writes it to `plan.json` as `target_space`.
+
+**Unreserved writes.** What the reservation bounds is written outside the space the run took: a process that fills
+the filesystem while the run writes can still take that space, and the run then stops on a full disk. `plan`
+prints the bound as `unreserved writes ≤ N MiB` (the reservation's size) so the run can be started with that much
+left to other writers. Only the byte-copied volumes, the new log and the spill arena are written inside space the
+run already holds.
 
 ## The spill arena
 

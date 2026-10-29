@@ -1,11 +1,13 @@
 //! The plan as `plan.json` and as the table `plan` prints.
 //!
-//! Input: a [`Plan`]. Output: JSON text (`plan --json`, `<dest>/fastmig/plan.json`) or a human-readable table.
+//! Input: a [`Plan`] and its [`TargetSpace`]. Output: JSON text (`plan --json`, `<dest>/fastmig/plan.json`) or a human-readable table.
 //! Source: decision G1 workspace#481 (plan prints a table, `--json` too; migrate leaves plan.json).
 
 use fastmig_plan::version_pair::line_name;
 use fastmig_plan::{HeapTreatment, PageTreatment, Plan};
 use fastmig_verify::report::json_str;
+
+use crate::target_space::TargetSpace;
 
 fn heap_name(h: HeapTreatment) -> &'static str {
     match h {
@@ -23,7 +25,7 @@ fn strings<'a>(v: impl IntoIterator<Item = &'a str>) -> String {
 }
 
 /// `resources`: the resource table as JSON (`resource_estimate`), or `null` when it was not estimated.
-pub fn json(p: &Plan, resources: &str) -> String {
+pub fn json(p: &Plan, t: &TargetSpace, resources: &str) -> String {
     let vols: Vec<String> = p
         .volumes
         .iter()
@@ -66,7 +68,7 @@ pub fn json(p: &Plan, resources: &str) -> String {
         })
         .collect();
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"copy_bytes\": {}, \"log_bytes\": {}, \"reserved_bytes\": {}, \"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
         p.source_version.name(),
         line_name(p.version_pair.target),
         strings(p.refusals.iter().map(String::as_str)),
@@ -86,14 +88,17 @@ pub fn json(p: &Plan, resources: &str) -> String {
         p.java.bytes,
         p.java_static.files,
         p.java_static.bytes,
-        p.needed_bytes,
+        t.copy_bytes,
+        t.log_bytes,
+        t.extra_bytes,
+        t.needed(),
         p.available_bytes,
         p.treated_pages,
         classes.join(",\n    ")
     )
 }
 
-pub fn table(p: &Plan) -> String {
+pub fn table(p: &Plan, t: &TargetSpace) -> String {
     let mut s = format!(
         "version pair: {} -> {}\n",
         p.source_version.name(),
@@ -136,9 +141,18 @@ pub fn table(p: &Plan) -> String {
         p.lob.orphan_bytes(),
         p.lob.outside_base.len()
     ));
+    let mib = |b: u64| b.div_ceil(1 << 20);
     s.push_str(&format!(
-        "target space: needs about {} B, {} B available\n",
-        p.needed_bytes, p.available_bytes
+        "target space taken at the start: {} MiB byte-copied volumes + {} MiB new log + {} MiB reserved (upper bound of the rest, held until the end: needs {} MiB free); {} MiB free\n",
+        mib(t.copy_bytes),
+        mib(t.log_bytes),
+        mib(t.extra_bytes),
+        mib(t.needed()),
+        mib(p.available_bytes)
+    ));
+    s.push_str(&format!(
+        "unreserved writes ≤ {} MiB: cloned pages unshared, new B-trees, LOB and Java files are written outside the space taken at the start; keep that much free of other writers during the run\n",
+        mib(t.extra_bytes)
     ));
     s.push_str(&format!("warnings ({}):\n", p.warnings.len()));
     p.warnings

@@ -123,8 +123,7 @@ pub struct Plan {
     /// besides the new B-trees — every heap page when the catalog is regenerated (11.4 → develop), else the
     /// treated pages and the root heap (class objects get the rebuilt BTIDs).
     pub rewritten_pages_bound: u64,
-    /// Bytes the target filesystem needs and has (pre-check).
-    pub needed_bytes: u64,
+    /// Free bytes of the target filesystem (the need is `cubrid-fastmig` `target_space`, with the resource estimate).
     pub available_bytes: u64,
     /// Non-empty means migrate does not start.
     pub refusals: Vec<String>,
@@ -264,12 +263,11 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         });
     }
 
-    // files: TDE refuses (G1; not supported, user decision 2026-10-30); B-tree pages are rebuilt, so they count
-    // toward the target's space. The file header flag covers every encrypted permanent page: the engine sets a
-    // page's TDE pflag only from it (file_manager.c file_alloc, file_apply_tde_algorithm), so no page scan is needed.
+    // files: TDE refuses (G1; not supported, user decision 2026-10-30); heap page counts bound the rewritten pages.
+    // The file header flag covers every encrypted permanent page: the engine sets a page's TDE pflag only from it
+    // (file_manager.c file_alloc, file_apply_tde_algorithm), so no page scan is needed.
     let (_, boot) = BootDbParm::read(i.vols)?;
     let (items, _) = file_tracker::read(i.vols, boot.trk_vfid)?;
-    let mut btree_pages = 0u64;
     let mut heap_pages = std::collections::HashMap::new();
     for it in &items {
         let h = FileHeader::read(&i.vols.read_page(it.vfid.header_vpid())?);
@@ -279,14 +277,11 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                 it.vfid.volid, it.vfid.fileid
             ));
         }
-        match h.file_type() {
-            Some(FileType::Btree | FileType::BtreeOverflowKey) => {
-                btree_pages += h.n_page_user.max(0) as u64
-            }
-            Some(FileType::Heap | FileType::HeapReuseSlots) => {
-                heap_pages.insert((it.vfid.volid, it.vfid.fileid), h.n_page_user.max(0) as u64);
-            }
-            _ => {}
+        if matches!(
+            h.file_type(),
+            Some(FileType::Heap | FileType::HeapReuseSlots)
+        ) {
+            heap_pages.insert((it.vfid.volid, it.vfid.fileid), h.n_page_user.max(0) as u64);
         }
     }
 
@@ -591,32 +586,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         treated_pages += pages_of(boot.rootclass_hfid).unwrap_or(0);
     }
 
-    // target space: a copied volume is written whole; a cloned one only where pages change (G1)
-    let io_page = i.vols.io_pagesize() as u64;
-    let transformed_pages: u64 = classes
-        .iter()
-        .zip(&treatments)
-        .filter(|(_, t)| t.heap == HeapTreatment::InPlace(PageTreatment::Transform))
-        .filter_map(|(c, _)| heap_pages.get(&(c.class.heap.vfid.volid, c.class.heap.vfid.fileid)))
-        .sum();
-    let any_clone = volumes.iter().any(|v| v.copy_method == CopyMethod::Clone);
-    let mut needed: u64 = volumes
-        .iter()
-        .filter(|v| v.copy_method == CopyMethod::Copy)
-        .map(|v| v.bytes)
-        .sum();
-    if any_clone {
-        // shortcut: patch target pages are not counted before the heap pass reads them; the rebuilt B-trees and the
-        // transformed heaps stand in for the pages a clone has to unshare
-        needed += (btree_pages + transformed_pages) * io_page;
-    }
-    needed += lob.referenced_bytes() + java.bytes + java_static.bytes;
+    // what the target needs is bounded with the resource estimate (cli target_space, workspace#526)
     let available = free_space::available_bytes(i.target_dir)?;
-    if needed > available {
-        refusals.push(format!(
-            "the target filesystem has {available} B free, the migration needs about {needed} B"
-        ));
-    }
 
     refusals.dedup();
     Ok(Plan {
@@ -633,7 +604,6 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         java,
         java_static,
         rewritten_pages_bound: rewritten_pages_bound + if regenerates { 0 } else { treated_pages },
-        needed_bytes: needed,
         available_bytes: available,
         refusals,
         warnings,

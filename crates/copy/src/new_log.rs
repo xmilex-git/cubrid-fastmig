@@ -1,5 +1,6 @@
 //! Writes the target's new active log `<db>_lgat`: physical page 0 holds the log header, physical page 1 the
-//! end-of-log record at logical page F; every other page is a hole (sparse file), as copydb leaves it.
+//! end-of-log record at logical page F; every other page is zero. copydb leaves those pages as holes; this file is
+//! allocated in full at the start of the run instead (workspace#526).
 //!
 //! Input: the source log header, the target release line, F ([`crate::new_log_start`]) and the target name.
 //! Output: the new file. Header fields follow copydb's new log (`logpb_initialize_header` + `was_copied`, source
@@ -19,7 +20,7 @@ use fastmig_ondisk::log_page::{
     LOG_HEADER_PAGE_ID, LOG_PAGE_HEADER_SIZE, LogPageHeader, LogRecordHeader, NULL_OFFSET,
     set_checksum,
 };
-use fastmig_ondisk::{Lsa, VersionLine};
+use fastmig_ondisk::{Lsa, VersionLine, preallocate};
 
 /// Engine `MVCCID_FIRST`: `oldest_visible_mvccid` of a new log (`logpb_vacuum_reset_log_header_cache`).
 const MVCCID_FIRST: u64 = 4;
@@ -85,7 +86,20 @@ pub fn new_header(
     hdr
 }
 
-/// Creates `path` (must not exist) holding `hdr`: `npages + 1` log pages, pages 0 and 1 written.
+/// Size of the new log: `npages + 1` log pages of the source.
+pub fn file_bytes(src: &LogHeader) -> u64 {
+    (src.npages as u64 + 1) * src.db_logpagesize as u64
+}
+
+/// Creates `path` (must not exist) at its full size with its blocks allocated, at the start of the run
+/// (workspace#526: no disk full during a run). Page 0 stays zero, without the log magic, until [`write`] at the
+/// end, so a run that stops before then leaves no bootable target (workspace#482).
+pub fn allocate(path: &Path, hdr: &LogHeader) -> io::Result<()> {
+    let f = OpenOptions::new().write(true).create_new(true).open(path)?;
+    preallocate::allocate(&f, file_bytes(hdr))
+}
+
+/// Writes `hdr` into the file [`allocate`] made: pages 0 and 1; every other page stays zero.
 pub fn write(path: &Path, hdr: &LogHeader) -> io::Result<()> {
     let lps = hdr.db_logpagesize as usize;
     let mut p0 = vec![0u8; lps];
@@ -98,8 +112,7 @@ pub fn write(path: &Path, hdr: &LogHeader) -> io::Result<()> {
     LogRecordHeader::end_of_log().write(&mut p1, LOG_PAGE_HEADER_SIZE);
     set_checksum(&mut p1);
 
-    let f = OpenOptions::new().write(true).create_new(true).open(path)?;
-    f.set_len((hdr.npages as u64 + 1) * lps as u64)?;
+    let f = OpenOptions::new().write(true).open(path)?;
     f.write_all_at(&p0, 0)?;
     f.write_all_at(&p1, lps as u64)
 }

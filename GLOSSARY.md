@@ -122,7 +122,7 @@ _Avoid_: 원본 오류, 무시된 결함
 출발 DB에 있었으나 재빌드·재생성으로 도착 DB에서 사라진 결함. 보고만 한다.
 
 **미완료 표지 (incomplete marker)**:
-도착 디렉터리에 놓여 그 마이그레이션이 아직 끝나지 않았음(`--verify`면 검증을 통과하기 전)을 나타내는 표지. 표지가 있는 도착은 다시 실행할 때 처음부터 새로 만든다.
+도착 디렉터리에 놓여 그 마이그레이션이 아직 끝나지 않았음(`--verify`면 검증을 통과하기 전)을 나타내는 표지. 표지가 있는 도착은 다시 실행할 때 처음부터 새로 만든다. 실행 중에는 그 실행이 표지를 배타적으로 잠가, 같은 도착에 둘째 migrate가 들면 아무것도 지우거나 쓰기 전에 거부한다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
 _Avoid_: 잠금 파일, 체크포인트
 
 **출발 지문 (source fingerprint)**:
@@ -179,6 +179,10 @@ _Avoid_: 스왑, 임시 볼륨(엔진 용어와 섞인다)
 **임시 디스크 한도 (temp disk limit)**:
 `--temp-disk`로 정하는, spill 파일이 한꺼번에 차지할 수 있는 바이트의 상한. 실행을 시작하기 전에 정하고, 실행 중에는 인덱스 묶음을 나눠서 지킨다. 넘칠 것 같다고 도중에 실패하지 않는다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
 _Avoid_: 디스크 쿼터, temp 크기
+
+**예약 밖 쓰기 (unreserved writes)**:
+migrate가 시작할 때 잡은 공간(통째로 할당한 바이트 복사 볼륨과 새 로그, spill 아레나) 밖에 쓰는 바이트: clone 볼륨이 공유를 푸는 페이지, 새 B-tree, LOB·Java 파일. 시작할 때 그 상한만큼 예약 파일을 잡아 끝까지 두지만, 쓰기는 예약 파일이 아니라 남은 빈 공간에 들어가므로, 실행 중 다른 프로세스가 파일시스템을 채우면 이 쓰기는 디스크 부족으로 멈출 수 있다. `plan`은 그 상한을 `unreserved writes ≤ N MiB`로 보인다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
+_Avoid_: 예약 공간, 여유 공간
 
 **인덱스 묶음 (index batch)**:
 임시 디스크 한도 안에 spill 상한이 들어가도록 나눈 인덱스들의 무리. 묶음마다 그 인덱스들의 클래스 힙을 한 번 스캔하고, 인덱스를 짓고, spill 파일을 지운 뒤 다음 묶음으로 간다. 묶음 수만큼 힙을 다시 읽는다. 한도가 없으면 모든 인덱스가 한 묶음이다.

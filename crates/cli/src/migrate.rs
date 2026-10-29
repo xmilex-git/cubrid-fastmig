@@ -197,7 +197,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         &plan,
         &est,
         src.vols.io_pagesize() as u64,
-        fs::metadata(&src.lgat_path)?.len(),
+        new_log::file_bytes(&src.log),
     );
     let temp_limit = temp_disk_choice::choose(
         temp_disk,
@@ -320,8 +320,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let fastmig_dir = po.target_dir.join("fastmig");
     marker.create_dir_all(&fastmig_dir)?;
     // every byte the run may write is taken from the filesystems now, before the first byte of the target
-    // (workspace#526): byte-copied volumes in full, one reservation for the rest, the temp disk limit
+    // (workspace#526): byte-copied volumes and the new log in full, one reservation for the rest, the temp disk limit
     preallocate_targets(&jobs, &marker)?;
+    let lgat = volinfo::log_dir_file(&o.log_dir, &po.target_name, "_lgat");
+    let log_header = new_log::new_header(&src.log, pair.target, first_pageid, &po.target_name);
+    marker.record(&lgat)?;
+    new_log::allocate(&lgat, &log_header)?;
     let _reservation = Reservation::take(
         &marker,
         &fastmig_dir.join("reserve-target"),
@@ -345,7 +349,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &src,
         po,
         src_lob_base.as_deref(),
-        &resources,
+        &plan_report::json(&plan, &target, &resources),
     )?;
     rep.lap("open_sources");
 
@@ -483,13 +487,8 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     };
     rep.lap("assets");
 
-    // The new log comes last (workspace#482): a crash before it leaves no bootable target.
-    let lgat = volinfo::log_dir_file(&o.log_dir, &po.target_name, "_lgat");
-    marker.record(&lgat)?;
-    new_log::write(
-        &lgat,
-        &new_log::new_header(&src.log, pair.target, first_pageid, &po.target_name),
-    )?;
+    // The new log's header comes last (workspace#482): a crash before it leaves no bootable target.
+    new_log::write(&lgat, &log_header)?;
     marker.record(&volinfo::log_dir_file(&o.log_dir, &po.target_name, "_vinf"))?;
     volinfo::write(&o.log_dir, &po.target_name, &targets)?;
     rep.lap("new_log");
@@ -569,11 +568,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &catalog.json(),
         added_volumes,
         &format!(
-            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_reserved_bytes\": {}}}",
+            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}}}",
             temp_limit,
             limits.temp_disk.is_some(),
             TEMP_DISK.now_and_peak().1,
             target.copy_bytes,
+            target.log_bytes,
             target.extra_bytes
         ),
     );
@@ -598,13 +598,9 @@ fn write_outputs(
     src: &OpenSource,
     po: &PlanOptions,
     src_lob_base: Option<&Path>,
-    resources: &str,
+    plan_json: &str,
 ) -> io::Result<()> {
-    write_recorded(
-        marker,
-        &dir.join("plan.json"),
-        &plan_report::json(plan, resources),
-    )?;
+    write_recorded(marker, &dir.join("plan.json"), plan_json)?;
     write_recorded(
         marker,
         &dir.join("deferred-indexes.sql"),

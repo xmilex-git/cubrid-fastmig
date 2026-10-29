@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fastmig_copy::{open_locked_log, register_db};
+use fastmig_copy::{new_log, open_locked_log, register_db};
 use fastmig_ondisk::databases_txt::{self, DatabaseEntry};
 use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
@@ -189,25 +189,25 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         limits::worker_limit(&p)?,
         limits::physical_memory()?,
     )?;
+    let t = target_space::bound(
+        &plan,
+        &est,
+        s.vols.io_pagesize() as u64,
+        new_log::file_bytes(&s.log),
+    );
+    let mut plan = plan;
+    if t.needed() > plan.available_bytes {
+        plan.refusals.push(format!(
+            "the target filesystem has {} B free, the migration needs {} B before any temp disk",
+            plan.available_bytes,
+            t.needed()
+        ));
+    }
     if p.switch("--json") {
-        print!("{}", plan_report::json(&plan, &est.json(mem)));
+        print!("{}", plan_report::json(&plan, &t, &est.json(mem)));
     } else {
-        print!("{}", plan_report::table(&plan));
+        print!("{}", plan_report::table(&plan, &t));
         print!("{}", est.table(mem));
-        let t = target_space::bound(
-            &plan,
-            &est,
-            s.vols.io_pagesize() as u64,
-            fs::metadata(&s.lgat_path)?.len(),
-        );
-        let mib = |b: u64| b.div_ceil(1 << 20);
-        println!(
-            "target space taken at the start: {} MiB byte-copied volumes + {} MiB reserved (upper bound of the rest, held until the end: needs {} MiB free); {} MiB free",
-            mib(t.copy_bytes),
-            mib(t.extra_bytes),
-            mib(t.needed()),
-            mib(plan.available_bytes)
-        );
     }
     Ok(u8::from(!plan.refusals.is_empty()))
 }

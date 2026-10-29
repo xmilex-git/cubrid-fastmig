@@ -1,8 +1,9 @@
 //! The target space a migrate takes before its first write (workspace#526: no disk full during a run): the
-//! byte-copied volumes are allocated in full (`volume_copy::preallocate_targets`), and one reservation file holds an
-//! upper bound of everything else the run may write — pages a cloned volume unshares, new B-trees, added volumes,
-//! LOB and Java files, the new log — until the run ends (held twice meanwhile, which 1번 세션 accepted: the
-//! free-space check needs twice the reservation).
+//! byte-copied volumes (`volume_copy::preallocate_targets`) and the new log (`new_log::allocate`) are allocated in
+//! full, and one reservation file holds an upper bound of everything else the run may write — pages a cloned
+//! volume unshares, new B-trees, LOB and Java files — until the run ends (held twice meanwhile, which 1번 세션
+//! accepted: the free-space check needs twice the reservation). Those writes go outside the space the run took, so
+//! a process filling the filesystem meanwhile can still take it; `plan` shows their bound as unreserved writes.
 //!
 //! Input: the plan, the resource estimate, the IO page size, the size of the new log. Output: [`TargetSpace`] and
 //! the [`Reservation`] file, a scratch line of the marker (a rerun removes it, the fsync skips it), removed on drop.
@@ -29,7 +30,10 @@ const CATALOG_SLACK_PAGES: u64 = 64;
 pub struct TargetSpace {
     /// Byte-copied volumes, allocated at the start.
     pub copy_bytes: u64,
-    /// The reservation file: everything else the run may write.
+    /// The new log, allocated at the start.
+    pub log_bytes: u64,
+    /// The reservation file: everything else the run may write, outside the space allocated at the start (the
+    /// unreserved writes).
     pub extra_bytes: u64,
 }
 
@@ -37,7 +41,7 @@ impl TargetSpace {
     /// Free space the run needs on the target filesystem: the reservation stays until the run ends while the writes
     /// it bounds take up to as much again.
     pub fn needed(&self) -> u64 {
-        self.copy_bytes + 2 * self.extra_bytes
+        self.copy_bytes + self.log_bytes + 2 * self.extra_bytes
     }
 }
 
@@ -50,13 +54,11 @@ pub fn bound(plan: &Plan, est: &ResourceEstimate, io_page: u64, new_log_bytes: u
         .sum();
     let btree_pages: u64 = est.per_def.iter().map(|&t| 5 * t / io_page + 4).sum();
     let pages = plan.rewritten_pages_bound + btree_pages + CATALOG_SLACK_PAGES;
-    let extra_bytes = pages * io_page
-        + plan.lob.referenced_bytes()
-        + plan.java.bytes
-        + plan.java_static.bytes
-        + new_log_bytes;
+    let extra_bytes =
+        pages * io_page + plan.lob.referenced_bytes() + plan.java.bytes + plan.java_static.bytes;
     TargetSpace {
         copy_bytes,
+        log_bytes: new_log_bytes,
         extra_bytes,
     }
 }
