@@ -27,6 +27,7 @@ use crate::classify::ClassKind;
 use crate::same_slot_rows::template_rows;
 use crate::source_catalog::SourceCatalog;
 use crate::system_classes::SystemClassRole;
+use crate::system_rows::user;
 use crate::system_table::SystemTable;
 use crate::target_classes::{Placement, TargetClass, target_classes};
 use crate::template::CatalogTemplate;
@@ -125,10 +126,10 @@ fn targets_with(
 ) -> DecodeResult<Vec<TargetClass>> {
     let mut users: HashMap<Oid, Oid> = layout.users.clone();
     for t in template_rows(template, SystemTable::DbUser)? {
-        let name = t.values.get("name");
+        let name = user::name(&t.values);
         if let Some(u) = source.same_slot[&SystemTable::DbUser]
             .iter()
-            .find(|u| u.values.get("name") == name)
+            .find(|u| user::name(&u.values) == name)
         {
             users.insert(t.oid, u.oid);
         }

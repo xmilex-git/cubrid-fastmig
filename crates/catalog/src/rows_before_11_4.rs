@@ -25,6 +25,7 @@ use fastmig_ondisk::{Oid, SourceVersion};
 use crate::class_rows::Row;
 use crate::source_classes::SourceClass;
 use crate::sp_target_signature::split_target_signature;
+use crate::system_rows::{authorization, object, stored_procedure, user};
 use crate::system_table::SystemTable;
 
 /// `DB_OBJECT_CLASS`.
@@ -34,20 +35,6 @@ const OLD_GRANT_ENTRY_LENGTH: usize = 3;
 
 fn err(what: String) -> DecodeError {
     DecodeError { at: 0, what }
-}
-
-fn object(v: Option<&Value>) -> Option<Oid> {
-    match v {
-        Some(Value::Object(o)) => Some(*o),
-        _ => None,
-    }
-}
-
-fn text(v: Option<&Value>) -> Option<&[u8]> {
-    match v {
-        Some(Value::Varchar(s) | Value::Char(s)) => Some(s),
-        _ => None,
-    }
 }
 
 /// The source users: name and every group (`groups` holds the closure, `au_add_member`).
@@ -61,7 +48,7 @@ impl Users {
         let by_oid: HashMap<Oid, (Vec<u8>, Vec<Oid>)> = rows
             .iter()
             .map(|r| {
-                let groups = match r.values.get("groups") {
+                let groups = match user::groups(&r.values) {
                     Some(Value::Set(s)) => s
                         .elements
                         .iter()
@@ -71,10 +58,7 @@ impl Users {
                 };
                 (
                     r.oid,
-                    (
-                        text(r.values.get("name")).unwrap_or_default().to_vec(),
-                        groups,
-                    ),
+                    (user::name(&r.values).unwrap_or_default().to_vec(), groups),
                 )
             })
             .collect();
@@ -140,9 +124,9 @@ pub fn to_11_4_shape(
 }
 
 fn procedure(r: &mut Row, users: &Users, sp_of: &mut HashMap<Oid, Oid>) -> DecodeResult<()> {
-    let sp_name = text(r.values.get("sp_name"))
+    let sp_name = stored_procedure::sp_name(&r.values)
         .ok_or_else(|| err(format!("procedure {:?} without sp_name", r.oid)))?;
-    let owner = object(r.values.get("owner"))
+    let owner = object(stored_procedure::owner(&r.values))
         .and_then(|o| users.by_oid.get(&o))
         .ok_or_else(|| {
             err(format!(
@@ -151,7 +135,7 @@ fn procedure(r: &mut Row, users: &Users, sp_of: &mut HashMap<Oid, Oid>) -> Decod
             ))
         })?;
     let unique_name = [owner.0.to_ascii_lowercase().as_slice(), b".", sp_name].concat();
-    let target = text(r.values.get("target")).unwrap_or_default();
+    let target = stored_procedure::target(&r.values).unwrap_or_default();
     let (class, method) = split_target_signature(target).ok_or_else(|| {
         err(format!(
             "procedure {} target {:?} has no Class.method(..)",
@@ -159,7 +143,7 @@ fn procedure(r: &mut Row, users: &Users, sp_of: &mut HashMap<Oid, Oid>) -> Decod
             String::from_utf8_lossy(target)
         ))
     })?;
-    if let Some(Value::Set(s)) = r.values.get("args") {
+    if let Some(Value::Set(s)) = stored_procedure::args(&r.values) {
         for e in &s.elements {
             if let Value::Object(a) = e.value {
                 sp_of.insert(a, r.oid);
@@ -195,7 +179,7 @@ fn argument(r: &mut Row, sp_of: &HashMap<Oid, Oid>) -> DecodeResult<()> {
 }
 
 fn grants(r: &mut Row, users: &Users, owner_of: &HashMap<Oid, Oid>) -> DecodeResult<()> {
-    let Some(Value::Set(s)) = r.values.get_mut("grants") else {
+    let Some(Value::Set(s)) = authorization::grants_mut(&mut r.values) else {
         return Ok(());
     };
     if !s.elements.len().is_multiple_of(OLD_GRANT_ENTRY_LENGTH) {

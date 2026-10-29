@@ -22,6 +22,7 @@ use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
 use fastmig_catalog::sp_target_signature::{TARGET_CLASS_LEN, split_target_signature};
 use fastmig_catalog::system_classes::SystemClassRole;
+use fastmig_catalog::system_rows::{stored_procedure, stored_procedure_code, trigger};
 use fastmig_catalog::system_table::SystemTable;
 use fastmig_catalog::{attr_default, template_store};
 use fastmig_ondisk::boot_parm::BootDbParm;
@@ -30,7 +31,7 @@ use fastmig_ondisk::databases_txt::DatabaseEntry;
 use fastmig_ondisk::file_header::{FileHeader, FileType};
 use fastmig_ondisk::heap_rewrite::VacuumHorizon;
 use fastmig_ondisk::log_header::LogHeader;
-use fastmig_ondisk::value::{Collation, DbType, Value};
+use fastmig_ondisk::value::{Collation, DbType};
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, file_tracker};
 
@@ -197,13 +198,6 @@ fn rows_of(
     }
 }
 
-fn text(v: Option<&Value>) -> Option<&[u8]> {
-    match v? {
-        Value::Varchar(s) | Value::Char(s) => Some(s),
-        _ => None,
-    }
-}
-
 /// The lob-base-path as a directory: `file:<dir>` only (G6 4: `owfs:` has no path in 11.4 or develop builds).
 pub fn lob_base_dir(source: &DatabaseEntry) -> Result<Option<PathBuf>, String> {
     match &source.lob_base_path {
@@ -301,9 +295,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     if matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
         // a pre-11.4 Java target must split into develop's target_class/target_method (R12 § 5.1 2)
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedure)? {
-            let name = String::from_utf8_lossy(text(r.values.get("sp_name")).unwrap_or_default())
-                .into_owned();
-            let target = text(r.values.get("target")).unwrap_or_default();
+            let name =
+                String::from_utf8_lossy(stored_procedure::sp_name(&r.values).unwrap_or_default())
+                    .into_owned();
+            let target = stored_procedure::target(&r.values).unwrap_or_default();
             match split_target_signature(target) {
                 None => refusals.push(format!(
                     "stored procedure {name}: target {:?} has no Class.method(..) (workspace#529)",
@@ -473,20 +468,24 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             }
         }
         for r in rows_of(i.vols, line, &classes, SystemTable::DbTrigger)? {
-            let name = text(r.values.get("name"))
+            let name = trigger::name(&r.values)
                 .map(String::from_utf8_lossy)
                 .unwrap_or_default();
-            for col in ["condition", "action_definition"] {
-                if let Some(t) = text(r.values.get(col)) {
+            let columns = [
+                ("condition", trigger::condition(&r.values)),
+                ("action_definition", trigger::action_definition(&r.values)),
+            ];
+            for (col, text) in columns {
+                if let Some(t) = text {
                     texts.push((format!("trigger {name} {col}"), t.to_vec()));
                 }
             }
         }
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedureCode)? {
-            let name = text(r.values.get("name"))
+            let name = stored_procedure_code::name(&r.values)
                 .map(String::from_utf8_lossy)
                 .unwrap_or_default();
-            if let Some(t) = text(r.values.get("scode")) {
+            if let Some(t) = stored_procedure_code::scode(&r.values) {
                 texts.push((format!("stored procedure code {name}"), t.to_vec()));
             }
         }

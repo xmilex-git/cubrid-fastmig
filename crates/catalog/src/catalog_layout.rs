@@ -40,6 +40,7 @@ use crate::same_slot_rows::{SameSlotInputs, same_slot_rows, template_rows};
 use crate::source_catalog::SourceCatalog;
 use crate::static_rows::static_rows;
 use crate::system_classes::{SystemClassRole, same_slot};
+use crate::system_rows::user;
 use crate::system_table::SystemTable;
 use crate::target_classes::{Placement, TargetClass, target_classes};
 use crate::template::CatalogTemplate;
@@ -211,10 +212,10 @@ fn generate(
     // template users: the source user of the same name, else a new row
     let mut user_map: HashMap<Oid, Oid> = HashMap::new();
     for t in &tusers {
-        let name = t.values.get("name");
+        let name = user::name(&t.values);
         let to = source.same_slot[&SystemTable::DbUser]
             .iter()
-            .find(|u| u.values.get("name") == name)
+            .find(|u| user::name(&u.values) == name)
             .map(|u| u.oid);
         let to = match (to, first) {
             (Some(o), _) => o,

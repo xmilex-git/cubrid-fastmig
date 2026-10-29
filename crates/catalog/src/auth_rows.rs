@@ -17,6 +17,7 @@ use fastmig_ondisk::value::{DecodeError, DecodeResult, Value};
 
 use crate::class_rows::Row;
 use crate::ct_rows::{Sink, int, text};
+use crate::system_rows::authorization;
 use crate::system_table::SystemTable;
 
 /// Engine `AU_TYPE_SET`, by bit position (`DB_AUTH_SELECT` = 1 .. `DB_AUTH_EXECUTE` = 64).
@@ -41,8 +42,10 @@ pub fn auth_rows(
         alloc,
     };
     for a in authorizations {
-        let grantee = a.values.get("owner").cloned().unwrap_or(Value::Null);
-        let grants = match a.values.get("grants") {
+        let grantee = authorization::owner(&a.values)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let grants = match authorization::grants(&a.values) {
             Some(Value::Set(g)) => g.elements.iter().map(|e| &e.value).collect::<Vec<_>>(),
             Some(Value::Null) | None => Vec::new(),
             Some(v) => return Err(err(format!("_db_authorization {:?} grants {v:?}", a.oid))),

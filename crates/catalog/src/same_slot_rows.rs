@@ -25,6 +25,7 @@ use fastmig_ondisk::{Oid, VersionLine};
 use crate::class_rows::Row;
 use crate::serial_name::name_develop;
 use crate::system_classes::SAME_SLOT;
+use crate::system_rows::{authorization, serial, stored_procedure, user};
 use crate::system_table::SystemTable;
 use crate::target_classes::{Origin, TargetClass};
 use crate::template::CatalogTemplate;
@@ -59,13 +60,6 @@ fn err(what: String) -> DecodeError {
     DecodeError { at: 0, what }
 }
 
-fn str_of(v: Option<&Value>) -> Option<&[u8]> {
-    match v {
-        Some(Value::Varchar(s) | Value::Char(s)) => Some(s),
-        _ => None,
-    }
-}
-
 /// The value of a develop column the source row lacks (decision 8).
 fn new_column(
     table: SystemTable,
@@ -77,12 +71,12 @@ fn new_column(
         "created_time" | "updated_time" => now.clone(),
         "invalidated_time" | "expire_time" => Value::Null,
         "is_loginable" => Value::Integer(1),
-        "is_system_created" => Value::Integer(
-            SYSTEM_USERS.contains(&str_of(row.get("name")).unwrap_or_default()) as i32,
-        ),
+        "is_system_created" => {
+            Value::Integer(SYSTEM_USERS.contains(&user::name(row).unwrap_or_default()) as i32)
+        }
         "sql_data_access" => Value::Integer(-1),
-        "start_val" => match row.get("started") {
-            Some(Value::Integer(0)) => row.get("current_val").cloned().unwrap_or(Value::Null),
+        "start_val" => match serial::started(row) {
+            Some(Value::Integer(0)) => serial::current_val(row).cloned().unwrap_or(Value::Null),
             _ => Value::Null,
         },
         _ => {
@@ -265,17 +259,17 @@ pub fn same_slot_rows(
         new_auths.push(auth);
         let mut values = rewrite(SystemTable::DbUser, &ut.class, u, &i.now)?.values;
         values.insert("authorization".into(), Value::Object(auth));
-        values.insert("groups".into(), user_seq(u.values.get("groups")));
+        values.insert("groups".into(), user_seq(user::groups(&u.values)));
         values.insert(
             "direct_groups".into(),
-            user_seq(u.values.get("direct_groups")),
+            user_seq(user::direct_groups(&u.values)),
         );
         values.insert("created_time".into(), i.now.clone());
         values.insert("updated_time".into(), i.now.clone());
         out.push((SystemTable::DbUser, Row { oid, values }));
         let ta = tauths
             .iter()
-            .find(|a| a.values.get("owner") == Some(&Value::Object(u.oid)))
+            .find(|a| authorization::owner(&a.values) == Some(&Value::Object(u.oid)))
             .ok_or_else(|| err("template user without authorization row".into()))?;
         let mut values = rewrite(SystemTable::DbAuthorization, &at.class, ta, &i.now)?.values;
         values.insert("owner".into(), Value::Object(oid));
@@ -287,7 +281,7 @@ pub fn same_slot_rows(
     let have: Vec<Vec<u8>> = out
         .iter()
         .filter(|(t, _)| *t == SystemTable::DbStoredProcedure)
-        .filter_map(|(_, r)| str_of(r.values.get("unique_name")).map(<[u8]>::to_vec))
+        .filter_map(|(_, r)| stored_procedure::unique_name(&r.values).map(<[u8]>::to_vec))
         .collect();
     let (spt, argt) = (
         target(SystemTable::DbStoredProcedure)?,
@@ -295,15 +289,15 @@ pub fn same_slot_rows(
     );
     let targs = template_rows(i.template, SystemTable::DbStoredProcedureArgs)?;
     for sp in template_rows(i.template, SystemTable::DbStoredProcedure)? {
-        if str_of(sp.values.get("unique_name")).is_none_or(|n| have.iter().any(|h| h == n)) {
+        if stored_procedure::unique_name(&sp.values).is_none_or(|n| have.iter().any(|h| h == n)) {
             continue;
         }
         let oid = alloc(SystemTable::DbStoredProcedure);
         let mut values = rewrite(SystemTable::DbStoredProcedure, &spt.class, &sp, &i.now)?.values;
-        if let Some(Value::Object(o)) = values.get("owner") {
+        if let Some(Value::Object(o)) = stored_procedure::owner(&values) {
             values.insert("owner".into(), Value::Object((i.user)(*o)));
         }
-        if let Some(Value::Set(s)) = values.get_mut("args") {
+        if let Some(Value::Set(s)) = stored_procedure::args_mut(&mut values) {
             for e in &mut s.elements {
                 let Value::Object(a) = e.value else { continue };
                 let ta = targs
@@ -330,8 +324,8 @@ pub fn same_slot_rows(
     // grants: the template's system grants, then the source's grants on user classes and procedures
     let tgrants: HashMap<Oid, Vec<Vec<Value>>> = tauths
         .iter()
-        .filter_map(|a| match a.values.get("owner") {
-            Some(Value::Object(o)) => Some(((i.user)(*o), a.values.get("grants"))),
+        .filter_map(|a| match authorization::owner(&a.values) {
+            Some(Value::Object(o)) => Some(((i.user)(*o), authorization::grants(&a.values))),
             _ => None,
         })
         .map(|(o, g)| Ok((o, grant_entries(g)?)))
@@ -340,7 +334,7 @@ pub fn same_slot_rows(
         .iter_mut()
         .filter(|(t, _)| *t == SystemTable::DbAuthorization)
     {
-        let owner = match r.values.get("owner") {
+        let owner = match authorization::owner(&r.values) {
             Some(Value::Object(o)) => *o,
             v => return Err(err(format!("_db_authorization owner {v:?}"))),
         };
@@ -359,7 +353,7 @@ pub fn same_slot_rows(
         let source_entries = if new_auths.contains(&r.oid) {
             Vec::new()
         } else {
-            grant_entries(r.values.get("grants"))?
+            grant_entries(authorization::grants(&r.values))?
         };
         for e in source_entries {
             let keep = match (&e[0], &e[1]) {
@@ -378,9 +372,9 @@ pub fn same_slot_rows(
 /// An auto_increment serial takes develop's name (`unique_name` and the part after the owner in `name`).
 fn rename_serial(row: &mut Row, charset: u8) {
     let (Some(un), Some(cn), Some(an)) = (
-        str_of(row.values.get("unique_name")).map(<[u8]>::to_vec),
-        str_of(row.values.get("class_name")).map(<[u8]>::to_vec),
-        str_of(row.values.get("attr_name")).map(<[u8]>::to_vec),
+        serial::unique_name(&row.values).map(<[u8]>::to_vec),
+        serial::class_name(&row.values).map(<[u8]>::to_vec),
+        serial::attr_name(&row.values).map(<[u8]>::to_vec),
     ) else {
         return;
     };

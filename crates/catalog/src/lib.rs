@@ -32,6 +32,7 @@ pub mod source_classes;
 pub mod sp_target_signature;
 pub mod static_rows;
 pub mod system_classes;
+pub mod system_rows;
 pub mod system_table;
 pub mod target_classes;
 pub mod template;

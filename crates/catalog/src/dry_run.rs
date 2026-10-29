@@ -16,7 +16,6 @@ use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine, file_tracker};
 
 use fastmig_ondisk::class_object::{class_properties, encode_develop, format_btid};
-use fastmig_ondisk::value::Value;
 
 use crate::class_rewrite::{RewriteInputs, rewrite_user_class};
 use crate::class_rows::read_rows;
@@ -26,6 +25,7 @@ use crate::output_sql::plcsql_routines;
 use crate::serial_name::{name_11_4, name_develop};
 use crate::source_classes::{SourceClass, read_classes};
 use crate::system_classes::{SystemClassRole, target_role};
+use crate::system_rows::serial;
 use crate::system_table::SystemTable;
 use crate::template::CatalogTemplate;
 
@@ -339,10 +339,10 @@ pub fn dry_run(
     if let Some(sc) = serial {
         let cs = vs.volume(0)?.header.db_charset as u8;
         for r in read_rows(vs, line, sc)? {
-            let (Some(Value::Varchar(un)), Some(Value::Varchar(cn)), Some(Value::Varchar(an))) = (
-                r.values.get("unique_name"),
-                r.values.get("class_name"),
-                r.values.get("attr_name"),
+            let (Some(un), Some(cn), Some(an)) = (
+                serial::unique_name(&r.values),
+                serial::class_name(&r.values),
+                serial::attr_name(&r.values),
             ) else {
                 continue;
             };

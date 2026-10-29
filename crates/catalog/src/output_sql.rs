@@ -13,6 +13,8 @@ use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::class_object::{ClassObject, Constraint, ConstraintKind};
 use fastmig_ondisk::value::{OrReader, Value, decode_packed_domain};
 
+use crate::system_rows::stored_procedure;
+
 /// Engine `SM_INVISIBLE_INDEX`.
 const INVISIBLE_INDEX: i32 = 2;
 
@@ -199,14 +201,20 @@ pub fn recompile_plcsql_sql(routines: &[(Vec<u8>, bool)]) -> String {
 /// `is_system_generated`, as `(unique_name, sp_type == SP_TYPE_FUNCTION)` (engine `sp_constants.hpp`, same values in
 /// 11.4 and develop).
 pub fn plcsql_routines(rows: &[crate::class_rows::Row]) -> Vec<(Vec<u8>, bool)> {
-    let int = |r: &crate::class_rows::Row, k: &str| match r.values.get(k) {
+    let int = |v: Option<&Value>| match v {
         Some(Value::Integer(i)) => Some(*i),
         _ => None,
     };
     rows.iter()
-        .filter(|r| int(r, "lang") == Some(0) && int(r, "is_system_generated") != Some(1))
-        .filter_map(|r| match r.values.get("unique_name") {
-            Some(Value::Varchar(n)) => Some((n.clone(), int(r, "sp_type") == Some(2))),
+        .filter(|r| {
+            int(stored_procedure::lang(&r.values)) == Some(0)
+                && int(stored_procedure::is_system_generated(&r.values)) != Some(1)
+        })
+        .filter_map(|r| match stored_procedure::unique_name_value(&r.values) {
+            Some(Value::Varchar(n)) => Some((
+                n.clone(),
+                int(stored_procedure::sp_type(&r.values)) == Some(2),
+            )),
             _ => None,
         })
         .collect()

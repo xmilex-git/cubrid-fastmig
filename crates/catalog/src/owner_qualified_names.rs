@@ -22,6 +22,7 @@ use fastmig_ondisk::value::Value;
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 
+use crate::system_rows::{serial, stored_procedure, trigger, user};
 use crate::system_table::SystemTable;
 
 /// develop's longest class, serial or trigger name without its owner (P1, P2).
@@ -103,13 +104,6 @@ fn rows(
     Ok(out)
 }
 
-fn text(v: Option<&Value>) -> Vec<u8> {
-    match v {
-        Some(Value::Varchar(s) | Value::Char(s)) => s.clone(),
-        _ => Vec::new(),
-    }
-}
-
 fn oid(v: Option<&Value>) -> Option<Oid> {
     match v {
         Some(Value::Object(o) | Value::Oid(o)) => Some(*o),
@@ -161,7 +155,7 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
     let users = rows(vs, &system, SystemTable::DbUser, &["name"])?;
     let user_name: HashMap<Oid, Vec<u8>> = users
         .iter()
-        .map(|(o, v)| (*o, text(v.get("name"))))
+        .map(|(o, v)| (*o, user::name(v).unwrap_or_default().to_vec()))
         .collect();
     let owner_of = |o: Option<Oid>| {
         o.and_then(|o| user_name.get(&o))
@@ -190,23 +184,23 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
         name_rules("class", &c.name);
     }
     for (_, s) in rows(vs, &system, SystemTable::DbSerial, &["name"])? {
-        name_rules("serial", &text(s.get("name")));
+        name_rules("serial", serial::name(&s).unwrap_or_default());
     }
     for (_, t) in rows(vs, &system, SystemTable::DbTrigger, &["name"])? {
-        name_rules("trigger", &text(t.get("name")));
+        name_rules("trigger", trigger::name(&t).unwrap_or_default());
     }
     for (_, u) in &users {
-        let name = text(u.get("name"));
+        let name = user::name(u).unwrap_or_default();
         if name.contains(&b'.') {
             out.push(format!(
                 "P3: user name {} contains '.' ({TICKET})",
-                show(&name)
+                show(name)
             ));
         }
         if name.eq_ignore_ascii_case(b"INFORMATION_SCHEMA") {
             out.push(format!(
                 "P5: user {} collides with develop's system user INFORMATION_SCHEMA ({TICKET})",
-                show(&name)
+                show(name)
             ));
         }
     }
@@ -233,14 +227,14 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
         SystemTable::DbStoredProcedure,
         &["sp_name", "owner"],
     )? {
-        let name = text(p.get("sp_name"));
-        let owner = owner_of(oid(p.get("owner")));
+        let name = stored_procedure::sp_name(&p).unwrap_or_default();
+        let owner = owner_of(oid(stored_procedure::owner(&p)));
         if owner.len() + 1 + name.len() > SP_UNIQUE_NAME_MAX {
             out.push(format!(
                 "P6: stored procedure {}.{} is {} bytes; develop unique_name holds at most {SP_UNIQUE_NAME_MAX} \
                  ({TICKET})",
                 show(&owner).to_lowercase(),
-                show(&name),
+                show(name),
                 owner.len() + 1 + name.len()
             ));
         }

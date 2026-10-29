@@ -11,6 +11,7 @@ use fastmig_ondisk::value::{DecodeResult, Value};
 
 use crate::class_rows::Row;
 use crate::same_slot_rows::template_rows;
+use crate::system_rows::collation;
 use crate::system_table::SystemTable;
 use crate::template::CatalogTemplate;
 
@@ -21,14 +22,12 @@ pub struct CollationCheck {
 }
 
 fn id_name(r: &Row) -> (Option<i32>, String) {
-    let id = match r.values.get("coll_id") {
+    let id = match collation::coll_id(&r.values) {
         Some(Value::Integer(i)) => Some(*i),
         _ => None,
     };
-    let name = match r.values.get("coll_name") {
-        Some(Value::Varchar(s) | Value::Char(s)) => String::from_utf8_lossy(s).into_owned(),
-        _ => String::new(),
-    };
+    let name =
+        String::from_utf8_lossy(collation::coll_name(&r.values).unwrap_or_default()).into_owned();
     (id, name)
 }
 
@@ -43,7 +42,7 @@ pub fn check_collations(
     let mut c = CollationCheck::default();
     for r in source {
         let (id, name) = id_name(r);
-        match r.values.get("built_in") {
+        match collation::built_in(&r.values) {
             Some(Value::Integer(0)) => c.warnings.push(format!(
                 "collation {name} (id {id:?}) comes from a user locale library; the target engine needs the same library"
             )),

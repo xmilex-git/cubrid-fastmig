@@ -31,6 +31,7 @@ use crate::class_rows::{Row, read_rows};
 use crate::develop_class_rewrite::rewrite_develop_class;
 use crate::row_encode::encode_row;
 use crate::source_classes::{SourceClass, read_classes};
+use crate::system_rows::{class, index, index_key};
 use crate::system_table::SystemTable;
 use crate::target_classes::{Origin, TargetClass};
 
@@ -124,20 +125,6 @@ pub fn patch_heaps(
     Ok(out)
 }
 
-fn object(v: Option<&Value>) -> Option<Oid> {
-    match v {
-        Some(Value::Object(o)) => Some(*o),
-        _ => None,
-    }
-}
-
-fn text(v: Option<&Value>) -> Option<&[u8]> {
-    match v {
-        Some(Value::Varchar(s) | Value::Char(s)) => Some(s),
-        _ => None,
-    }
-}
-
 /// The deferred indexes' rows: (`_db_index` rows, `_db_index_key` rows). [`remove_deferred_rows`] deletes them;
 /// the plan's pair count leaves them out (workspace#526).
 pub fn deferred_rows(vs: &VolumeSet, cat: &DevelopCatalog) -> io::Result<(Vec<Oid>, Vec<Oid>)> {
@@ -150,7 +137,7 @@ pub fn deferred_rows(vs: &VolumeSet, cat: &DevelopCatalog) -> io::Result<(Vec<Oi
     // _db_class row by class object
     let row_of: HashMap<Oid, &Row> = class_rows
         .iter()
-        .filter_map(|r| object(r.values.get("class_of")).map(|c| (c, r)))
+        .filter_map(|r| class::class_of(&r.values).map(|c| (c, r)))
         .collect();
     let mut dropped: Vec<Oid> = Vec::new();
     for (class, name) in &cat.deferred {
@@ -160,8 +147,8 @@ pub fn deferred_rows(vs: &VolumeSet, cat: &DevelopCatalog) -> io::Result<(Vec<Oi
         let i = index_rows
             .iter()
             .find(|i| {
-                object(i.values.get("class_of")) == Some(r.oid)
-                    && text(i.values.get("index_name")) == Some(name)
+                index::class_of(&i.values) == Some(r.oid)
+                    && index::index_name(&i.values) == Some(name)
             })
             .ok_or_else(|| {
                 invalid(format!(
@@ -173,7 +160,7 @@ pub fn deferred_rows(vs: &VolumeSet, cat: &DevelopCatalog) -> io::Result<(Vec<Oi
     }
     let keys: Vec<Oid> = key_rows
         .iter()
-        .filter(|k| object(k.values.get("index_of")).is_some_and(|i| dropped.contains(&i)))
+        .filter(|k| index_key::index_of(&k.values).is_some_and(|i| dropped.contains(&i)))
         .map(|k| k.oid)
         .collect();
     Ok((dropped, keys))
@@ -204,7 +191,7 @@ pub fn remove_deferred_rows(space: &SpaceManager, cat: &DevelopCatalog) -> io::R
     }
     let mut w = HeapWriter::open(space, ct_class.class.heap)?;
     for r in &class_rows {
-        let Some(Value::Set(s)) = r.values.get("indexes") else {
+        let Some(Value::Set(s)) = class::indexes(&r.values) else {
             continue;
         };
         if !s
