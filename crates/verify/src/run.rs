@@ -2,22 +2,29 @@
 //!
 //! Input: an open [`Database`], the classes whose heap header statistics the migration measured, and the shared
 //! worker / memory / spill limits. Output: [`DbResult`].
-//! Order: check 4 (sectors; yields the tracked files) → every index tree opened → one multi-class pass over every
-//! heap (checks 1 and the heap side of 2; the index builder's `scan_classes`, workspace#503) → every plain index walked
-//! and merged with its heap side on `--workers` threads, largest first (check 2) → the root heap → deferred indexes against the live OID set → foreign keys → catalog references
-//! and OBJECT values (check 3) → LOB files (check 5).
+//! Order: check 4 (sectors; yields the tracked files) → every index tree opened → the live row map reserved → one
+//! multi-class pass over every heap (checks 1 and the heap side of 2; the index builder's `scan_classes`,
+//! workspace#503) → every in-memory run sorted → one pool on `--workers` threads, most leaf pages first: each plain
+//! index merged with its heap side in leaf-range shards (check 2, `merge_shards`) and each foreign key against its
+//! primary key → per index the checks across its shards and its root statistics → the root heap → the live row map
+//! sealed → deferred indexes against it → catalog references and OBJECT values (check 3) → LOB files (check 5).
 //! Source: G3 workspace#483 Q9 (one scan per class, all its indexes at once; merges per index; workers and --mem of
-//! migrate), G5 workspace#486 (deferred indexes: structure + OID survival, key values "not checked").
+//! migrate), G5 workspace#486 (deferred indexes: structure + OID survival, key values "not checked"); workspace#509
+//! (sorts, shards and foreign keys on the workers; measured on the big develop DB).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use fastmig_index::job_pool::run_jobs;
-use fastmig_index::{BuildError, IndexRuns, MemoryLimit, SpillDir, WorkerLimit};
+use fastmig_index::splitter::ShardBounds;
+use fastmig_index::{BuildError, IndexRuns, MemoryLimit, Run, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{Constraint, class_properties};
+use fastmig_ondisk::file_table::FileTable;
+use fastmig_ondisk::value::KeyDomain;
 use fastmig_ondisk::{Btid, Oid};
 
-use crate::btree_walk::{IndexTree, LeafPairs};
+use crate::btree_walk::{IndexTree, LeafCounts, LeafPairs, ShardEnd, join_shards};
 use crate::catalog_refs::{CatalogInput, check_catalog};
 use crate::database::Database;
 use crate::defect::{Check, Defect, OidText};
@@ -25,8 +32,9 @@ use crate::foreign_key::check_fk;
 use crate::heap_chain::check_chain;
 use crate::heap_pass::{HeapScanJob, HeapTarget, IndexKeys, scan_heap, scan_heaps};
 use crate::index_merge::{check_oids, merge_pairs};
-use crate::live_oids::LiveOids;
+use crate::live_row_map::LiveRowMap;
 use crate::lob_files::check_lobs;
+use crate::merge_shards::{plan_shards, shard_count};
 use crate::object_refs::{ObjectRef, check_refs};
 use crate::sector_owner::check_sectors;
 
@@ -121,7 +129,6 @@ pub fn verify_database(
     let specs: Vec<IndexSpec> = by_btid.into_values().collect();
     r.indexes = specs.len();
 
-    let mut live = LiveOids::default();
     let mut refs: Vec<ObjectRef> = Vec::new();
     let mut deferred: Vec<(usize, IndexTree)> = Vec::new();
     let t_heaps = Instant::now();
@@ -157,6 +164,14 @@ pub fn verify_database(
     let heap_classes: Vec<usize> = (0..db.classes.len())
         .filter(|&i| !db.classes[i].class.heap.is_null())
         .collect();
+    // the live row map is reserved before the scan, from the heaps' page counts (workspace#509)
+    let heap_pages: usize = heap_classes
+        .iter()
+        .map(|&i| db.classes[i].class.heap)
+        .chain(std::iter::once(db.boot.rootclass_hfid))
+        .map(|h| FileTable::read(&db.vols, h.vfid).map_or(0, |ft| ft.user_pages().len()))
+        .sum();
+    let mut live = LiveRowMap::reserve(lim.memory, heap_pages)?;
     let mut runs: BTreeMap<usize, IndexRuns> = BTreeMap::new();
     let mut nulls: BTreeMap<usize, u64> = BTreeMap::new();
     {
@@ -204,7 +219,7 @@ pub fn verify_database(
                 &t.name,
             ));
             r.lobs += p.lobs.len();
-            live.add(sc.oid, &p.live);
+            live.add(sc.oid, p.live)?;
             refs.extend(p.refs);
             r.defects.extend(p.defects);
             for ((s, run), n) in mine.iter().zip(p.runs.runs).zip(p.runs.nulls) {
@@ -213,31 +228,104 @@ pub fn verify_database(
             }
         }
     }
-    // every plain index merged with its heap side on --workers threads, largest first (workspace#503)
-    let mut merges: Vec<(&mut IndexTree, IndexRuns, u64)> = trees
-        .iter_mut()
-        .map(|(s, t)| {
+    phases.push(("heap pass", t_heaps.elapsed()));
+    let t_sort = Instant::now();
+    // a tree's own defects (from open) are reported once, whatever its shards find
+    for t in trees.values_mut() {
+        r.defects.extend(std::mem::take(&mut t.defects));
+    }
+    let mut index_runs: Vec<(usize, IndexRuns, u64)> = trees
+        .keys()
+        .map(|s| {
             (
-                t,
+                *s,
                 runs.remove(s).unwrap_or_default(),
                 nulls.get(s).copied().unwrap_or(0),
             )
         })
         .collect();
-    merges.sort_by_key(|(_, run, _)| std::cmp::Reverse(run.entries()));
-    let results = run_jobs(lim.workers.limit(), merges, |(t, mut run, n)| {
-        let mut lp = LeafPairs::new(t);
-        let mut d = merge_pairs(&mut run, &mut lp)?;
-        let pairs = lp.live_objects as u64;
-        d.extend(lp.finish(Some(n)));
-        Ok::<_, std::io::Error>((d, pairs))
-    });
-    for res in results {
-        let (d, pairs) = res?;
-        r.defects.extend(d);
-        r.index_pairs += pairs;
+    {
+        // every in-memory run sorted on --workers threads, largest first, not on its index's merge thread
+        // (workspace#509)
+        let mut sorts: Vec<(&mut Run, &KeyDomain)> = index_runs
+            .iter_mut()
+            .flat_map(|(s, run, _)| {
+                let kd = &trees[s].kd;
+                run.mem.iter_mut().map(move |m| (m, kd))
+            })
+            .collect();
+        sorts.sort_by_key(|(m, _)| std::cmp::Reverse(m.len()));
+        run_jobs(lim.workers.limit(), sorts, |(m, kd)| m.sort(kd));
     }
-    phases.push(("heaps and indexes", t_heaps.elapsed()));
+    let plans = index_runs
+        .iter()
+        .map(|(s, run, _)| {
+            let t = &trees[s];
+            plan_shards(t, run, shard_count(t.leaves.len(), lim.workers.limit()))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    phases.push(("run sort", t_sort.elapsed()));
+
+    let t_merge = Instant::now();
+    // every shard of every plain index merged with its heap side, and every foreign key against its primary key, in
+    // one pool on --workers threads, the most leaf pages first (workspace#503, #509)
+    let fks = foreign_key_jobs(db, &constraints);
+    r.foreign_keys = fks.len();
+    let mut jobs: Vec<TreeJob> = Vec::new();
+    for (i, ((s, runs, _), (ranges, bounds))) in index_runs.iter().zip(&plans).enumerate() {
+        for (k, leaves) in ranges.iter().enumerate() {
+            jobs.push(TreeJob::Shard {
+                index: i,
+                shard: k,
+                tree: &trees[s],
+                runs,
+                slice: bounds.as_ref().map(|b| (b, k)),
+                leaves: leaves.clone(),
+            });
+        }
+    }
+    jobs.extend(fks.iter().map(|(fk, pks)| TreeJob::ForeignKey { fk, pks }));
+    jobs.sort_by_key(|j| std::cmp::Reverse(j.leaf_pages()));
+    let results = run_jobs(lim.workers.limit(), jobs, |j| match j {
+        TreeJob::Shard {
+            index,
+            shard,
+            tree,
+            runs,
+            slice,
+            leaves,
+        } => {
+            let mut lp = LeafPairs::shard(tree, leaves);
+            let mut d = merge_pairs(runs, slice, &mut lp)?;
+            let (ld, counts, end) = lp.into_shard();
+            d.extend(ld);
+            Ok::<_, std::io::Error>((d, Some((index, shard, counts, end))))
+        }
+        TreeJob::ForeignKey { fk, pks } => Ok((check_fk(fk, pks), None)),
+    });
+    let mut shards: Vec<Vec<(usize, LeafCounts, ShardEnd)>> =
+        index_runs.iter().map(|_| Vec::new()).collect();
+    for res in results {
+        let (d, shard) = res?;
+        r.defects.extend(d);
+        if let Some((i, k, counts, end)) = shard {
+            shards[i].push((k, counts, end));
+        }
+    }
+    // per index: the checks across its shards' edges, then its root statistics over all of them
+    for ((s, _, nulls), mut parts) in index_runs.iter().zip(shards) {
+        parts.sort_by_key(|p| p.0);
+        let t = &trees[s];
+        let mut sum = LeafCounts::default();
+        for (_, c, _) in &parts {
+            sum += *c;
+        }
+        let ends: Vec<ShardEnd> = parts.into_iter().map(|p| p.2).collect();
+        r.defects.extend(join_shards(t, &ends));
+        r.defects.extend(t.check_stats(&sum, Some(*nulls)));
+        r.index_pairs += sum.live_objects as u64;
+    }
+    phases.push(("index merge and foreign keys", t_merge.elapsed()));
 
     phase(&mut phases, "root heap", || -> std::io::Result<()> {
         let t = HeapTarget {
@@ -257,11 +345,12 @@ pub fn verify_database(
         .map_err(build_err)?;
         r.heaps += 1;
         r.defects.extend(check_chain(&t, &p, false));
-        live.add(db.boot.rootclass_oid, &p.live);
+        live.add(db.boot.rootclass_oid, p.live)?;
         r.defects.extend(p.defects);
         Ok(())
     })?;
-    for (oid, a, b) in live.seal() {
+    let twice = phase(&mut phases, "live rows", || live.seal());
+    for (oid, a, b) in twice {
         r.defects.push(
             Defect::new(Check::HeapChain, "row-in-two-heaps")
                 .object(OidText(oid))
@@ -272,23 +361,18 @@ pub fn verify_database(
 
     phase(&mut phases, "deferred indexes", || {
         for (s, mut t) in deferred {
+            r.defects.extend(std::mem::take(&mut t.defects));
             let owners: BTreeSet<Oid> = specs[s]
                 .owners
                 .iter()
                 .map(|(j, _)| db.classes[*j].oid)
                 .collect();
-            let mut lp = LeafPairs::new(&mut t);
+            let mut lp = LeafPairs::new(&t);
             let mut d = check_oids(&mut lp, &live, &|c| owners.contains(&c));
-            r.index_pairs += lp.live_objects as u64;
+            r.index_pairs += lp.counts.live_objects as u64;
             d.extend(lp.finish(None));
             r.defects.extend(d);
         }
-    });
-
-    phase(&mut phases, "foreign keys", || {
-        let (d, n) = foreign_keys(db, &constraints);
-        r.foreign_keys = n;
-        r.defects.extend(d)
     });
 
     phase(&mut phases, "catalog", || {
@@ -318,13 +402,13 @@ fn build_err(e: BuildError) -> std::io::Error {
     tool_err(e)
 }
 
-/// Every foreign key against its referenced primary key (with the partitions' primary keys of a partitioned class).
-fn foreign_keys(
-    db: &Database,
+/// Every foreign key's tree with its referenced primary key trees (with the partitions' primary keys of a
+/// partitioned class), opened for `check_fk`.
+fn foreign_key_jobs<'a>(
+    db: &'a Database,
     constraints: &[Result<Vec<Constraint>, String>],
-) -> (Vec<Defect>, usize) {
+) -> Vec<(IndexTree<'a>, Vec<IndexTree<'a>>)> {
     let mut out = Vec::new();
-    let mut n = 0;
     for (i, cons) in constraints.iter().enumerate() {
         for k in cons.iter().flatten() {
             let (Some(fk), Some(btid)) = (&k.foreign_key, k.btid) else {
@@ -362,7 +446,7 @@ fn foreign_keys(
                     .iter()
                     .filter_map(|o| db.by_oid.get(o).copied()),
             );
-            let mut pks: Vec<IndexTree> = pk_classes
+            let pks: Vec<IndexTree> = pk_classes
                 .iter()
                 .filter_map(|&ci| {
                     let cons = constraints[ci].as_ref().ok()?;
@@ -372,13 +456,42 @@ fn foreign_keys(
                     open(ci, pk, pk.btid?)
                 })
                 .collect();
-            let Some(mut fk_tree) = open(i, k, btid) else {
+            let Some(fk_tree) = open(i, k, btid) else {
                 continue; // check 2 reports the unreadable index
             };
-            // the walks above already ran in check 2; only the key comparison is new here
-            n += 1;
-            out.extend(check_fk(&mut fk_tree, &mut pks));
+            // check 2 walks these trees too; the FK job adds only the key comparison
+            out.push((fk_tree, pks));
         }
     }
-    (out, n)
+    out
+}
+
+/// One job of the tree pool: a shard of an index merged with its heap side (check 2), or a foreign key against its
+/// primary key.
+enum TreeJob<'j, 'a, 'm> {
+    Shard {
+        /// The index (position in the pool's index list) and the shard's place in its leaf order.
+        index: usize,
+        shard: usize,
+        tree: &'j IndexTree<'a>,
+        runs: &'j IndexRuns<'m>,
+        slice: Option<(&'j ShardBounds, usize)>,
+        leaves: Range<usize>,
+    },
+    ForeignKey {
+        fk: &'j IndexTree<'a>,
+        pks: &'j [IndexTree<'a>],
+    },
+}
+
+impl TreeJob<'_, '_, '_> {
+    /// The leaf pages the job walks: the one cost unit of both kinds, for largest-first order.
+    fn leaf_pages(&self) -> usize {
+        match self {
+            TreeJob::Shard { leaves, .. } => leaves.len(),
+            TreeJob::ForeignKey { fk, pks } => {
+                fk.leaves.len() + pks.iter().map(|t| t.leaves.len()).sum::<usize>()
+            }
+        }
+    }
 }

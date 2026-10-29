@@ -4,7 +4,7 @@
 //! Input: the database, the heap ([`HeapTarget`]), the indexes whose keys come from its rows ([`IndexKeys`]), and
 //! the shared worker and memory limits. Output: [`HeapPass`] — the page links for the chain walk (`heap_chain`),
 //! check 1 defects of the pages and records (slot directory, chain record class, record homes, MVCC residue in a
-//! target, record decode), the live OIDs, the measured `num_recs`/`recs_sumlen`, the RELOCATION → NEWHOME pairs, the
+//! target, record decode), the live OIDs (page by page), the measured `num_recs`/`recs_sumlen`, the RELOCATION → NEWHOME pairs, the
 //! OBJECT references and LOB locators of live rows, and per index the sorted-run input of the (key, OID) merge.
 //! Source: G3 workspace#483 Q5 (check 1 (ii)–(v)) and Q9 (sector-range parallel scan, one class scan yields the keys
 //! of all its indexes); the scan driver is the index builder's (`fastmig_index::heap_scan::scan_class`,
@@ -32,6 +32,7 @@ use fastmig_ondisk::{Hfid, Oid, Vpid};
 
 use crate::database::{Database, Role};
 use crate::defect::{Check, Defect, OidText, VpidText};
+use crate::live_row_map::LiveSlots;
 use crate::object_refs::{LobRef, ObjectRef, collect_refs};
 
 /// The heap to scan. `class` is `None` for the root heap, whose records are class objects (decoded at open).
@@ -63,7 +64,8 @@ pub struct HeapPass<'m> {
     pub file_pages: Vec<Vpid>,
     pub links: Vec<PageLink>,
     pub header: Option<HeapHdrStats>,
-    pub live: Vec<Oid>,
+    /// The live rows, page by page (workspace#509).
+    pub live: LiveSlots,
     pub num_recs: u64,
     pub recs_sumlen: u64,
     /// (home, newhome) of every REC_RELOCATION.
@@ -81,7 +83,9 @@ pub struct HeapPass<'m> {
 struct Shared {
     links: Vec<PageLink>,
     header: Option<HeapHdrStats>,
+    /// One page's live rows (a page scan); `live_slots` gathers them per heap.
     live: Vec<Oid>,
+    live_slots: LiveSlots,
     num_recs: u64,
     recs_sumlen: u64,
     relocations: Vec<(Oid, Oid)>,
@@ -164,7 +168,7 @@ pub fn scan_heaps<'m>(
             if o.header.is_some() {
                 s.header = o.header;
             }
-            s.live.extend(o.live);
+            s.live_slots.push_page(vpid, &o.live);
             s.num_recs += o.num_recs;
             s.recs_sumlen += o.recs_sumlen;
             s.relocations.extend(o.relocations);
@@ -185,7 +189,7 @@ pub fn scan_heaps<'m>(
                 file_pages,
                 links: s.links,
                 header: s.header,
-                live: s.live,
+                live: s.live_slots,
                 num_recs: s.num_recs,
                 recs_sumlen: s.recs_sumlen,
                 relocations: s.relocations,

@@ -17,6 +17,7 @@
 //! records written by DML keep OIDs in insertion order, so each key's OIDs are sorted before they are streamed.
 //! Source: G3 workspace#483 Q2, Q3; R6 § 3 (layouts, ondisk::btree); scratch walker of workspace#493.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use fastmig_ondisk::btree::be_field::LEAF_RECORD_CLASS_OID;
@@ -89,6 +90,11 @@ impl<'a> IndexTree<'a> {
         };
         t.walk_upper();
         Ok(t)
+    }
+
+    /// The separator of leaf `i` (empty for a leaf whose parent record carries none: the first, or unreadable).
+    pub fn separator(&self, i: usize) -> &[u8] {
+        self.leaves[i].1.as_deref().unwrap_or_default()
     }
 
     fn d(&self, code: &'static str, at: Vpid) -> Defect {
@@ -217,19 +223,9 @@ impl<'a> IndexTree<'a> {
     }
 }
 
-/// Streams a tree's live (key, OID) pairs, leaf by leaf, checking the leaf-level invariants.
-pub struct LeafPairs<'t, 'a> {
-    t: &'t mut IndexTree<'a>,
-    next_leaf: usize,
-    prev_leaf: Vpid,
-    last_key: Option<Vec<u8>>,
-    /// The key being streamed and its live OIDs, sorted, still to hand out (reversed).
-    key: Vec<u8>,
-    pending: Vec<Oid>,
-    /// The current leaf and the next slot to read.
-    page: Option<LeafCursor>,
-    sep: Option<Vec<u8>>,
-    first_in_leaf: bool,
+/// What the leaves held, summed over the shards of one tree for the root statistics.
+#[derive(Default, Clone, Copy)]
+pub struct LeafCounts {
     pub keys: i64,
     pub objects: i64,
     pub live_objects: i64,
@@ -238,23 +234,95 @@ pub struct LeafPairs<'t, 'a> {
     pub unique_violations: usize,
 }
 
+impl std::ops::AddAssign for LeafCounts {
+    fn add_assign(&mut self, o: Self) {
+        self.keys += o.keys;
+        self.objects += o.objects;
+        self.live_objects += o.live_objects;
+        self.ovf_keys += o.ovf_keys;
+        self.unique_violations += o.unique_violations;
+    }
+}
+
+/// A shard's first loaded leaf: its links, checked against the leaf loaded before it once the shards are joined.
+pub struct FirstLeaf {
+    pub vpid: Vpid,
+    pub prev: Vpid,
+    pub next: Vpid,
+    pub level: i16,
+    pub want_next: Vpid,
+}
+
+/// A shard's first ordered key: compared with the last key before the shard once the shards are joined.
+pub struct FirstKey {
+    pub vpid: Vpid,
+    pub slot: usize,
+    pub key: Vec<u8>,
+    /// The separator checked at this key (it starts its leaf) and whether `separator <= key` already failed.
+    pub sep: Option<Vec<u8>>,
+    pub sep_failed: bool,
+}
+
+/// What a shard leaves to the join: its edges and the last leaf and key it read.
+#[derive(Default)]
+pub struct ShardEnd {
+    pub first_leaf: Option<FirstLeaf>,
+    pub first_key: Option<FirstKey>,
+    pub last_leaf: Option<Vpid>,
+    pub last_key: Option<Vec<u8>>,
+}
+
+/// Streams a tree's live (key, OID) pairs, leaf by leaf, checking the leaf-level invariants — of the whole leaf
+/// list, or of one shard (a leaf range; the checks across its edges are left to [`join_shards`]).
+pub struct LeafPairs<'t, 'a> {
+    t: &'t IndexTree<'a>,
+    next_leaf: usize,
+    end_leaf: usize,
+    /// The leaf loaded before; `None` at a shard's start (its first leaf's links are checked by the join).
+    prev_leaf: Option<Vpid>,
+    shard: bool,
+    edge: ShardEnd,
+    defects: Vec<Defect>,
+    /// The last key read; while `pending` is not empty, the key being streamed (its buffer reused per record).
+    last_key: Option<Vec<u8>>,
+    /// The live OIDs of `last_key`, sorted, still to hand out (reversed).
+    pending: Vec<Oid>,
+    /// The current record's objects, reused from record to record (no allocation per row).
+    objects_buf: Vec<BtObject>,
+    /// The current leaf and the next slot to read.
+    page: Option<LeafCursor>,
+    sep: Option<Vec<u8>>,
+    first_in_leaf: bool,
+    pub counts: LeafCounts,
+}
+
 impl<'t, 'a> LeafPairs<'t, 'a> {
-    pub fn new(t: &'t mut IndexTree<'a>) -> Self {
+    /// Every leaf of `t`.
+    pub fn new(t: &'t IndexTree<'a>) -> Self {
+        Self::over(t, 0..t.leaves.len(), false)
+    }
+
+    /// The leaves `leaves` of `t`, one shard of a merge split by leaf range (workspace#509).
+    pub fn shard(t: &'t IndexTree<'a>, leaves: std::ops::Range<usize>) -> Self {
+        Self::over(t, leaves, true)
+    }
+
+    fn over(t: &'t IndexTree<'a>, leaves: std::ops::Range<usize>, shard: bool) -> Self {
         LeafPairs {
             t,
-            next_leaf: 0,
-            prev_leaf: Vpid::NULL,
+            next_leaf: leaves.start,
+            end_leaf: leaves.end,
+            prev_leaf: (!shard).then_some(Vpid::NULL),
+            shard,
+            edge: ShardEnd::default(),
+            defects: Vec::new(),
             last_key: None,
-            key: Vec::new(),
             pending: Vec::new(),
+            objects_buf: Vec::new(),
             page: None,
             sep: None,
             first_in_leaf: true,
-            keys: 0,
-            objects: 0,
-            live_objects: 0,
-            ovf_keys: 0,
-            unique_violations: 0,
+            counts: LeafCounts::default(),
         }
     }
 
@@ -263,14 +331,14 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
     }
 
     fn push(&mut self, d: Defect) {
-        self.t.defects.push(d);
+        self.defects.push(d);
     }
 
     /// The next live pair, `None` after the last leaf.
     pub fn next_pair(&mut self) -> Option<(&[u8], Oid)> {
         loop {
             if let Some(o) = self.pending.pop() {
-                return Some((&self.key, o));
+                return Some((self.last_key.as_deref().unwrap_or_default(), o));
             }
             if !self.next_record() {
                 return None;
@@ -281,6 +349,9 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
     /// Loads the next leaf; false after the last.
     fn load_leaf(&mut self) -> bool {
         loop {
+            if self.next_leaf >= self.end_leaf {
+                return false;
+            }
             let Some((v, sep)) = self.t.leaves.get(self.next_leaf).cloned() else {
                 return false;
             };
@@ -299,24 +370,23 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                 self.push(self.t.d("leaf-no-header", v));
                 continue;
             };
-            if h.prev != self.prev_leaf || h.next != want_next || h.node_level != 1 {
-                let d = self
-                    .t
-                    .d("leaf-links", v)
-                    .expected(format!(
-                        "prev {} next {} level 1",
-                        VpidText(self.prev_leaf),
-                        VpidText(want_next)
-                    ))
-                    .actual(format!(
-                        "prev {} next {} level {}",
-                        VpidText(h.prev),
-                        VpidText(h.next),
-                        h.node_level
-                    ));
-                self.push(d);
+            let links = FirstLeaf {
+                vpid: v,
+                prev: h.prev,
+                next: h.next,
+                level: h.node_level,
+                want_next,
+            };
+            match self.prev_leaf {
+                Some(prev) => {
+                    if let Some(d) = self.t.check_links(&links, prev) {
+                        self.push(d);
+                    }
+                }
+                None => self.edge.first_leaf = Some(links),
             }
-            self.prev_leaf = v;
+            self.prev_leaf = Some(v);
+            self.edge.last_leaf = Some(v);
             self.sep = sep;
             self.first_in_leaf = true;
             self.page = Some(LeafCursor {
@@ -373,7 +443,7 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
             let stored_len = match r.key {
                 KeyRef::Inline(b) => b.len(),
                 KeyRef::Overflow(_) => {
-                    self.ovf_keys += 1;
+                    self.counts.ovf_keys += 1;
                     DISK_VPID_SIZE
                 }
             };
@@ -386,17 +456,21 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                     .actual(h.max_key_len);
                 self.push(d);
             }
-            let mut key = match self.t.key_of(r.key, false) {
-                Ok(k) => k,
-                Err((code, e)) => {
-                    let d = self.t.d(code, v).at(format!("slot {slot}")).actual(e);
-                    self.push(d);
-                    return false;
-                }
+            let mut key: Cow<[u8]> = match r.key {
+                // an inline key is read in place: no copy per record
+                KeyRef::Inline(b) => Cow::Borrowed(b),
+                k => match self.t.key_of(k, false) {
+                    Ok(k) => Cow::Owned(k),
+                    Err((code, e)) => {
+                        let d = self.t.d(code, v).at(format!("slot {slot}")).actual(e);
+                        self.push(d);
+                        return false;
+                    }
+                },
             };
             if r.is_fence() {
                 if cur.fence.is_none() {
-                    cur.fence = Some(key);
+                    cur.fence = Some(key.into_owned());
                 }
                 return false;
             }
@@ -408,7 +482,7 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                     .kd
                     .try_restore_prefix(cur.fence.as_deref().unwrap_or(&[]), &key, cp)
                 {
-                    Ok(k) => key = k,
+                    Ok(k) => key = Cow::Owned(k),
                     Err(e) => {
                         let d = self
                             .t
@@ -422,12 +496,17 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
             }
             self.check_order(v, slot, &key);
             let objects = self.objects_of(v, slot, &r);
-            self.objects += objects.len() as i64;
-            let mut live: Vec<Oid> = objects
-                .iter()
-                .filter(|o| self.t.db.role == Role::Target || o.delid.is_none_or(|d| d == 0))
-                .map(|o| o.oid)
-                .collect();
+            self.counts.objects += objects.len() as i64;
+            let target = self.t.db.role == Role::Target;
+            let mut live = std::mem::take(&mut self.pending);
+            live.clear();
+            live.extend(
+                objects
+                    .iter()
+                    .filter(|o| target || o.delid.is_none_or(|d| d == 0))
+                    .map(|o| o.oid),
+            );
+            self.objects_buf = objects;
             if self.t.db.role == Role::Target && live.windows(2).any(|w| w[0] >= w[1]) {
                 let d = self.t.d("oids-not-ascending", v).at(format!("slot {slot}"));
                 self.push(d);
@@ -439,15 +518,15 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                     .d("duplicate-oid", v)
                     .object(OidText(w[0]))
                     .at(format!("vpid {} slot {slot}", VpidText(v)));
-                self.t.defects.push(d);
+                self.defects.push(d);
             }
             live.dedup();
             // the engine counts only keys with a live object (T1 dirty: keys of deleted rows wait for vacuum)
             if !live.is_empty() {
-                self.keys += 1;
+                self.counts.keys += 1;
             }
             if unique && live.len() > 1 {
-                self.unique_violations += 1;
+                self.counts.unique_violations += 1;
                 let d = self
                     .t
                     .d("unique-violation", v)
@@ -456,17 +535,24 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                     .actual(format!("{} live objects", live.len()));
                 self.push(d);
             }
-            self.live_objects += live.len() as i64;
+            self.counts.live_objects += live.len() as i64;
             live.reverse();
             self.pending = live;
-            self.last_key = Some(key.clone());
-            self.key = key;
+            match &mut self.last_key {
+                Some(l) => {
+                    l.clear();
+                    l.extend_from_slice(&key);
+                }
+                None => self.last_key = Some(key.into_owned()),
+            }
             !self.pending.is_empty()
         }
     }
 
     fn check_order(&mut self, v: Vpid, slot: usize, key: &[u8]) {
-        let kd = &self.t.kd;
+        let t = self.t;
+        let kd = &t.kd;
+        let (mut sep_checked, mut sep_failed) = (None, false);
         if self.first_in_leaf {
             self.first_in_leaf = false;
             if let Some(sep) = self.sep.take() {
@@ -474,23 +560,30 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                     .last_key
                     .as_ref()
                     .is_none_or(|l| kd.compare(l, &sep) == Ordering::Less);
-                if !left_ok || kd.compare(&sep, key) == Ordering::Greater {
-                    let d = self
-                        .t
-                        .d("separator", v)
-                        .expected("left leaf's last key < separator <= first key");
-                    self.t.defects.push(d);
+                sep_failed = kd.compare(&sep, key) == Ordering::Greater;
+                if !left_ok || sep_failed {
+                    self.defects.push(t.separator_defect(v));
                 }
+                sep_checked = Some(sep);
             }
         }
-        if let Some(l) = &self.last_key
-            && kd.compare(l, key) != Ordering::Less
-        {
-            let d = self
-                .t
-                .d("keys-not-increasing", v)
-                .at(format!("slot {slot}"));
-            self.t.defects.push(d);
+        match &self.last_key {
+            Some(l) => {
+                if kd.compare(l, key) != Ordering::Less {
+                    self.defects.push(t.order_defect(v, slot));
+                }
+            }
+            // a shard's first key: the key before it is in another shard, compared by `join_shards`
+            None if self.shard => {
+                self.edge.first_key = Some(FirstKey {
+                    vpid: v,
+                    slot,
+                    key: key.to_vec(),
+                    sep: sep_checked,
+                    sep_failed,
+                })
+            }
+            None => {}
         }
     }
 
@@ -504,12 +597,15 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
         let unique = self.t.root.is_unique();
         let target = self.t.db.role == Role::Target;
         let has_ovf = r.ovf_oids.is_some();
-        let at = format!("vpid {} slot {slot}", VpidText(v));
+        // defect text only when a defect is found: this runs once per leaf record
+        let at = || format!("vpid {} slot {slot}", VpidText(v));
         if target && (r.flags & LEAF_RECORD_CLASS_OID != 0) != (unique && has_ovf) {
-            let d = self.t.d("class-oid-flag", v).at(at.clone());
+            let d = self.t.d("class-oid-flag", v).at(at());
             self.push(d);
         }
-        let mut objs = vec![r.first];
+        let mut objs = std::mem::take(&mut self.objects_buf);
+        objs.clear();
+        objs.push(r.first);
         self.check_form(&r.first, has_ovf, unique && has_ovf, v, &at);
         for o in &r.others {
             self.check_form(o, unique, unique, v, &at);
@@ -520,12 +616,12 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
         let mut dir_head = None;
         while let Some(o) = next.filter(|o| !o.is_null()) {
             if data_pages.len() > 1 << 20 {
-                let d = self.t.d("ovf-oid-cycle", o).at(at.clone());
+                let d = self.t.d("ovf-oid-cycle", o).at(at());
                 self.push(d);
                 break;
             }
             let Some((hdr, objs_rec)) = self.ovf_page(o) else {
-                let d = self.t.d("ovf-oid-page", o).at(at.clone());
+                let d = self.t.d("ovf-oid-page", o).at(at());
                 self.push(d);
                 break;
             };
@@ -534,13 +630,13 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                     .t
                     .d("ovf-oid-header", o)
                     .expected(if unique { "8 B header" } else { "16 B header" })
-                    .at(at.clone());
+                    .at(at());
                 self.push(d);
             }
             if data_pages.is_empty() {
                 dir_head = hdr.dir;
             } else if hdr.dir != dir_head {
-                let d = self.t.d("ovf-dir-head", o).at(at.clone());
+                let d = self.t.d("ovf-dir-head", o).at(at());
                 self.push(d);
             }
             let mut q = 0;
@@ -554,7 +650,7 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                         q = n;
                     }
                     Err(e) => {
-                        let d = self.t.d("ovf-oid-object", o).at(at.clone()).actual(e);
+                        let d = self.t.d("ovf-oid-object", o).at(at()).actual(e);
                         self.push(d);
                         break;
                     }
@@ -581,7 +677,7 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                 let d = self
                     .t
                     .d("ovf-directory", head)
-                    .at(at)
+                    .at(at())
                     .expected(format!("{} entries (page, first OID)", data_pages.len()))
                     .actual(format!("{} entries", entries.len()));
                 self.push(d);
@@ -599,7 +695,14 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
 
     /// Target only: a fixed-size object carries INSID = all visible and DELID 0 (and the class OID where the unique
     /// form has one); any other object carries no MVCCID.
-    fn check_form(&mut self, o: &BtObject, fixed: bool, class_oid: bool, v: Vpid, at: &str) {
+    fn check_form(
+        &mut self,
+        o: &BtObject,
+        fixed: bool,
+        class_oid: bool,
+        v: Vpid,
+        at: &dyn Fn() -> String,
+    ) {
         if self.t.db.role != Role::Target {
             return;
         }
@@ -615,7 +718,7 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                 .t
                 .d("object-mvcc-form", v)
                 .object(OidText(o.oid))
-                .at(at.to_string())
+                .at(at())
                 .expected(if fixed {
                     "INSID 3, DELID 0"
                 } else {
@@ -626,54 +729,124 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
         }
     }
 
-    /// Root statistics against what the leaves held; `nulls` = all-NULL rows the heap pass counted (`None` when the
-    /// heap side was not built: a deferred index).
+    /// This walk's defects plus the root statistics against what the leaves held; `nulls` = all-NULL rows the heap
+    /// pass counted (`None` when the heap side was not built: a deferred index). The tree's own defects (from
+    /// [`IndexTree::open`]) stay in the tree.
     pub fn finish(mut self, nulls: Option<u64>) -> Vec<Defect> {
-        let rh = self.t.root.clone();
-        let root = self.t.btid.vpid();
+        self.defects.extend(self.t.check_stats(&self.counts, nulls));
+        self.defects
+    }
+
+    /// A shard's defects, counts and edges, for [`join_shards`] and [`IndexTree::check_stats`].
+    pub fn into_shard(self) -> (Vec<Defect>, LeafCounts, ShardEnd) {
+        let mut edge = self.edge;
+        edge.last_key = self.last_key;
+        (self.defects, self.counts, edge)
+    }
+}
+
+/// The checks across the shards' edges, in leaf order: each shard's first leaf links to the last leaf loaded before
+/// it, its first key is above the last key read before it and that key is below the separator — exactly what one
+/// walk over every leaf checks at those points.
+pub fn join_shards(t: &IndexTree, ends: &[ShardEnd]) -> Vec<Defect> {
+    let mut out = Vec::new();
+    let mut prev_leaf = Vpid::NULL;
+    let mut last_key: Option<&[u8]> = None;
+    for e in ends {
+        if let Some(l) = &e.first_leaf
+            && let Some(d) = t.check_links(l, prev_leaf)
+        {
+            out.push(d);
+        }
+        if let (Some(f), Some(l)) = (&e.first_key, last_key) {
+            if let Some(sep) = &f.sep
+                && !f.sep_failed
+                && t.kd.compare(l, sep) != Ordering::Less
+            {
+                out.push(t.separator_defect(f.vpid));
+            }
+            if t.kd.compare(l, &f.key) != Ordering::Less {
+                out.push(t.order_defect(f.vpid, f.slot));
+            }
+        }
+        prev_leaf = e.last_leaf.unwrap_or(prev_leaf);
+        last_key = e.last_key.as_deref().or(last_key);
+    }
+    out
+}
+
+impl IndexTree<'_> {
+    /// A leaf's links: `prev` is the leaf loaded before it, `want_next` the next in the leaf list.
+    fn check_links(&self, l: &FirstLeaf, prev: Vpid) -> Option<Defect> {
+        (l.prev != prev || l.next != l.want_next || l.level != 1).then(|| {
+            self.d("leaf-links", l.vpid)
+                .expected(format!(
+                    "prev {} next {} level 1",
+                    VpidText(prev),
+                    VpidText(l.want_next)
+                ))
+                .actual(format!(
+                    "prev {} next {} level {}",
+                    VpidText(l.prev),
+                    VpidText(l.next),
+                    l.level
+                ))
+        })
+    }
+
+    fn separator_defect(&self, v: Vpid) -> Defect {
+        self.d("separator", v)
+            .expected("left leaf's last key < separator <= first key")
+    }
+
+    fn order_defect(&self, v: Vpid, slot: usize) -> Defect {
+        self.d("keys-not-increasing", v).at(format!("slot {slot}"))
+    }
+
+    /// Root statistics against what the leaves held (summed over the shards); `nulls` as [`LeafPairs::finish`].
+    pub fn check_stats(&self, c: &LeafCounts, nulls: Option<u64>) -> Vec<Defect> {
+        let mut out = Vec::new();
+        let rh = &self.root;
+        let root = self.btid.vpid();
         if rh.is_unique() {
-            let got = (self.live_objects, self.keys);
+            let got = (c.live_objects, c.keys);
             if rh.num_oids - rh.num_nulls != got.0 || rh.num_keys != got.1 {
-                let d = self
-                    .t
-                    .d("unique-stats", root)
-                    .expected(format!("num_oids - num_nulls {} num_keys {}", got.0, got.1))
-                    .actual(format!(
-                        "{} {} (num_oids {} num_nulls {})",
-                        rh.num_oids - rh.num_nulls,
-                        rh.num_keys,
-                        rh.num_oids,
-                        rh.num_nulls
-                    ));
-                self.push(d);
+                out.push(
+                    self.d("unique-stats", root)
+                        .expected(format!("num_oids - num_nulls {} num_keys {}", got.0, got.1))
+                        .actual(format!(
+                            "{} {} (num_oids {} num_nulls {})",
+                            rh.num_oids - rh.num_nulls,
+                            rh.num_keys,
+                            rh.num_oids,
+                            rh.num_nulls
+                        )),
+                );
             }
             if let Some(n) = nulls
                 && rh.num_nulls != n as i64
             {
-                let d = self
-                    .t
-                    .d("unique-num-nulls", root)
-                    .expected(n)
-                    .actual(rh.num_nulls);
-                self.push(d);
+                out.push(
+                    self.d("unique-num-nulls", root)
+                        .expected(n)
+                        .actual(rh.num_nulls),
+                );
             }
         } else if (rh.num_oids, rh.num_nulls, rh.num_keys) != (-1, -1, -1) {
-            let d = self
-                .t
-                .d("nonunique-stats", root)
-                .expected("-1 -1 -1")
-                .actual(format!("{} {} {}", rh.num_oids, rh.num_nulls, rh.num_keys));
-            self.push(d);
+            out.push(
+                self.d("nonunique-stats", root)
+                    .expected("-1 -1 -1")
+                    .actual(format!("{} {} {}", rh.num_oids, rh.num_nulls, rh.num_keys)),
+            );
         }
-        if rh.ovfid.is_null() != (self.ovf_keys == 0) {
-            let d = self
-                .t
-                .d("ovfid", root)
-                .expected(format!("{} overflow keys", self.ovf_keys))
-                .actual(format!("{:?}", rh.ovfid));
-            self.push(d);
+        if rh.ovfid.is_null() != (c.ovf_keys == 0) {
+            out.push(
+                self.d("ovfid", root)
+                    .expected(format!("{} overflow keys", c.ovf_keys))
+                    .actual(format!("{:?}", rh.ovfid)),
+            );
         }
-        std::mem::take(&mut self.t.defects)
+        out
     }
 }
 

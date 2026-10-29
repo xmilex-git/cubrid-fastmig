@@ -37,6 +37,25 @@ MVCCID while vacuum work was pending), or — without `--source` — when its va
 the horizon is vacuumed: the engine leaves ONCE on a page whose vacuum job had been interrupted and re-ran.
 Pages the migration did not need to patch keep their chain record and pass.
 
+## Work and memory
+
+Phases (`phases_s` in the summary, per database): `sectors` → `heap pass` (every heap once, all classes in one
+queue on `--workers` threads; tree tops opened first) → `run sort` (every in-memory key run, largest first, on the
+workers) → `index merge and foreign keys` (one pool on the workers, most leaf pages first: an index of at least
+2 × 1024 leaves is merged in up to `--workers` leaf-range shards, cut at parent separators; each foreign key is
+one job) → `root heap` → `live rows` → `deferred indexes` → `catalog`. With `--source` the target is verified
+first, then the source. workspace#509 measured the phases on the big develop DB (22.6 M rows, 75 indexes).
+
+Under `--mem`: the heap pass's key runs (spilled under `--spill-dir` when they do not fit) and the **live row map**
+(the live rows of every heap, for OBJECT values, catalog references and deferred indexes). The map holds 24 B per
+heap page with a live row plus one bit per slot up to the page's last live slot; it is reserved before the heap
+pass at 64 B per heap page (5 words of slot bits) and settled to its real size after. A `--mem` that cannot hold it
+stops `verify` with exit code 2 and the `--mem` that can. Measured: 6.1 MB for 104,923 pages and 22.6 M rows on the
+big develop DB (58 B per page; 16 B per row before workspace#509 was 361 MB); `--mem 2M` there stops with "rerun
+with --mem 7M or more". Scale: a 1 TiB database has 64 Mi pages of 16 KiB, so its map is 4 GiB reserved
+(64 B × 64 Mi) and about 3.6 GiB at the measured 58 B per page — when every page is a heap page. Outside `--mem`:
+per-worker page buffers and the 64 KiB read buffer of each spill file a merge has open.
+
 ## What is not compared
 
 - Deferred indexes (function and filter): structure and the OIDs of their entries only; listed under

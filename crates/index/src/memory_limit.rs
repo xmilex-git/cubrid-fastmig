@@ -55,6 +55,11 @@ impl MemoryLimit {
 }
 
 impl<'a> MemoryGrant<'a> {
+    /// Takes over the bytes of `other` (of the same limit), so one grant pays for a structure that grows.
+    pub fn absorb(&mut self, mut other: MemoryGrant<'a>) {
+        self.bytes += std::mem::take(&mut other.bytes);
+    }
+
     /// Moves `bytes` (at most what this grant holds) into a grant of its own.
     pub fn split(&mut self, bytes: usize) -> MemoryGrant<'a> {
         let bytes = bytes.min(self.bytes);

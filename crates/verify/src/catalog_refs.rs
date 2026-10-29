@@ -28,14 +28,14 @@ use fastmig_ondisk::{Btid, Oid, Vfid};
 
 use crate::database::Database;
 use crate::defect::{Check, Defect, OidText};
-use crate::live_oids::LiveOids;
+use crate::live_row_map::LiveRowMap;
 use crate::object_refs::ObjectRef;
 use crate::sector_owner::Files;
 
 pub struct CatalogInput<'a> {
     pub db: &'a Database,
     pub files: &'a Files,
-    pub live: &'a LiveOids,
+    pub live: &'a LiveRowMap<'a>,
     /// Per class (index into `db.classes`): its constraints, or the decode error.
     pub constraints: &'a [Result<Vec<Constraint>, String>],
     pub refs: &'a [ObjectRef],

@@ -14,7 +14,7 @@ use fastmig_ondisk::record::RecordLayout;
 use fastmig_ondisk::value::{Elo, Value};
 
 use crate::defect::{Check, Defect, OidText};
-use crate::live_oids::LiveOids;
+use crate::live_row_map::LiveRowMap;
 
 /// One OBJECT value of a live row.
 #[derive(Clone, Copy, Debug)]
@@ -80,7 +80,7 @@ fn walk(
 /// (`accepts(domain class, row class)`: a partition of the domain class). `class_name` names a class OID.
 pub fn check_refs(
     refs: &[ObjectRef],
-    live: &LiveOids,
+    live: &LiveRowMap,
     class_name: &dyn Fn(Oid) -> String,
     accepts: &dyn Fn(Oid, Oid) -> bool,
 ) -> Vec<Defect> {
