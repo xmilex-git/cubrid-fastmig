@@ -77,7 +77,7 @@ impl CatalogOutcome {
 }
 
 /// The migrate start time as a DATETIME (`created_time` / `updated_time` of new catalog rows, workspace#482 8).
-fn now_datetime() -> Value {
+pub fn now_datetime() -> Value {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);

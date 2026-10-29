@@ -104,11 +104,14 @@ pub fn index_build_classes(
     template: &CatalogTemplate,
     layout: &CatalogLayout,
 ) -> DecodeResult<Vec<TargetClass>> {
-    targets_with(source, template, layout, &Some, &|b| {
-        Some(Btid {
-            pageid: -2 - b.pageid,
-            ..b
-        })
+    targets_with(source, template, layout, &Some, &template_index_btid)
+}
+
+/// A template class's BTID tagged apart from every source BTID (negative root page), for grouping owners only.
+pub fn template_index_btid(b: Btid) -> Option<Btid> {
+    Some(Btid {
+        pageid: -2 - b.pageid,
+        ..b
     })
 }
 

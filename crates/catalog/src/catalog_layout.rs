@@ -29,6 +29,7 @@ use fastmig_ondisk::value::{DecodeResult, Value};
 use fastmig_ondisk::{Btid, FileAndPage, Hfid, Oid, VersionLine, Vfid, Vpid};
 
 use crate::auth_rows::auth_rows;
+use crate::catalog_write::template_index_btid;
 use crate::class_rows::Row;
 use crate::classify::ClassKind;
 use crate::ct_rows::ct_rows;
@@ -134,9 +135,26 @@ struct Places<'a> {
     placeholders: i32,
     /// First pass: placeholder user row → the template user row it stands for (INFORMATION_SCHEMA).
     new_users: Vec<(Oid, Oid)>,
+    /// Constraints keep a BTID of their own (source BTIDs, template ones tagged) instead of the placeholder, so the
+    /// index rebuild's definitions can be formed (the pair count); the run's passes take the placeholder.
+    distinct_btids: bool,
 }
 
-impl Places<'_> {
+impl<'a> Places<'a> {
+    fn first_pass(empty: &'a CatalogLayout) -> Self {
+        Places {
+            first_pass: true,
+            layout: empty,
+            slot_names: Vec::new(),
+            heap_names: Vec::new(),
+            allocs: Vec::new(),
+            next_alloc: 0,
+            placeholders: 0,
+            new_users: Vec::new(),
+            distinct_btids: false,
+        }
+    }
+
     fn placeholder(&mut self) -> Oid {
         self.placeholders += 1;
         Oid::new(PLACEHOLDER_VOLID, self.placeholders, 0)
@@ -159,9 +177,25 @@ impl Places<'_> {
 }
 
 /// Target classes and rows of one pass.
-struct Generated {
-    targets: Vec<TargetClass>,
-    rows: Vec<(&'static str, Row)>,
+pub struct Generated {
+    pub targets: Vec<TargetClass>,
+    pub rows: Vec<(&'static str, Row)>,
+}
+
+/// The first pass alone, writing nothing: every target class and catalog row with placeholder OIDs and HFIDs, each
+/// value at its final length, constraints with distinct BTIDs (the plan's pair count of the system indexes,
+/// workspace#526).
+pub fn generated_rows(
+    source: &SourceCatalog,
+    template: &CatalogTemplate,
+    now: &Value,
+) -> DecodeResult<Generated> {
+    let empty = CatalogLayout::empty();
+    let mut places = Places {
+        distinct_btids: true,
+        ..Places::first_pass(&empty)
+    };
+    generate(source, template, now, &mut places)
 }
 
 fn generate(
@@ -172,6 +206,7 @@ fn generate(
 ) -> DecodeResult<Generated> {
     let tusers = template_rows(template, "_db_user")?;
     let first = places.first_pass;
+    let distinct_btids = places.distinct_btids;
     // template users: the source user of the same name, else a new row
     let mut user_map: HashMap<Oid, Oid> = HashMap::new();
     for t in &tusers {
@@ -216,7 +251,14 @@ fn generate(
             }
         };
         let rep_dir = |oid: Oid| layout.records.get(&oid).map_or(Oid::NULL, |r| r.dir);
-        let btid = |_| Some(PLACEHOLDER_BTID);
+        let placeholder = |_| Some(PLACEHOLDER_BTID);
+        let source_btid: &dyn Fn(Btid) -> Option<Btid> =
+            if distinct_btids { &Some } else { &placeholder };
+        let template_btid: &dyn Fn(Btid) -> Option<Btid> = if distinct_btids {
+            &template_index_btid
+        } else {
+            &placeholder
+        };
         let t = target_classes(
             &source.classes,
             &source.plans,
@@ -226,8 +268,8 @@ fn generate(
                 new_slot: &mut new_slot,
                 new_heap: &mut new_heap,
                 rep_dir: &rep_dir,
-                source_btid: &btid,
-                template_btid: &btid,
+                source_btid,
+                template_btid,
                 user: &user,
             },
         )?;
@@ -384,16 +426,7 @@ pub fn plan_catalog(
 
     // first pass: placeholders everywhere, real lengths
     let empty = CatalogLayout::empty();
-    let mut p1 = Places {
-        first_pass: true,
-        layout: &empty,
-        slot_names: Vec::new(),
-        heap_names: Vec::new(),
-        allocs: Vec::new(),
-        next_alloc: 0,
-        placeholders: 0,
-        new_users: Vec::new(),
-    };
+    let mut p1 = Places::first_pass(&empty);
     let g1 = generate(source, template, now, &mut p1).map_err(decode_err("catalog first pass"))?;
 
     // root heap: develop format with every kept class object at its final length, then deletions and new slots
@@ -575,6 +608,7 @@ pub fn plan_catalog(
         next_alloc: 0,
         placeholders: 0,
         new_users: Vec::new(),
+        distinct_btids: false,
     };
     let g2 = generate(source, template, now, &mut p2).map_err(decode_err("catalog second pass"))?;
     let mut written: BTreeMap<&'static str, usize> = BTreeMap::new();

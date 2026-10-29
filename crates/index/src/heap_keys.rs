@@ -34,16 +34,10 @@ pub struct ClassKeys<'c> {
     indexes: Vec<(&'c Constraint, &'c KeyDomain)>,
     /// Records still in the 11.4 encoding go through this first (the plan's pair count on an 11.4 source of a
     /// re-encoded class, workspace#526); the build reads target records and has none.
-    re_encode: Option<&'c dyn ReEncode>,
+    pub(crate) re_encode: Option<&'c dyn ReEncode>,
 }
 
 impl<'c> ClassKeys<'c> {
-    /// Reads records through `r` into the develop encoding before their keys are extracted.
-    pub fn with_re_encode(mut self, r: &'c dyn ReEncode) -> Self {
-        self.re_encode = Some(r);
-        self
-    }
-
     /// `indexes`: the class's plain indexes in the order their runs come out.
     pub fn new(
         class_oid: Oid,
@@ -122,36 +116,45 @@ pub fn page_keys(
             }
             _ => continue,
         };
-        let header = RecordHeader::read(bytes).map_err(|e| bad(oid, e.to_string()))?;
-        if header.is_deleted() {
-            continue;
+        record_keys(ck, oid, bytes, emit)?;
+    }
+    Ok(())
+}
+
+/// Emits the keys of one record of `ck`'s class (nothing for a deleted row).
+pub fn record_keys(
+    ck: &ClassKeys,
+    oid: Oid,
+    bytes: &[u8],
+    emit: &mut dyn FnMut(usize, Oid, RowKey),
+) -> Result<(), BuildError> {
+    let header = RecordHeader::read(bytes).map_err(|e| bad(oid, e.to_string()))?;
+    if header.is_deleted() {
+        return Ok(());
+    }
+    let re_encoded;
+    let (bytes, header) = match ck.re_encode {
+        Some(r) => {
+            re_encoded = r
+                .re_encode(oid, bytes)
+                .map_err(|e| bad(oid, e.to_string()))?;
+            let h = RecordHeader::read(&re_encoded).map_err(|e| bad(oid, e.to_string()))?;
+            (&re_encoded[..], h)
         }
-        let re_encoded;
-        let (bytes, header) = match ck.re_encode {
-            Some(r) => {
-                re_encoded = r
-                    .re_encode(oid, bytes)
-                    .map_err(|e| bad(oid, e.to_string()))?;
-                let h = RecordHeader::read(&re_encoded).map_err(|e| bad(oid, e.to_string()))?;
-                (&re_encoded[..], h)
-            }
-            None => (bytes, header),
-        };
-        let layout = ck
-            .layouts
-            .get(&header.repid)
-            .ok_or_else(|| bad(oid, format!("repid {} unknown to the class", header.repid)))?;
-        let values = decode_record(VersionLine::Develop, layout, bytes)
-            .map_err(|e| bad(oid, e.to_string()))?
-            .values;
-        for (ix, (constraint, kd)) in ck.indexes.iter().enumerate() {
-            match extract_key(kd, layout, &values, constraint)
-                .map_err(|e| bad(oid, e.to_string()))?
-            {
-                ExtractedKey::Key(k) => emit(ix, oid, RowKey::Key(&k)),
-                ExtractedKey::AllNull => emit(ix, oid, RowKey::AllNull),
-                ExtractedKey::NullInPrimaryKey(_) => emit(ix, oid, RowKey::NotNullViolation),
-            }
+        None => (bytes, header),
+    };
+    let layout = ck
+        .layouts
+        .get(&header.repid)
+        .ok_or_else(|| bad(oid, format!("repid {} unknown to the class", header.repid)))?;
+    let values = decode_record(VersionLine::Develop, layout, bytes)
+        .map_err(|e| bad(oid, e.to_string()))?
+        .values;
+    for (ix, (constraint, kd)) in ck.indexes.iter().enumerate() {
+        match extract_key(kd, layout, &values, constraint).map_err(|e| bad(oid, e.to_string()))? {
+            ExtractedKey::Key(k) => emit(ix, oid, RowKey::Key(&k)),
+            ExtractedKey::AllNull => emit(ix, oid, RowKey::AllNull),
+            ExtractedKey::NullInPrimaryKey(_) => emit(ix, oid, RowKey::NotNullViolation),
         }
     }
     Ok(())
