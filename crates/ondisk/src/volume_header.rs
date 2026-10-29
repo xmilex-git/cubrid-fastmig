@@ -11,40 +11,87 @@
 //! [`VolumeHeader::read_layout`] decodes either layout.
 
 use std::io;
+use std::mem::offset_of;
 
-use crate::ids::Hfid;
-use crate::le_field::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
-use crate::lsa::Lsa;
+use zerocopy::little_endian::{I16, I32, I64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::ids::{FileAndPageLe, Hfid};
+use crate::lsa::{Lsa, LsaLe};
 use crate::page::{IO_RESERVED_SIZE, IO_TRAILER_SIZE};
 use crate::source_version::HeaderLayout;
 
 /// Engine magic `CUBRID_MAGIC_DATABASE_VOLUME`.
 pub const MAGIC: &str = "CUBRID/Volume";
 
-/// Field offsets from the start of the DB page (add [`IO_RESERVED_SIZE`] for the IO page), both versions.
-pub mod off {
-    pub const MAGIC: usize = 0; // char[25]
-    pub const IOPAGESIZE: usize = 26;
-    pub const VOLID: usize = 28;
-    pub const DB_CHARSET: usize = 30;
-    pub const PURPOSE: usize = 32;
-    pub const TYPE: usize = 36;
-    pub const SECT_NPGS: usize = 40;
-    pub const NSECT_TOTAL: usize = 44;
-    pub const NSECT_MAX: usize = 48;
-    pub const HINT_ALLOCSECT: usize = 52;
-    pub const STAB_NPAGES: usize = 56;
-    pub const STAB_FIRST_PAGE: usize = 60;
-    pub const SYS_LASTPAGE: usize = 64;
-    pub const DB_CREATION: usize = 72;
-    pub const VOL_CREATION: usize = 80;
-    pub const CHKPT_LSA: usize = 88;
-    pub const BOOT_HFID: usize = 96;
-    pub const NEXT_VOLID: usize = 124;
-    pub const OFFSET_TO_VOL_FULLNAME: usize = 126;
-    pub const OFFSET_TO_NEXT_VOL_FULLNAME: usize = 128;
-    pub const OFFSET_TO_VOL_REMARKS: usize = 130;
-    pub const VAR_FIELDS: usize = 132;
+/// Engine `DISK_VOLUME_HEADER` up to `var_fields`, at the start of the DB page; same in both versions. Size 132 B,
+/// followed by `var_fields` (three NUL-terminated strings addressed by the `offset_to_*` fields).
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+pub struct VolumeHeaderLe {
+    /// @0, `CUBRID_MAGIC_MAX_LENGTH` = 25, NUL-padded.
+    pub magic: [u8; 25],
+    pub pad0: u8,
+    /// @26
+    pub iopagesize: I16,
+    /// @28
+    pub volid: I16,
+    /// @30
+    pub db_charset: i8,
+    pub dummy1: u8,
+    /// @32
+    pub purpose: I32,
+    /// @36
+    pub vol_type: I32,
+    /// @40
+    pub sect_npgs: I32,
+    /// @44
+    pub nsect_total: I32,
+    /// @48
+    pub nsect_max: I32,
+    /// @52
+    pub hint_allocsect: I32,
+    /// @56
+    pub stab_npages: I32,
+    /// @60
+    pub stab_first_page: I32,
+    /// @64
+    pub sys_lastpage: I32,
+    pub dummy2: I32,
+    /// @72
+    pub db_creation: I64,
+    /// @80
+    pub vol_creation: I64,
+    /// @88
+    pub chkpt_lsa: LsaLe,
+    /// @96
+    pub boot_hfid: FileAndPageLe,
+    /// @108, `reserved0..3`.
+    pub reserved: [I32; 4],
+    /// @124
+    pub next_volid: I16,
+    /// @126
+    pub offset_to_vol_fullname: I16,
+    /// @128
+    pub offset_to_next_vol_fullname: I16,
+    /// @130
+    pub offset_to_vol_remarks: I16,
+}
+
+/// Offset of `var_fields` in the DB page.
+const VAR_FIELDS: usize = size_of::<VolumeHeaderLe>();
+const _: () = assert!(VAR_FIELDS == 132);
+
+fn fixed(d: &[u8]) -> &VolumeHeaderLe {
+    VolumeHeaderLe::ref_from_prefix(d)
+        .expect("a DB page holds the volume header")
+        .0
+}
+
+fn fixed_mut(d: &mut [u8]) -> &mut VolumeHeaderLe {
+    VolumeHeaderLe::mut_from_prefix(d)
+        .expect("a DB page holds the volume header")
+        .0
 }
 
 /// Engine `DISK_VOLUME_HEADER`, decoded. Size: 132 B fixed + `var_fields` (three NUL-terminated strings).
@@ -95,7 +142,7 @@ impl VolumeHeader {
             HeaderLayout::Since11_4 => Self::read(page),
             HeaderLayout::Before11_4 => {
                 // the 128 B layout is the 136 B one without vol_creation: open its 8 B again and decode the result
-                let gap = IO_RESERVED_SIZE + off::VOL_CREATION;
+                let gap = IO_RESERVED_SIZE + offset_of!(VolumeHeaderLe, vol_creation);
                 let Some((head, tail)) = page.split_at_checked(gap) else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -115,38 +162,35 @@ impl VolumeHeader {
     /// `CUBRID/Volume`.
     pub fn read(page: &[u8]) -> io::Result<Self> {
         let d = db(page);
-        if cstr_at(d, off::MAGIC) != MAGIC {
+        if cstr_at(d, 0) != MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "not a CUBRID volume (magic)",
             ));
         }
-        let var = off::VAR_FIELDS;
-        let i32_at = |o| get_i32(d, o);
+        let h = fixed(d);
+        let var_at = |o: I16| VAR_FIELDS + o.get() as usize;
         Ok(VolumeHeader {
-            iopagesize: get_i16(d, off::IOPAGESIZE),
-            volid: get_i16(d, off::VOLID),
-            db_charset: d[off::DB_CHARSET] as i8,
-            purpose: i32_at(off::PURPOSE),
-            vol_type: i32_at(off::TYPE),
-            sect_npgs: i32_at(off::SECT_NPGS),
-            nsect_total: i32_at(off::NSECT_TOTAL),
-            nsect_max: i32_at(off::NSECT_MAX),
-            hint_allocsect: i32_at(off::HINT_ALLOCSECT),
-            stab_npages: i32_at(off::STAB_NPAGES),
-            stab_first_page: i32_at(off::STAB_FIRST_PAGE),
-            sys_lastpage: i32_at(off::SYS_LASTPAGE),
-            db_creation: get_i64(d, off::DB_CREATION),
-            vol_creation: Some(get_i64(d, off::VOL_CREATION)),
-            chkpt_lsa: Lsa::read(d, off::CHKPT_LSA),
-            boot_hfid: Hfid::read(d, off::BOOT_HFID),
-            next_volid: get_i16(d, off::NEXT_VOLID),
-            vol_fullname: cstr_at(d, var + get_i16(d, off::OFFSET_TO_VOL_FULLNAME) as usize),
-            next_vol_fullname: cstr_at(
-                d,
-                var + get_i16(d, off::OFFSET_TO_NEXT_VOL_FULLNAME) as usize,
-            ),
-            vol_remarks: cstr_at(d, var + get_i16(d, off::OFFSET_TO_VOL_REMARKS) as usize),
+            iopagesize: h.iopagesize.get(),
+            volid: h.volid.get(),
+            db_charset: h.db_charset,
+            purpose: h.purpose.get(),
+            vol_type: h.vol_type.get(),
+            sect_npgs: h.sect_npgs.get(),
+            nsect_total: h.nsect_total.get(),
+            nsect_max: h.nsect_max.get(),
+            hint_allocsect: h.hint_allocsect.get(),
+            stab_npages: h.stab_npages.get(),
+            stab_first_page: h.stab_first_page.get(),
+            sys_lastpage: h.sys_lastpage.get(),
+            db_creation: h.db_creation.get(),
+            vol_creation: Some(h.vol_creation.get()),
+            chkpt_lsa: h.chkpt_lsa.get(),
+            boot_hfid: h.boot_hfid.get(),
+            next_volid: h.next_volid.get(),
+            vol_fullname: cstr_at(d, var_at(h.offset_to_vol_fullname)),
+            next_vol_fullname: cstr_at(d, var_at(h.offset_to_next_vol_fullname)),
+            vol_remarks: cstr_at(d, var_at(h.offset_to_vol_remarks)),
         })
     }
 }
@@ -158,7 +202,7 @@ impl VolumeHeader {
 pub fn transform_from_before_11_4(page: &mut [u8], vol_creation: i64) -> io::Result<()> {
     let before = VolumeHeader::read_layout(page, HeaderLayout::Before11_4)?;
     let db_end = page.len() - IO_TRAILER_SIZE;
-    let gap = IO_RESERVED_SIZE + off::VOL_CREATION;
+    let gap = IO_RESERVED_SIZE + offset_of!(VolumeHeaderLe, vol_creation);
     if page[db_end - 8..db_end].iter().any(|&b| b != 0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -166,11 +210,9 @@ pub fn transform_from_before_11_4(page: &mut [u8], vol_creation: i64) -> io::Res
         ));
     }
     page.copy_within(gap..db_end - 8, gap + 8);
-    put_i64(
-        &mut page[IO_RESERVED_SIZE..],
-        off::VOL_CREATION,
-        vol_creation,
-    );
+    fixed_mut(&mut page[IO_RESERVED_SIZE..])
+        .vol_creation
+        .set(vol_creation);
     let after = VolumeHeader::read(page)?;
     if after
         != (VolumeHeader {
@@ -205,47 +247,52 @@ pub fn format(page: &mut [u8], v: &NewVolume) -> io::Result<()> {
     let db_end = page.len() - IO_TRAILER_SIZE;
     let d = &mut page[IO_RESERVED_SIZE..db_end];
     d.fill(0);
-    d[off::MAGIC..off::MAGIC + MAGIC.len()].copy_from_slice(MAGIC.as_bytes());
-    put_i16(d, off::IOPAGESIZE, (db_end + IO_TRAILER_SIZE) as i16);
-    put_i16(d, off::VOLID, v.volid);
-    d[off::DB_CHARSET] = v.db_charset as u8;
-    put_i32(d, off::PURPOSE, 0); // DB_PERMANENT_DATA_PURPOSE
-    put_i32(d, off::TYPE, 0); // DB_PERMANENT_VOLTYPE
-    put_i32(d, off::SECT_NPGS, 64);
-    put_i32(d, off::NSECT_TOTAL, v.nsect_total);
-    put_i32(d, off::NSECT_MAX, v.nsect_max);
-    put_i32(d, off::HINT_ALLOCSECT, -1);
-    put_i32(d, off::STAB_NPAGES, v.stab_npages);
-    put_i32(d, off::STAB_FIRST_PAGE, 1);
-    put_i32(d, off::SYS_LASTPAGE, v.stab_npages);
-    put_i64(d, off::DB_CREATION, v.db_creation);
-    put_i64(d, off::VOL_CREATION, v.vol_creation);
-    v.chkpt_lsa.write(d, off::CHKPT_LSA);
-    Hfid::NULL.write(d, off::BOOT_HFID);
-    put_i16(d, off::NEXT_VOLID, -1);
+    let h = fixed_mut(d);
+    h.magic[..MAGIC.len()].copy_from_slice(MAGIC.as_bytes());
+    h.iopagesize.set((db_end + IO_TRAILER_SIZE) as i16);
+    h.volid.set(v.volid);
+    h.db_charset = v.db_charset;
+    h.purpose.set(0); // DB_PERMANENT_DATA_PURPOSE
+    h.vol_type.set(0); // DB_PERMANENT_VOLTYPE
+    h.sect_npgs.set(64);
+    h.nsect_total.set(v.nsect_total);
+    h.nsect_max.set(v.nsect_max);
+    h.hint_allocsect.set(-1);
+    h.stab_npages.set(v.stab_npages);
+    h.stab_first_page.set(1);
+    h.sys_lastpage.set(v.stab_npages);
+    h.db_creation.set(v.db_creation);
+    h.vol_creation.set(v.vol_creation);
+    h.chkpt_lsa.set(v.chkpt_lsa);
+    h.boot_hfid.set(Hfid::NULL);
+    h.next_volid.set(-1);
     set_paths_db(d, [v.vol_fullname, "", v.vol_remarks])
 }
 
 /// Writes `nsect_total` (engine `disk_volume_expand`).
 pub fn set_nsect_total(page: &mut [u8], nsect_total: i32) {
-    put_i32(&mut page[IO_RESERVED_SIZE..], off::NSECT_TOTAL, nsect_total);
+    fixed_mut(&mut page[IO_RESERVED_SIZE..])
+        .nsect_total
+        .set(nsect_total);
 }
 
 /// Engine `disk_set_link`: links the volume to the next one (id and path); its own path and remarks are kept.
 pub fn set_link(page: &mut [u8], next_volid: i16, next_vol_fullname: &str) -> io::Result<()> {
     let h = VolumeHeader::read(page)?;
-    put_i16(&mut page[IO_RESERVED_SIZE..], off::NEXT_VOLID, next_volid);
+    fixed_mut(&mut page[IO_RESERVED_SIZE..])
+        .next_volid
+        .set(next_volid);
     set_paths(page, &h.vol_fullname, next_vol_fullname)
 }
 
 /// Writes `db_creation` (must equal the new log header's, R5 L4).
 pub fn set_db_creation(page: &mut [u8], v: i64) {
-    put_i64(&mut page[IO_RESERVED_SIZE..], off::DB_CREATION, v);
+    fixed_mut(&mut page[IO_RESERVED_SIZE..]).db_creation.set(v);
 }
 
 /// Writes `chkpt_lsa` (the new log's checkpoint LSA, R5 L4).
 pub fn set_chkpt_lsa(page: &mut [u8], lsa: Lsa) {
-    lsa.write(&mut page[IO_RESERVED_SIZE..], off::CHKPT_LSA);
+    fixed_mut(&mut page[IO_RESERVED_SIZE..]).chkpt_lsa.set(lsa);
 }
 
 /// Rewrites the volume's own path and the next volume's path, keeping the remarks: `var_fields` becomes
@@ -264,22 +311,22 @@ pub fn set_paths(page: &mut [u8], vol_fullname: &str, next_vol_fullname: &str) -
 /// Writes the three variable fields into the DB page `d` and their offsets (engine `disk_vhdr_set_*`).
 fn set_paths_db(d: &mut [u8], fields: [&str; 3]) -> io::Result<()> {
     let total: usize = fields.iter().map(|s| s.len() + 1).sum();
-    if off::VAR_FIELDS + total > d.len() || fields.iter().any(|s| s.as_bytes().contains(&0)) {
+    if VAR_FIELDS + total > d.len() || fields.iter().any(|s| s.as_bytes().contains(&0)) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "volume header paths do not fit in the page",
         ));
     }
-    let var = &mut d[off::VAR_FIELDS..];
+    let (h, var) = VolumeHeaderLe::mut_from_prefix(d).expect("checked above");
     var.fill(0);
     let mut at = 0usize;
     for (s, off_field) in fields.iter().zip([
-        off::OFFSET_TO_VOL_FULLNAME,
-        off::OFFSET_TO_NEXT_VOL_FULLNAME,
-        off::OFFSET_TO_VOL_REMARKS,
+        &mut h.offset_to_vol_fullname,
+        &mut h.offset_to_next_vol_fullname,
+        &mut h.offset_to_vol_remarks,
     ]) {
-        d[off::VAR_FIELDS + at..off::VAR_FIELDS + at + s.len()].copy_from_slice(s.as_bytes());
-        put_i16(d, off_field, at as i16);
+        var[at..at + s.len()].copy_from_slice(s.as_bytes());
+        off_field.set(at as i16);
         at += s.len() + 1;
     }
     Ok(())

@@ -21,18 +21,21 @@ use std::io;
 
 use crate::extdata::{self, Component, ExtdataHeader};
 use crate::file_header::FileHeader;
-use crate::ids::{Vfid, Vpid, Vsid};
-use crate::le_field::{get_u64, put_u64};
+use zerocopy::IntoBytes;
+
+use crate::file_table::PartialSectorLe;
+use crate::ids::{Vfid, Vpid, Vsid, VsidLe};
+
 use crate::page::{self, PageType};
 use crate::page_batch::PageBatch;
 use crate::sector_reserve::DiskCache;
 use crate::sector_table::SECTOR_NPAGES;
 use crate::version_line::VersionLine;
 
-/// `sizeof (FILE_PARTIAL_SECTOR)`: VSID @0, page bitmap u64 @8.
-pub const PARTSECT_SIZE: usize = 16;
+/// `sizeof (FILE_PARTIAL_SECTOR)`.
+pub const PARTSECT_SIZE: usize = size_of::<PartialSectorLe>();
 /// `sizeof (VSID)`: a full table item.
-pub const FULLSECT_SIZE: usize = 8;
+pub const FULLSECT_SIZE: usize = size_of::<VsidLe>();
 /// Longest table chain walked before the file is called corrupt.
 const CHAIN_LIMIT: usize = 1 << 20;
 
@@ -162,15 +165,16 @@ impl SpaceOp<'_, '_> {
         }
         let hp = self.pages.get(hv)?;
         let it = extdata::item_mut(hp, pat, 0);
-        let vsid = Vsid::read(it, 0);
-        let bitmap = get_u64(it, 8);
+        let ps = PartialSectorLe::of_mut(it);
+        let vsid = ps.vsid.get();
+        let bitmap = ps.page_bitmap.get();
         if bitmap == u64::MAX {
             return Err(err(format!(
                 "file {vfid:?}: full sector in the partial table"
             )));
         }
         let bit = (!bitmap).trailing_zeros();
-        put_u64(it, 8, bitmap | 1 << bit);
+        ps.page_bitmap.set(bitmap | 1 << bit);
         let is_full = bitmap | 1 << bit == u64::MAX;
         let vpid = Vpid::new(vsid.volid, vsid.sectid * SECTOR_NPAGES + bit as i32);
         if t == AllocType::TablePageFullSector {
@@ -207,9 +211,7 @@ impl SpaceOp<'_, '_> {
         vsids.sort();
         let hp = self.pages.get(vfid.header_vpid())?;
         for v in &vsids {
-            let mut ps = [0u8; PARTSECT_SIZE];
-            v.write(&mut ps, 0);
-            extdata::append_items(hp, pat, &ps);
+            extdata::append_items(hp, pat, PartialSectorLe::new(*v, 0).as_bytes());
         }
         h.n_sector_total += n;
         h.n_sector_empty = n;
@@ -327,11 +329,12 @@ impl SpaceOp<'_, '_> {
         }
         if let Some((c, i)) = found {
             let it = extdata::item_mut(self.pages.get(c.vpid)?, c.at, i);
-            let bm = get_u64(it, 8);
+            let ps = PartialSectorLe::of_mut(it);
+            let bm = ps.page_bitmap.get();
             if bm & bit == 0 {
                 return Err(err(format!("page {vpid:?} is not allocated in {vfid:?}")));
             }
-            put_u64(it, 8, bm & !bit);
+            ps.page_bitmap.set(bm & !bit);
             is_empty = bm & !bit == 0;
         } else {
             was_full = true;
@@ -349,9 +352,7 @@ impl SpaceOp<'_, '_> {
                     self.perm_dealloc(vfid, m, AllocType::TablePage)?;
                 }
             }
-            let mut ps = [0u8; PARTSECT_SIZE];
-            vsid.write(&mut ps, 0);
-            put_u64(&mut ps, 8, bitmap);
+            let ps = PartialSectorLe::new(vsid, bitmap);
             match self.find_not_full(hv, pat)? {
                 Ok(c) => {
                     let p = self.pages.get(c.vpid)?;
@@ -360,7 +361,7 @@ impl SpaceOp<'_, '_> {
                         .ok_or_else(|| {
                             err(format!("sector {vsid:?} already in the partial table"))
                         })?;
-                    extdata::insert_at(p, c.at, pos, &ps);
+                    extdata::insert_at(p, c.at, pos, ps.as_bytes());
                 }
                 Err(last) => {
                     let nv = self.perm_alloc(vfid, AllocType::TablePage)?;
@@ -371,7 +372,7 @@ impl SpaceOp<'_, '_> {
                     let np = self.pages.blank(nv);
                     page::init_header(np, nv, PageType::Ftab);
                     extdata::init_page(np, PARTSECT_SIZE);
-                    extdata::append_items(np, 0, &ps);
+                    extdata::append_items(np, 0, ps.as_bytes());
                 }
             }
         }

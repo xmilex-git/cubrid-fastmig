@@ -5,9 +5,11 @@
 //! 11.4 → develop changed only off 68: `rev_level:16 | deduplicate_key_idx:16` → `int rev_level` (#8104).
 //! 10.2..11.3 write an 80 B fixed part with 32-bit counts ([`RootHeader::read_layout`]).
 
-use super::node_header::NodeHeader;
-use crate::ids::{Oid, Vfid};
-use crate::le_field::{get_i32, get_i64, get_u64, put_i32, put_i64, put_u64};
+use zerocopy::little_endian::{I32, I64, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use super::node_header::{NodeHeader, NodeHeaderBefore11_4Le, NodeHeaderLe};
+use crate::ids::{Oid, OidLe, Vfid, VfidLe};
 use crate::source_version::HeaderLayout;
 use crate::value::{DecodeError, DecodeResult};
 
@@ -45,17 +47,13 @@ impl RootHeader {
     /// Fixed part in a layout: 80 B before 11.4, 88 B since.
     pub fn fixed_size(layout: HeaderLayout) -> usize {
         match layout {
-            HeaderLayout::Before11_4 => 80,
+            HeaderLayout::Before11_4 => size_of::<RootHeaderBefore11_4Le>(),
             HeaderLayout::Since11_4 => Self::FIXED_SIZE,
         }
     }
 
     /// Decodes a root header record from a volume written in `layout`; an error when the record does not reach the
-    /// key domain. 10.2..11.3 (`ptype /o` of release 11.2.9 and 11.3.6): node header 28 B; `num_oids`, `num_nulls`,
-    /// `num_keys` i32 @28/32/36 with their high bits in `_64` @52 (`over:2`, then 10 bits each, low bits first,
-    /// btree.c:6378@release/11.3); `topclass_oid` @40, `unique_pk` @48; @56 the 11.4 @68 word (11.3
-    /// `rev_level:16 | deduplicate_key_idx:16`, 11.2 `int rev_level`); `ovfid` @60, `creator_mvccid` @72, key domain
-    /// @80 (workspace#529).
+    /// key domain. 10.2..11.3: [`RootHeaderBefore11_4Le`] (workspace#529).
     pub fn read_layout(b: &[u8], layout: HeaderLayout) -> DecodeResult<Self> {
         if b.len() <= Self::fixed_size(layout) {
             return Err(DecodeError {
@@ -66,55 +64,53 @@ impl RootHeader {
         if layout == HeaderLayout::Since11_4 {
             return Ok(Self::read(b));
         }
-        // signed bit-fields, low bits first (11.3.6 btree_get_unique_statistics: `testb $0x3,0x34`, `shl 0xa; sar 0x16`)
-        let ext = get_i32(b, 52);
-        let count = |low: usize, shift: u32| {
-            let low = get_i32(b, low) as i64;
-            match ext & 0b11 {
-                0 => low,
-                _ => low | ((((ext << (22 - shift)) >> 22) as i64) << 32),
-            }
-        };
+        let (h, packed_key_domain) =
+            RootHeaderBefore11_4Le::ref_from_prefix(b).expect("length checked above");
+        let high = h.counts_high.get();
         Ok(Self {
             node: NodeHeader::read_layout(b, layout)?,
-            num_oids: count(28, 2),
-            num_nulls: count(32, 12),
-            num_keys: count(36, 22),
-            topclass_oid: Oid::read(b, 40),
-            unique_pk: get_i32(b, 48),
-            off68: get_i32(b, 56),
-            ovfid: Vfid::read(b, 60),
-            creator_mvccid: get_u64(b, 72),
-            packed_key_domain: b[80..].to_vec(),
+            num_oids: wide_count(h.num_oids.get(), high, 2),
+            num_nulls: wide_count(h.num_nulls.get(), high, 12),
+            num_keys: wide_count(h.num_keys.get(), high, 22),
+            topclass_oid: h.topclass_oid.get(),
+            unique_pk: h.unique_pk.get(),
+            off68: h.off68.get(),
+            ovfid: h.ovfid.get(),
+            creator_mvccid: h.creator_mvccid.get(),
+            packed_key_domain: packed_key_domain.to_vec(),
         })
     }
 
     pub fn read(b: &[u8]) -> Self {
+        let (h, packed_key_domain) =
+            RootHeaderLe::ref_from_prefix(b).expect("record holds the root header");
         Self {
-            node: NodeHeader::read(b),
-            num_oids: get_i64(b, 32),
-            num_nulls: get_i64(b, 40),
-            num_keys: get_i64(b, 48),
-            topclass_oid: Oid::read(b, 56),
-            unique_pk: get_i32(b, 64),
-            off68: get_i32(b, 68),
-            ovfid: Vfid::read(b, 72),
-            creator_mvccid: get_u64(b, 80),
-            packed_key_domain: b[Self::FIXED_SIZE..].to_vec(),
+            node: (&h.node).into(),
+            num_oids: h.num_oids.get(),
+            num_nulls: h.num_nulls.get(),
+            num_keys: h.num_keys.get(),
+            topclass_oid: h.topclass_oid.get(),
+            unique_pk: h.unique_pk.get(),
+            off68: h.off68.get(),
+            ovfid: h.ovfid.get(),
+            creator_mvccid: h.creator_mvccid.get(),
+            packed_key_domain: packed_key_domain.to_vec(),
         }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut b = vec![0u8; Self::FIXED_SIZE];
-        self.node.write(&mut b);
-        put_i64(&mut b, 32, self.num_oids);
-        put_i64(&mut b, 40, self.num_nulls);
-        put_i64(&mut b, 48, self.num_keys);
-        self.topclass_oid.write(&mut b, 56);
-        put_i32(&mut b, 64, self.unique_pk);
-        put_i32(&mut b, 68, self.off68);
-        self.ovfid.write(&mut b, 72);
-        put_u64(&mut b, 80, self.creator_mvccid);
+        let fixed = RootHeaderLe {
+            node: (&self.node).into(),
+            num_oids: self.num_oids.into(),
+            num_nulls: self.num_nulls.into(),
+            num_keys: self.num_keys.into(),
+            topclass_oid: self.topclass_oid.into(),
+            unique_pk: self.unique_pk.into(),
+            off68: self.off68.into(),
+            ovfid: self.ovfid.into(),
+            creator_mvccid: self.creator_mvccid.into(),
+        };
+        let mut b = fixed.as_bytes().to_vec();
         b.extend_from_slice(&self.packed_key_domain);
         b
     }
@@ -129,3 +125,57 @@ impl RootHeader {
         (stored != 0).then_some(stored - 1)
     }
 }
+
+/// A 10.2..11.3 unique count: the low 32 bits as stored, the high bits from the `_64` word's 10-bit field at `shift`
+/// (signed bit-fields, low bits first: `over:2`, then one field per count; 11.3.6 `btree_get_unique_statistics`:
+/// `testb $0x3,0x34`, `shl 0xa; sar 0x16`; btree.c:6378@release/11.3). `over` 0 means no count needs high bits.
+fn wide_count(low: i32, high: i32, shift: u32) -> i64 {
+    match high & 0b11 {
+        0 => low as i64,
+        _ => low as i64 | ((((high << (22 - shift)) >> 22) as i64) << 32),
+    }
+}
+
+/// The fixed part of [`RootHeader`] as stored by 11.4 and develop; offsets on the [`RootHeader`] fields.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct RootHeaderLe {
+    node: NodeHeaderLe,
+    num_oids: I64,
+    num_nulls: I64,
+    num_keys: I64,
+    topclass_oid: OidLe,
+    unique_pk: I32,
+    off68: I32,
+    ovfid: VfidLe,
+    creator_mvccid: U64,
+}
+
+/// The fixed part of the root header as stored by 10.2..11.3 (`ptype /o` of release 11.2.9 and 11.3.6), 80 B.
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct RootHeaderBefore11_4Le {
+    /// @0
+    node: NodeHeaderBefore11_4Le,
+    /// @28, low 32 bits.
+    num_oids: I32,
+    /// @32, low 32 bits.
+    num_nulls: I32,
+    /// @36, low 32 bits.
+    num_keys: I32,
+    /// @40
+    topclass_oid: OidLe,
+    /// @48
+    unique_pk: I32,
+    /// @52, `_64`: the counts' high bits ([`wide_count`]).
+    counts_high: I32,
+    /// @56, the 11.4 @68 word (11.3 `rev_level:16 | deduplicate_key_idx:16`, 11.2 `int rev_level`).
+    off68: I32,
+    /// @60
+    ovfid: VfidLe,
+    pad: [u8; 4],
+    /// @72
+    creator_mvccid: U64,
+}
+const _: () = assert!(size_of::<RootHeaderLe>() == RootHeader::FIXED_SIZE);
+const _: () = assert!(size_of::<RootHeaderBefore11_4Le>() == 80);

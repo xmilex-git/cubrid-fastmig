@@ -16,7 +16,6 @@ use std::sync::{Arc, RwLock};
 
 use crate::databases_txt::DatabaseEntry;
 use crate::ids::Vpid;
-use crate::le_field::{put_i16, put_i32};
 use crate::lsa::Lsa;
 use crate::page::{self, IO_TRAILER_SIZE};
 use crate::source_version::HeaderLayout;
@@ -288,10 +287,11 @@ fn open_volume(
 /// header and the trailer, pageid -1, volid -1.
 pub fn unwritten_page(io_pagesize: usize) -> Vec<u8> {
     let mut p = vec![0u8; io_pagesize];
-    Lsa::NULL.write(&mut p, page::off::LSA);
+    let r = page::reserved_mut(&mut p);
+    r.lsa.set(Lsa::NULL);
+    r.pageid.set(-1);
+    r.volid.set(-1);
     Lsa::NULL.write(&mut p, io_pagesize - IO_TRAILER_SIZE);
-    put_i32(&mut p, page::off::PAGEID, -1);
-    put_i16(&mut p, page::off::VOLID, -1);
     p
 }
 

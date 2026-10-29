@@ -5,14 +5,12 @@
 //! Source: engine `OVERFLOW_FIRST_PART`, `OVERFLOW_REST_PART` (overflow_file.h, unchanged 11.4..develop),
 //! `bt_load_store_overflow_key` (btree_load.c, develop 5b1867174); R6 § 3.6.
 //!
-//! Layout (host order): first page `next_vpid` @0, `length` i32 @8 (whole key), data @12;
-//! further pages `next_vpid` @0, data @8. The last page's `next_vpid` is NULL.
+//! Layout: [`crate::overflow_part`].
 
 use crate::ids::Vpid;
-use crate::le_field::{get_i32, put_i32};
-
-pub const FIRST_DATA_OFFSET: usize = 12;
-pub const REST_DATA_OFFSET: usize = 8;
+use crate::overflow_part::{
+    FIRST_DATA_OFFSET, OverflowFirstPart, OverflowRestPart, REST_DATA_OFFSET,
+};
 
 /// Pages a key of `len` bytes takes.
 pub fn pages_for(len: usize, db_pagesize: usize) -> usize {
@@ -28,9 +26,9 @@ pub fn pages_for(len: usize, db_pagesize: usize) -> usize {
 /// or NULL.
 pub fn write_page(area: &mut [u8], key: &[u8], i: usize, next: Vpid) {
     let db = area.len();
-    next.write(area, 0);
+    OverflowRestPart::of_mut(area).next_vpid.set(next);
     let (start, off) = if i == 0 {
-        put_i32(area, 8, key.len() as i32);
+        OverflowFirstPart::of_mut(area).length.set(key.len() as i32);
         (0, FIRST_DATA_OFFSET)
     } else {
         (
@@ -48,7 +46,7 @@ pub fn read_key<'p>(
     mut page: impl FnMut(Vpid) -> Option<&'p [u8]>,
 ) -> Result<Vec<u8>, &'static str> {
     let a = page(first).ok_or("overflow key page missing")?;
-    let len = get_i32(a, 8);
+    let len = OverflowFirstPart::of(a).length.get();
     if len < 0 {
         return Err("negative overflow key length");
     }
@@ -59,14 +57,14 @@ pub fn read_key<'p>(
         key.extend_from_slice(&a[off..off + n]);
     };
     take(a, FIRST_DATA_OFFSET, &mut key);
-    let mut next = Vpid::read(a, 0);
+    let mut next = OverflowRestPart::of(a).next_vpid.get();
     while key.len() < len {
         if next.is_null() {
             return Err("overflow key chain ends early");
         }
         let a = page(next).ok_or("overflow key page missing")?;
         take(a, REST_DATA_OFFSET, &mut key);
-        next = Vpid::read(a, 0);
+        next = OverflowRestPart::of(a).next_vpid.get();
     }
     Ok(key)
 }

@@ -8,22 +8,48 @@
 //! release/11.4 46212adcd); the builder follows the engine rules only for a page that starts empty and
 //! only gains records, which is all a new page needs.
 
-/// Engine `SPAGE_HEADER` (src/storage/slotted_page.h). Size: 32 B in 11.4 and develop.
-/// Offsets (both versions, host order = little endian on x86-64; computed, checked on T1 B-tree pages):
-/// 0 `num_slots` i16, 2 `num_records` i16, 4 `anchor_type` i16, 6 `alignment` u16, 8 `total_free` i32,
-/// 12 `cont_free` i32, 16 `offset_to_free_area` i32, 20 `reserved1` i32, 24 `flags` i32,
-/// 28 bit field u32: bit 0 `is_saving` in both; 11.4 also has bit 1 `need_update_best_hint`
-/// (heap pages only), develop drops it (reserved bits 31 instead of 30).
-pub const SPAGE_HEADER_SIZE: usize = 32;
+use zerocopy::little_endian::{I16, I32, U16, U32};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::le_field::{get_i16, get_i32, get_u16, get_u32, put_i16, put_i32, put_u16, put_u32};
+/// Engine `SPAGE_HEADER` (src/storage/slotted_page.h). Size: 32 B in 11.4 and develop, same offsets in both
+/// (host order = little endian on x86-64; computed, checked on T1 B-tree pages).
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+pub struct SpageHeader {
+    /// @0
+    pub num_slots: I16,
+    /// @2
+    pub num_records: I16,
+    /// @4, [`Anchor`] as stored.
+    pub anchor_type: I16,
+    /// @6
+    pub alignment: U16,
+    /// @8
+    pub total_free: I32,
+    /// @12
+    pub cont_free: I32,
+    /// @16
+    pub offset_to_free_area: I32,
+    /// @20
+    pub reserved1: I32,
+    /// @24
+    pub flags: I32,
+    /// @28, bit field: bit 0 `is_saving` in both; 11.4 also has bit 1 `need_update_best_hint` (heap pages only),
+    /// develop drops it (reserved bits 31 instead of 30).
+    pub bits: U32,
+}
 
-/// Engine `SPAGE_SLOT`: one u32 at the end of the page, slot 0 last; bits 0..14 offset to the record,
-/// 14..28 record length, 28..32 record type.
+pub const SPAGE_HEADER_SIZE: usize = size_of::<SpageHeader>();
+const _: () = assert!(SPAGE_HEADER_SIZE == 32);
+
+/// Engine `SPAGE_SLOT`: one u32 at the end of the page, slot 0 last.
 pub const SPAGE_SLOT_SIZE: usize = 4;
 
 /// Engine `SPAGE_EMPTY_OFFSET`: offset of a slot whose record is gone.
 const SPAGE_EMPTY_OFFSET: usize = 0;
+
+/// 11.4 `need_update_best_hint` (bit 1 of [`SpageHeader::bits`]); develop's `reserved_bits`.
+const NEED_UPDATE_BEST_HINT: u32 = 0x2;
 
 /// Engine slot anchoring (`ANCHORED` .. `UNANCHORED_KEEP_SEQUENCE`, slotted_page.h).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,12 +91,65 @@ impl RecordType {
     }
 }
 
+/// One slot of the slot directory, decoded: where its record starts, how long it is, and the record type bits as
+/// stored (4 bits; values 8..15 name no engine type, and the verifier must still see them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Slot {
+    pub offset: usize,
+    pub length: usize,
+    pub rtype: u32,
+}
+
+impl Slot {
+    /// The record type, `None` for bits no engine type has.
+    pub fn record_type(&self) -> Option<RecordType> {
+        RecordType::from_bits(self.rtype)
+    }
+
+    /// Engine `SPAGE_SLOT` word: bits 0..14 offset to the record, 14..28 record length, 28..32 record type.
+    fn from_word(w: u32) -> Self {
+        Slot {
+            offset: (w & 0x3fff) as usize,
+            length: (w >> 14 & 0x3fff) as usize,
+            rtype: w >> 28,
+        }
+    }
+
+    fn word(&self) -> u32 {
+        (self.offset as u32) | ((self.length as u32) << 14) | (self.rtype << 28)
+    }
+}
+
+fn header(area: &[u8]) -> &SpageHeader {
+    SpageHeader::ref_from_prefix(area)
+        .expect("user area holds the header")
+        .0
+}
+
+fn header_mut(area: &mut [u8]) -> &mut SpageHeader {
+    SpageHeader::mut_from_prefix(area)
+        .expect("user area holds the header")
+        .0
+}
+
 fn align_up(n: usize, align: usize) -> usize {
     n.div_ceil(align) * align
 }
 
 fn slot_pos(user_area_len: usize, slotid: usize) -> usize {
     user_area_len - SPAGE_SLOT_SIZE * (slotid + 1)
+}
+
+fn slot_at(area: &[u8], slotid: usize) -> Slot {
+    let pos = slot_pos(area.len(), slotid);
+    Slot::from_word(u32::from_le_bytes(
+        *area[pos..].first_chunk().expect("slot inside the area"),
+    ))
+}
+
+fn set_slot_at(area: &mut [u8], slotid: usize, s: Slot) {
+    let pos = slot_pos(area.len(), slotid);
+    area[pos..pos + SPAGE_SLOT_SIZE].copy_from_slice(&s.word().to_le_bytes());
 }
 
 /// Read view of a slotted page's user area.
@@ -93,45 +172,56 @@ impl<'a> SlottedPage<'a> {
         Some(page)
     }
 
+    /// The page header as stored.
+    pub fn header(&self) -> &'a SpageHeader {
+        header(self.area)
+    }
+
     pub fn num_slots(&self) -> usize {
-        get_i16(self.area, 0).max(0) as usize
+        self.header().num_slots.get().max(0) as usize
     }
 
     pub fn num_records(&self) -> usize {
-        get_i16(self.area, 2).max(0) as usize
-    }
-
-    pub fn anchor_raw(&self) -> i16 {
-        get_i16(self.area, 4)
+        self.header().num_records.get().max(0) as usize
     }
 
     pub fn alignment(&self) -> usize {
-        get_u16(self.area, 6) as usize
+        self.header().alignment.get() as usize
     }
 
     pub fn total_free(&self) -> i32 {
-        get_i32(self.area, 8)
+        self.header().total_free.get()
     }
 
     pub fn cont_free(&self) -> i32 {
-        get_i32(self.area, 12)
+        self.header().cont_free.get()
     }
 
     pub fn offset_to_free_area(&self) -> i32 {
-        get_i32(self.area, 16)
+        self.header().offset_to_free_area.get()
     }
 
-    /// Slot `slotid` as stored, unchecked: (offset, length, record type bits); `None` past `num_slots`.
+    /// Engine `spage_max_space_for_new_record`: free space minus a new slot unless a deleted slot can be reused,
+    /// aligned down.
+    pub fn max_space_for_new_record(&self) -> usize {
+        let h = self.header();
+        let mut free = h.total_free.get();
+        let reuse = h.anchor_type.get() != Anchor::AnchoredDontReuseSlots as i16
+            && h.num_slots.get() > h.num_records.get();
+        if !reuse {
+            free -= SPAGE_SLOT_SIZE as i32;
+            if free < SPAGE_SLOT_SIZE as i32 {
+                free = 0;
+            }
+        }
+        let a = (h.alignment.get() as i32).max(1);
+        (free.max(0) / a * a) as usize
+    }
+
+    /// Slot `slotid` as stored, unchecked; `None` past `num_slots`.
     /// For the verifier, which must see the slots `record` treats as unknown.
-    pub fn raw_slot(&self, slotid: usize) -> Option<(usize, usize, u32)> {
-        (slotid < self.num_slots()).then(|| {
-            let raw = get_u32(self.area, slot_pos(self.area.len(), slotid));
-            (
-                (raw & 0x3fff) as usize,
-                (raw >> 14 & 0x3fff) as usize,
-                raw >> 28,
-            )
-        })
+    pub fn raw_slot(&self, slotid: usize) -> Option<Slot> {
+        (slotid < self.num_slots()).then(|| slot_at(self.area, slotid))
     }
 
     /// Length of the user area this page view covers.
@@ -142,22 +232,16 @@ impl<'a> SlottedPage<'a> {
     /// The record in `slotid` with its type, or `None` for a slot the engine treats as unknown
     /// (out of range, empty offset, offset inside the header) or one whose bytes overrun the page.
     pub fn record(&self, slotid: usize) -> Option<(RecordType, &'a [u8])> {
-        if slotid >= self.num_slots() {
+        let s = self.raw_slot(slotid)?;
+        let rtype = s.record_type()?;
+        if s.offset == SPAGE_EMPTY_OFFSET || s.offset < SPAGE_HEADER_SIZE {
             return None;
         }
-        let pos = slot_pos(self.area.len(), slotid);
-        let raw = get_u32(self.area, pos);
-        let offset = (raw & 0x3fff) as usize;
-        let length = ((raw >> 14) & 0x3fff) as usize;
-        let rtype = RecordType::from_bits(raw >> 28)?;
-        if offset == SPAGE_EMPTY_OFFSET || offset < SPAGE_HEADER_SIZE {
-            return None;
-        }
-        let end = offset.checked_add(length)?;
+        let end = s.offset.checked_add(s.length)?;
         if end > slot_pos(self.area.len(), self.num_slots() - 1) {
             return None;
         }
-        Some((rtype, &self.area[offset..end]))
+        Some((rtype, &self.area[s.offset..end]))
     }
 }
 
@@ -176,9 +260,10 @@ impl<'a> SpageBuilder<'a> {
     /// `page::db_area_mut`) and starts an empty slotted page in it.
     pub fn new(area: &'a mut [u8], anchor: Anchor, alignment: usize, is_saving: bool) -> Self {
         area.fill(0);
-        put_i16(area, 4, anchor as i16);
-        put_u16(area, 6, alignment as u16);
-        put_u32(area, 28, is_saving as u32);
+        let h = header_mut(area);
+        h.anchor_type.set(anchor as i16);
+        h.alignment.set(alignment as u16);
+        h.bits.set(is_saving as u32);
         let len = area.len();
         Self {
             area,
@@ -216,8 +301,12 @@ impl<'a> SpageBuilder<'a> {
             return None;
         }
         self.area[offset..offset + rec.len()].copy_from_slice(rec);
-        let raw = (offset as u32) | ((rec.len() as u32) << 14) | ((rtype as u32) << 28);
-        put_u32(self.area, slot_pos(self.area.len(), slotid), raw);
+        let slot = Slot {
+            offset,
+            length: rec.len(),
+            rtype: rtype as u32,
+        };
+        set_slot_at(self.area, slotid, slot);
         self.num_slots += 1;
         self.total_free -= space + SPAGE_SLOT_SIZE;
         self.offset_to_free_area += space;
@@ -226,12 +315,13 @@ impl<'a> SpageBuilder<'a> {
 
     /// Writes the header counters; the page is complete after this.
     pub fn finish(self) {
-        put_i16(self.area, 0, self.num_slots as i16);
-        put_i16(self.area, 2, self.num_slots as i16);
-        put_i32(self.area, 8, self.total_free as i32);
+        let h = header_mut(self.area);
+        h.num_slots.set(self.num_slots as i16);
+        h.num_records.set(self.num_slots as i16);
+        h.total_free.set(self.total_free as i32);
         // a page that only gained records has one contiguous free area
-        put_i32(self.area, 12, self.total_free as i32);
-        put_i32(self.area, 16, self.offset_to_free_area as i32);
+        h.cont_free.set(self.total_free as i32);
+        h.offset_to_free_area.set(self.offset_to_free_area as i32);
     }
 }
 
@@ -244,6 +334,14 @@ pub enum SpageError {
     NoRecord,
     /// The page header and slots disagree; the page is not edited.
     Corrupt,
+}
+
+/// The free-space counters of a page header as stored (`total_free`, `cont_free`, `offset_to_free_area`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FreeCounters {
+    pub total_free: i32,
+    pub cont_free: i32,
+    pub offset_to_free_area: i32,
 }
 
 /// In-place editor of an existing slotted page, following the engine's space accounting so the header counters
@@ -259,24 +357,6 @@ pub struct SpageEditor<'a> {
     area: &'a mut [u8],
 }
 
-const H_NUM_SLOTS: usize = 0;
-const H_NUM_RECORDS: usize = 2;
-const H_ANCHOR: usize = 4;
-const H_ALIGNMENT: usize = 6;
-const H_TOTAL_FREE: usize = 8;
-const H_CONT_FREE: usize = 12;
-const H_OFFSET_TO_FREE_AREA: usize = 16;
-const H_BITS: usize = 28;
-/// 11.4 `need_update_best_hint` (bit 1 of the bit-field word); develop's `reserved_bits`.
-const NEED_UPDATE_BEST_HINT: u32 = 0x2;
-
-#[derive(Clone, Copy)]
-struct Slot {
-    offset: usize,
-    length: usize,
-    rtype: u32,
-}
-
 impl<'a> SpageEditor<'a> {
     /// Wraps the user area (`page::db_area_mut`) of a slotted page.
     pub fn new(area: &'a mut [u8]) -> Option<Self> {
@@ -288,29 +368,16 @@ impl<'a> SpageEditor<'a> {
         SlottedPage { area: self.area }
     }
 
-    fn h(&self, off: usize) -> i32 {
-        if off < 8 {
-            get_i16(self.area, off) as i32
-        } else {
-            get_i32(self.area, off)
-        }
+    fn h(&self) -> &SpageHeader {
+        header(self.area)
     }
 
-    fn set_h(&mut self, off: usize, v: i32) {
-        if off < 8 {
-            put_i16(self.area, off, v as i16)
-        } else {
-            put_i32(self.area, off, v)
-        }
-    }
-
-    fn add_h(&mut self, off: usize, d: i32) {
-        let v = self.h(off) + d;
-        self.set_h(off, v);
+    fn h_mut(&mut self) -> &mut SpageHeader {
+        header_mut(self.area)
     }
 
     fn alignment(&self) -> usize {
-        (get_u16(self.area, H_ALIGNMENT) as usize).max(1)
+        (self.h().alignment.get() as usize).max(1)
     }
 
     fn waste(&self, len: usize) -> usize {
@@ -318,22 +385,16 @@ impl<'a> SpageEditor<'a> {
     }
 
     fn slot(&self, id: usize) -> Slot {
-        let raw = get_u32(self.area, slot_pos(self.area.len(), id));
-        Slot {
-            offset: (raw & 0x3fff) as usize,
-            length: (raw >> 14 & 0x3fff) as usize,
-            rtype: raw >> 28,
-        }
+        slot_at(self.area, id)
     }
 
     fn set_slot(&mut self, id: usize, s: Slot) {
-        let raw = (s.offset as u32) | ((s.length as u32) << 14) | (s.rtype << 28);
-        let n = self.area.len();
-        put_u32(self.area, slot_pos(n, id), raw);
+        set_slot_at(self.area, id, s);
     }
 
+    /// `num_slots` as stored; a negative count is not clamped here (the editor's callers checked the page).
     fn num_slots(&self) -> usize {
-        self.h(H_NUM_SLOTS) as usize
+        self.h().num_slots.get() as usize
     }
 
     fn live(&self, id: usize) -> Option<Slot> {
@@ -343,7 +404,7 @@ impl<'a> SpageEditor<'a> {
     }
 
     fn at_end(&self, s: Slot) -> bool {
-        s.offset + s.length + self.waste(s.length) == self.h(H_OFFSET_TO_FREE_AREA) as usize
+        s.offset + s.length + self.waste(s.length) == self.h().offset_to_free_area.get() as usize
     }
 
     /// Engine `spage_max_record_size`: the largest record a page can hold.
@@ -353,17 +414,7 @@ impl<'a> SpageEditor<'a> {
 
     /// Engine `spage_max_space_for_new_record`.
     pub fn max_space_for_new_record(&self) -> usize {
-        let mut free = self.h(H_TOTAL_FREE);
-        let reuse = self.h(H_ANCHOR) != Anchor::AnchoredDontReuseSlots as i32
-            && self.h(H_NUM_SLOTS) > self.h(H_NUM_RECORDS);
-        if !reuse {
-            free -= SPAGE_SLOT_SIZE as i32;
-            if free < SPAGE_SLOT_SIZE as i32 {
-                free = 0;
-            }
-        }
-        let a = self.alignment() as i32;
-        (free.max(0) / a * a) as usize
+        self.view().max_space_for_new_record()
     }
 
     /// Whether `slotid`'s record can be rewritten with `len` bytes in this page (engine `spage_is_updatable`).
@@ -371,7 +422,7 @@ impl<'a> SpageEditor<'a> {
         self.live(slotid).is_some_and(|s| {
             len <= self.max_record_size()
                 && (len + self.waste(len)) as i32 - (s.length + self.waste(s.length)) as i32
-                    <= self.h(H_TOTAL_FREE)
+                    <= self.h().total_free.get()
         })
     }
 
@@ -389,37 +440,40 @@ impl<'a> SpageEditor<'a> {
             self.area[s.offset..s.offset + rec.len()].copy_from_slice(rec);
             s.length = rec.len();
             self.set_slot(slotid, s);
-            self.add_h(H_TOTAL_FREE, -space);
+            let h = self.h_mut();
+            h.total_free -= space;
             if at_end {
-                self.add_h(H_CONT_FREE, -space);
-                self.add_h(H_OFFSET_TO_FREE_AREA, space);
+                h.cont_free -= space;
+                h.offset_to_free_area += space;
             }
             return Ok(());
         }
         let mut space = space;
-        if self.at_end(s) && space <= self.h(H_CONT_FREE) {
+        if self.at_end(s) && space <= self.h().cont_free.get() {
             // give the record's own bytes back to the free area, then append
             let give = (old_w + s.length) as i32;
-            self.add_h(H_TOTAL_FREE, give);
-            self.add_h(H_CONT_FREE, give);
-            self.add_h(H_OFFSET_TO_FREE_AREA, -give);
+            let h = self.h_mut();
+            h.total_free += give;
+            h.cont_free += give;
+            h.offset_to_free_area -= give;
             space = (rec.len() + new_w) as i32;
-        } else if (rec.len() + new_w) as i32 > self.h(H_CONT_FREE) {
+        } else if (rec.len() + new_w) as i32 > self.h().cont_free.get() {
             let old = s;
             s.offset = SPAGE_EMPTY_OFFSET;
             self.set_slot(slotid, s);
-            self.add_h(H_TOTAL_FREE, (old_w + old.length) as i32);
-            self.add_h(H_NUM_RECORDS, -1);
+            let freed = (old_w + old.length) as i32;
+            self.h_mut().total_free += freed;
+            self.h_mut().num_records -= 1;
             if self.compact().is_err() {
                 self.set_slot(slotid, old);
-                self.add_h(H_TOTAL_FREE, -((old_w + old.length) as i32));
-                self.add_h(H_NUM_RECORDS, 1);
+                self.h_mut().total_free -= freed;
+                self.h_mut().num_records += 1;
                 return Err(SpageError::Corrupt);
             }
-            self.add_h(H_NUM_RECORDS, 1);
+            self.h_mut().num_records += 1;
             space = (rec.len() + new_w) as i32;
         }
-        let at = self.h(H_OFFSET_TO_FREE_AREA) as usize;
+        let at = self.h().offset_to_free_area.get() as usize;
         if at + rec.len() > self.area.len() {
             return Err(SpageError::Corrupt);
         }
@@ -432,9 +486,10 @@ impl<'a> SpageEditor<'a> {
                 rtype: s.rtype,
             },
         );
-        self.add_h(H_TOTAL_FREE, -space);
-        self.add_h(H_CONT_FREE, -((rec.len() + new_w) as i32));
-        self.add_h(H_OFFSET_TO_FREE_AREA, (rec.len() + new_w) as i32);
+        let h = self.h_mut();
+        h.total_free -= space;
+        h.cont_free -= (rec.len() + new_w) as i32;
+        h.offset_to_free_area += (rec.len() + new_w) as i32;
         Ok(())
     }
 
@@ -450,11 +505,11 @@ impl<'a> SpageEditor<'a> {
     /// end. Returns the slot id.
     pub fn insert(&mut self, rtype: RecordType, rec: &[u8]) -> Result<usize, SpageError> {
         let space0 = rec.len() + self.waste(rec.len());
-        if rec.len() > self.max_record_size() || space0 as i32 > self.h(H_TOTAL_FREE) {
+        if rec.len() > self.max_record_size() || space0 as i32 > self.h().total_free.get() {
             return Err(SpageError::DoesntFit);
         }
         let n = self.num_slots();
-        let slotid = if self.h(H_NUM_SLOTS) == self.h(H_NUM_RECORDS) {
+        let slotid = if self.h().num_slots == self.h().num_records {
             n
         } else {
             (0..n)
@@ -464,17 +519,17 @@ impl<'a> SpageEditor<'a> {
         let mut space = space0;
         if slotid == n {
             space += SPAGE_SLOT_SIZE;
-            if space as i32 > self.h(H_TOTAL_FREE) {
+            if space as i32 > self.h().total_free.get() {
                 return Err(SpageError::DoesntFit);
             }
         }
-        if space as i32 > self.h(H_CONT_FREE) {
+        if space as i32 > self.h().cont_free.get() {
             self.compact()?;
         }
         if slotid == n {
-            self.add_h(H_NUM_SLOTS, 1);
+            self.h_mut().num_slots += 1;
         }
-        let at = self.h(H_OFFSET_TO_FREE_AREA) as usize;
+        let at = self.h().offset_to_free_area.get() as usize;
         self.area[at..at + rec.len()].copy_from_slice(rec);
         self.set_slot(
             slotid,
@@ -484,10 +539,11 @@ impl<'a> SpageEditor<'a> {
                 rtype: rtype as u32,
             },
         );
-        self.add_h(H_NUM_RECORDS, 1);
-        self.add_h(H_TOTAL_FREE, -(space as i32));
-        self.add_h(H_CONT_FREE, -(space as i32));
-        self.add_h(H_OFFSET_TO_FREE_AREA, space0 as i32);
+        let h = self.h_mut();
+        h.num_records += 1;
+        h.total_free -= space as i32;
+        h.cont_free -= space as i32;
+        h.offset_to_free_area += space0 as i32;
         Ok(slotid)
     }
 
@@ -497,23 +553,25 @@ impl<'a> SpageEditor<'a> {
     pub fn delete(&mut self, slotid: usize) -> Result<(), SpageError> {
         let s = self.live(slotid).ok_or(SpageError::NoRecord)?;
         let free = (s.length + self.waste(s.length)) as i32;
-        self.add_h(H_NUM_RECORDS, -1);
-        self.add_h(H_TOTAL_FREE, free);
-        if self.at_end(s) {
-            self.add_h(H_CONT_FREE, free);
-            self.add_h(H_OFFSET_TO_FREE_AREA, -free);
+        let at_end = self.at_end(s);
+        let h = self.h_mut();
+        h.num_records -= 1;
+        h.total_free += free;
+        if at_end {
+            h.cont_free += free;
+            h.offset_to_free_area -= free;
         }
         let empty = |rtype| Slot {
             offset: SPAGE_EMPTY_OFFSET,
             length: 0,
             rtype,
         };
-        match self.h(H_ANCHOR) {
+        match self.h().anchor_type.get() {
             1 => self.set_slot(slotid, empty(RecordType::DeletedWillReuse as u32)),
             2 => self.set_slot(slotid, empty(RecordType::MarkDeleted as u32)),
-            3 | 4 => {
+            anchor @ (3 | 4) => {
                 let last = self.num_slots() - 1;
-                if self.h(H_ANCHOR) == 3 {
+                if anchor == 3 {
                     let l = self.slot(last);
                     self.set_slot(slotid, l);
                 } else {
@@ -523,9 +581,10 @@ impl<'a> SpageEditor<'a> {
                     }
                 }
                 self.set_slot(last, empty(RecordType::Unknown as u32));
-                self.add_h(H_NUM_SLOTS, -1);
-                self.add_h(H_TOTAL_FREE, SPAGE_SLOT_SIZE as i32);
-                self.add_h(H_CONT_FREE, SPAGE_SLOT_SIZE as i32);
+                let h = self.h_mut();
+                h.num_slots -= 1;
+                h.total_free += SPAGE_SLOT_SIZE as i32;
+                h.cont_free += SPAGE_SLOT_SIZE as i32;
             }
             _ => return Err(SpageError::Corrupt),
         }
@@ -537,8 +596,10 @@ impl<'a> SpageEditor<'a> {
     /// `num_records` change, so a [`Self::compact`] usually follows.
     pub fn vacuum_slot(&mut self, slotid: usize, reusable: bool) -> Result<(), SpageError> {
         let mut s = self.live(slotid).ok_or(SpageError::NoRecord)?;
-        self.add_h(H_NUM_RECORDS, -1);
-        self.add_h(H_TOTAL_FREE, (s.length + self.waste(s.length)) as i32);
+        let freed = (s.length + self.waste(s.length)) as i32;
+        let h = self.h_mut();
+        h.num_records -= 1;
+        h.total_free += freed;
         s.offset = SPAGE_EMPTY_OFFSET;
         s.rtype = if reusable {
             RecordType::DeletedWillReuse
@@ -555,7 +616,7 @@ impl<'a> SpageEditor<'a> {
         let mut live: Vec<usize> = (0..n)
             .filter(|&i| self.slot(i).offset != SPAGE_EMPTY_OFFSET)
             .collect();
-        if live.len() != self.h(H_NUM_RECORDS) as usize {
+        if live.len() != self.h().num_records.get() as usize {
             return Err(SpageError::Corrupt);
         }
         live.sort_by_key(|&i| self.slot(i).offset);
@@ -576,26 +637,29 @@ impl<'a> SpageEditor<'a> {
         }
         to = align_up(to, a);
         let free = (self.area.len() - to - n * SPAGE_SLOT_SIZE) as i32;
-        self.set_h(H_TOTAL_FREE, free);
-        self.set_h(H_CONT_FREE, free);
-        self.set_h(H_OFFSET_TO_FREE_AREA, to as i32);
+        let h = self.h_mut();
+        h.total_free.set(free);
+        h.cont_free.set(free);
+        h.offset_to_free_area.set(to as i32);
         Ok(())
     }
 
     /// Clears 11.4's `need_update_best_hint` header bit, which develop treats as a reserved bit that
     /// `spage_initialize` writes as 0 (R1 § 3 R3). Returns whether it was set.
     pub fn clear_need_update_best_hint(&mut self) -> bool {
-        let w = get_u32(self.area, H_BITS);
-        put_u32(self.area, H_BITS, w & !NEED_UPDATE_BEST_HINT);
+        let bits = &mut self.h_mut().bits;
+        let w = bits.get();
+        bits.set(w & !NEED_UPDATE_BEST_HINT);
         w & NEED_UPDATE_BEST_HINT != 0
     }
 
-    /// Header counters (`total_free`, `cont_free`, `offset_to_free_area`) as stored.
-    pub fn free_counters(&self) -> (i32, i32, i32) {
-        (
-            self.h(H_TOTAL_FREE),
-            self.h(H_CONT_FREE),
-            self.h(H_OFFSET_TO_FREE_AREA),
-        )
+    /// Header free-space counters as stored.
+    pub fn free_counters(&self) -> FreeCounters {
+        let h = self.h();
+        FreeCounters {
+            total_free: h.total_free.get(),
+            cont_free: h.cont_free.get(),
+            offset_to_free_area: h.offset_to_free_area.get(),
+        }
     }
 }

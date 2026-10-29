@@ -13,15 +13,36 @@
 use std::io;
 
 use crate::file_header::{FileDescriptor, FileHeader};
-use crate::le_field::{get_i16, get_u64};
+use zerocopy::little_endian::{I16, U64};
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
+
+use crate::Vfid;
+use crate::ids::VpidLe;
 use crate::log_header::LogHeader;
 use crate::page::db_area;
 use crate::record::heap_chain::{FLAG_VACUUM_STATUS_MASK, HeapChain};
 use crate::volume_set::VolumeSet;
-use crate::{Vfid, Vpid};
 
-/// Offset of `data[0].oldest_visible_mvccid` in a vacuum data page.
-const FIRST_ENTRY_OLDEST_VISIBLE: usize = 16 + 16;
+/// Engine `struct vacuum_data_page` up to its first entry.
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct VacuumDataPageLe {
+    next_page: VpidLe,
+    index_unvacuumed: I16,
+    index_free: I16,
+    pad: [u8; 4],
+    first: VacuumDataEntryLe,
+}
+
+/// Engine `struct vacuum_data_entry`.
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct VacuumDataEntryLe {
+    blockid: U64,
+    start_lsa: U64,
+    oldest_visible_mvccid: U64,
+    newest_mvccid: U64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VacuumHorizon {
@@ -49,7 +70,10 @@ impl VacuumHorizon {
         };
         let page = vs.read_page(vpid_first)?;
         let area = db_area(&page);
-        let empty = Vpid::read(area, 0).is_null() && get_i16(area, 8) == get_i16(area, 10);
+        let vdp = VacuumDataPageLe::ref_from_prefix(area)
+            .expect("a page holds the vacuum data page header")
+            .0;
+        let empty = vdp.next_page.get().is_null() && vdp.index_unvacuumed == vdp.index_free;
         let oldest_visible = if log.does_block_need_vacuum {
             log.oldest_visible_mvccid
         } else {
@@ -59,7 +83,7 @@ impl VacuumHorizon {
             oldest_unvacuumed: if empty {
                 oldest_visible
             } else {
-                get_u64(area, FIRST_ENTRY_OLDEST_VISIBLE)
+                vdp.first.oldest_visible_mvccid.get()
             },
             pending: !empty || log.does_block_need_vacuum,
         })

@@ -8,7 +8,11 @@
 
 use crate::Oid;
 use crate::Vpid;
-use crate::le_field::{get_u32, get_u64, put_u32, put_u64};
+use zerocopy::little_endian::{U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::ids::{OidLe, VpidLe};
+use crate::record::heap_hdr_stats::HeapHdrStatsHeadLe;
 
 /// Engine `HEAP_PAGE_FLAG_BESTSPACE` (develop only): the page holds bestspace entries, not records.
 pub const FLAG_BESTSPACE: u32 = 0x1;
@@ -35,22 +39,26 @@ impl HeapChain {
 
     /// Decodes slot 0 of a data page; `None` if the record is not 40 bytes (then it is the header page's stats).
     pub fn read(rec: &[u8]) -> Option<HeapChain> {
-        (rec.len() == Self::SIZE).then(|| HeapChain {
-            class_oid: Oid::read(rec, 0),
-            prev_vpid: Vpid::read(rec, 8),
-            next_vpid: Vpid::read(rec, 16),
-            max_mvccid: get_u64(rec, 24),
-            flags: get_u32(rec, 32),
+        let c = HeapChainLe::ref_from_bytes(rec).ok()?;
+        Some(HeapChain {
+            class_oid: c.class_oid.get(),
+            prev_vpid: c.prev_vpid.get(),
+            next_vpid: c.next_vpid.get(),
+            max_mvccid: c.max_mvccid.get(),
+            flags: c.flags.get(),
         })
     }
 
     pub fn write(&self, rec: &mut [u8]) {
-        self.class_oid.write(rec, 0);
-        self.prev_vpid.write(rec, 8);
-        self.next_vpid.write(rec, 16);
-        put_u64(rec, 24, self.max_mvccid);
-        put_u32(rec, 32, self.flags);
-        put_u32(rec, 36, 0);
+        let le = HeapChainLe {
+            class_oid: self.class_oid.into(),
+            prev_vpid: self.prev_vpid.into(),
+            next_vpid: self.next_vpid.into(),
+            max_mvccid: self.max_mvccid.into(),
+            flags: self.flags.into(),
+            pad: [0; 4],
+        };
+        le.write_to_prefix(rec).expect("slot 0 holds HEAP_CHAIN");
     }
 
     pub fn is_bestspace(&self) -> bool {
@@ -60,5 +68,18 @@ impl HeapChain {
 
 /// The header page's link to the first data page: `HEAP_HDR_STATS.next_vpid` @16 (11.4 and develop).
 pub fn header_next_vpid(stats: &[u8]) -> Vpid {
-    Vpid::read(stats, 16)
+    HeapHdrStatsHeadLe::of(stats).next_vpid.get()
 }
+
+/// [`HeapChain`] as stored.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct HeapChainLe {
+    class_oid: OidLe,
+    prev_vpid: VpidLe,
+    next_vpid: VpidLe,
+    max_mvccid: U64,
+    flags: U32,
+    pad: [u8; 4],
+}
+const _: () = assert!(size_of::<HeapChainLe>() == HeapChain::SIZE);

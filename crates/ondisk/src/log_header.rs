@@ -9,11 +9,13 @@
 //! `dummy3`/`dummy4` at +94 (R8 § 2.14, gdb `ptype /o` per install; checked on a createdb `_lgat` of 10.2.18,
 //! 11.0.16, 11.2.9 and 11.3.6, workspace#522). [`read_source`] decodes either layout.
 
-use crate::le_field::{
-    get_f32, get_i16, get_i32, get_i64, get_u16, put_f32, put_i16, put_i32, put_i64, put_u16,
-};
+use std::mem::offset_of;
+
+use zerocopy::little_endian::{F32, I16, I32, I64, U16, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
 use crate::log_page::LOG_PAGE_HEADER_SIZE;
-use crate::lsa::Lsa;
+use crate::lsa::{Lsa, LsaLe};
 use crate::source_version::{HeaderLayout, SourceVersion};
 use crate::value::{DecodeError, DecodeResult};
 
@@ -24,60 +26,111 @@ pub const LOG_HEADER_SIZE: usize = 384;
 /// `sizeof (LOG_HEADER)` in 10.2..11.3.
 pub const LOG_HEADER_SIZE_BEFORE_11_4: usize = 376;
 /// Engine `REL_MAX_RELEASE_LENGTH`.
-const DB_RELEASE_LEN: usize = 15;
+pub(crate) const DB_RELEASE_LEN: usize = 15;
 /// Engine `MAXLOGNAME`.
 const PREFIX_NAME_LEN: usize = 18;
 /// `bkinfo[FILEIO_BACKUP_UNDEFINED_LEVEL]`, 3 × 32 B, kept as raw bytes.
 const BKINFO_LEN: usize = 96;
 
-/// Field offsets inside `LOG_HEADER` (add [`LOG_PAGE_HEADER_SIZE`] for the file offset).
-pub mod off {
-    pub const MAGIC: usize = 0;
-    pub const CDC_ARV_NUM_TO_KEEP: usize = 28;
-    pub const DB_CREATION: usize = 32;
-    pub const VOL_CREATION: usize = 40;
-    pub const DB_RELEASE: usize = 48;
-    pub const DB_COMPATIBILITY: usize = 64;
-    pub const DB_IOPAGESIZE: usize = 68;
-    pub const DB_LOGPAGESIZE: usize = 70;
-    pub const IS_SHUTDOWN: usize = 72;
-    pub const NEXT_TRID: usize = 76;
-    pub const MVCC_NEXT_ID: usize = 80;
-    pub const AVG_NTRANS: usize = 88;
-    pub const AVG_NLOCKS: usize = 92;
-    pub const NPAGES: usize = 96;
-    pub const DB_CHARSET: usize = 100;
-    pub const WAS_COPIED: usize = 101;
-    pub const SYSMETA_VERSION: usize = 102;
-    pub const FPAGEID: usize = 104;
-    pub const APPEND_LSA: usize = 112;
-    pub const CHKPT_LSA: usize = 120;
-    pub const NXARV_PAGEID: usize = 128;
-    pub const NXARV_PHY_PAGEID: usize = 136;
-    pub const NXARV_NUM: usize = 140;
-    pub const LAST_ARV_NUM_FOR_SYSCRASHES: usize = 144;
-    pub const LAST_DELETED_ARV_NUM: usize = 148;
-    pub const BKUP_LEVEL0_LSA: usize = 152;
-    pub const BKUP_LEVEL1_LSA: usize = 160;
-    pub const BKUP_LEVEL2_LSA: usize = 168;
-    pub const PREFIX_NAME: usize = 176;
-    pub const HAS_LOGGING_BEEN_SKIPPED: usize = 194;
-    pub const VACUUM_LAST_BLOCKID: usize = 200;
-    pub const PERM_STATUS_OBSOLETE: usize = 208;
-    pub const BKINFO: usize = 216;
-    pub const HA_SERVER_STATE: usize = 312;
-    pub const HA_FILE_STATUS: usize = 316;
-    pub const EOF_LSA: usize = 320;
-    pub const SMALLEST_LSA_AT_LAST_CHKPT: usize = 328;
-    pub const MVCC_OP_LOG_LSA: usize = 336;
-    pub const OLDEST_VISIBLE_MVCCID: usize = 344;
-    pub const NEWEST_BLOCK_MVCCID: usize = 352;
-    pub const HA_PROMOTION_TIME: usize = 360;
-    pub const DB_RESTORE_TIME: usize = 368;
-    pub const MARK_WILL_DEL: usize = 376;
-    pub const DOES_BLOCK_NEED_VACUUM: usize = 377;
-    pub const WAS_ACTIVE_LOG_RESET: usize = 378;
+/// Engine `LOG_HEADER` as stored, after the log page header (add [`LOG_PAGE_HEADER_SIZE`] for the file offset).
+/// Bytes 102..104 are `sysmeta_version` in develop and `dummy3`/`dummy4` (0) in 11.4; nothing else differs.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+pub struct LogHeaderLe {
+    /// @0, `CUBRID_MAGIC_MAX_LENGTH` = 25.
+    pub magic: [u8; 25],
+    pad0: [u8; 3],
+    /// @28
+    pub cdc_arv_num_to_keep: I32,
+    /// @32
+    pub db_creation: I64,
+    /// @40
+    pub vol_creation: I64,
+    /// @48
+    pub db_release: [u8; DB_RELEASE_LEN],
+    pad1: u8,
+    /// @64
+    pub db_compatibility: F32,
+    /// @68
+    pub db_iopagesize: I16,
+    /// @70
+    pub db_logpagesize: I16,
+    /// @72
+    pub is_shutdown: u8,
+    pad2: [u8; 3],
+    /// @76
+    pub next_trid: I32,
+    /// @80
+    pub mvcc_next_id: U64,
+    /// @88
+    pub avg_ntrans: I32,
+    /// @92
+    pub avg_nlocks: I32,
+    /// @96
+    pub npages: I32,
+    /// @100
+    pub db_charset: i8,
+    /// @101
+    pub was_copied: u8,
+    /// @102
+    pub sysmeta_version: U16,
+    /// @104
+    pub fpageid: I64,
+    /// @112
+    pub append_lsa: LsaLe,
+    /// @120
+    pub chkpt_lsa: LsaLe,
+    /// @128
+    pub nxarv_pageid: I64,
+    /// @136
+    pub nxarv_phy_pageid: I32,
+    /// @140
+    pub nxarv_num: I32,
+    /// @144
+    pub last_arv_num_for_syscrashes: I32,
+    /// @148
+    pub last_deleted_arv_num: I32,
+    /// @152, levels 0..2.
+    pub bkup_level_lsa: [LsaLe; 3],
+    /// @176
+    pub prefix_name: [u8; PREFIX_NAME_LEN],
+    /// @194
+    pub has_logging_been_skipped: u8,
+    pad3: [u8; 5],
+    /// @200
+    pub vacuum_last_blockid: I64,
+    /// @208
+    pub perm_status_obsolete: I32,
+    pad4: [u8; 4],
+    /// @216
+    pub bkinfo: [u8; BKINFO_LEN],
+    /// @312
+    pub ha_server_state: I32,
+    /// @316
+    pub ha_file_status: I32,
+    /// @320
+    pub eof_lsa: LsaLe,
+    /// @328
+    pub smallest_lsa_at_last_chkpt: LsaLe,
+    /// @336
+    pub mvcc_op_log_lsa: LsaLe,
+    /// @344
+    pub oldest_visible_mvccid: U64,
+    /// @352
+    pub newest_block_mvccid: U64,
+    /// @360
+    pub ha_promotion_time: I64,
+    /// @368
+    pub db_restore_time: I64,
+    /// @376
+    pub mark_will_del: u8,
+    /// @377
+    pub does_block_need_vacuum: u8,
+    /// @378
+    pub was_active_log_reset: u8,
+    pad5: [u8; 5],
 }
+const _: () = assert!(size_of::<LogHeaderLe>() == LOG_HEADER_SIZE);
 
 /// Engine `LOG_HEADER`, every field. Padding is not kept; [`LogHeader::write`] zeroes it.
 #[derive(Clone, Debug, PartialEq)]
@@ -145,7 +198,7 @@ fn put_cstr(buf: &mut [u8], s: &str) {
 /// Decodes a source's header in the layout its release wrote, with the [`SourceVersion`] the header names. Refuses a
 /// page shorter than its layout or whose magic is not [`MAGIC`].
 pub fn read_source(page: &[u8]) -> DecodeResult<(SourceVersion, LogHeader)> {
-    let magic_at = LOG_PAGE_HEADER_SIZE + off::MAGIC;
+    let magic_at = LOG_PAGE_HEADER_SIZE + offset_of!(LogHeaderLe, magic);
     if page.get(magic_at..magic_at + MAGIC.len()) != Some(MAGIC.as_bytes()) {
         return Err(DecodeError {
             at: magic_at,
@@ -167,7 +220,7 @@ pub fn read_source(page: &[u8]) -> DecodeResult<(SourceVersion, LogHeader)> {
         HeaderLayout::Since11_4 => LogHeader::read(area),
         HeaderLayout::Before11_4 => {
             // the 376 B layout is the 384 B one without vol_creation: open its 8 B again and decode the result
-            let gap = LOG_PAGE_HEADER_SIZE + off::VOL_CREATION;
+            let gap = LOG_PAGE_HEADER_SIZE + offset_of!(LogHeaderLe, vol_creation);
             let mut wide = vec![0u8; LOG_PAGE_HEADER_SIZE + LOG_HEADER_SIZE];
             wide[..gap].copy_from_slice(&area[..gap]);
             wide[gap + 8..].copy_from_slice(&area[gap..]);
@@ -183,134 +236,112 @@ pub fn read_source(page: &[u8]) -> DecodeResult<(SourceVersion, LogHeader)> {
 impl LogHeader {
     /// Decodes the 384 B header (11.4, develop) from the active log's header page (whole log page).
     pub fn read(page: &[u8]) -> Self {
-        let h = &page[LOG_PAGE_HEADER_SIZE..LOG_PAGE_HEADER_SIZE + LOG_HEADER_SIZE];
-        let mut bkinfo = [0u8; BKINFO_LEN];
-        bkinfo.copy_from_slice(&h[off::BKINFO..off::BKINFO + BKINFO_LEN]);
+        let h = LogHeaderLe::ref_from_prefix(&page[LOG_PAGE_HEADER_SIZE..])
+            .expect("a log page holds the header")
+            .0;
         LogHeader {
-            magic: cstr(&h[off::MAGIC..off::MAGIC + 25]),
-            cdc_arv_num_to_keep: get_i32(h, off::CDC_ARV_NUM_TO_KEEP),
-            db_creation: get_i64(h, off::DB_CREATION),
-            vol_creation: Some(get_i64(h, off::VOL_CREATION)),
-            db_release: cstr(&h[off::DB_RELEASE..off::DB_RELEASE + DB_RELEASE_LEN]),
-            db_compatibility: get_f32(h, off::DB_COMPATIBILITY),
-            db_iopagesize: get_i16(h, off::DB_IOPAGESIZE),
-            db_logpagesize: get_i16(h, off::DB_LOGPAGESIZE),
-            is_shutdown: h[off::IS_SHUTDOWN] != 0,
-            next_trid: get_i32(h, off::NEXT_TRID),
-            mvcc_next_id: get_i64(h, off::MVCC_NEXT_ID) as u64,
-            avg_ntrans: get_i32(h, off::AVG_NTRANS),
-            avg_nlocks: get_i32(h, off::AVG_NLOCKS),
-            npages: get_i32(h, off::NPAGES),
-            db_charset: h[off::DB_CHARSET] as i8,
-            was_copied: h[off::WAS_COPIED] != 0,
-            sysmeta_version: get_u16(h, off::SYSMETA_VERSION),
-            fpageid: get_i64(h, off::FPAGEID),
-            append_lsa: Lsa::read(h, off::APPEND_LSA),
-            chkpt_lsa: Lsa::read(h, off::CHKPT_LSA),
-            nxarv_pageid: get_i64(h, off::NXARV_PAGEID),
-            nxarv_phy_pageid: get_i32(h, off::NXARV_PHY_PAGEID),
-            nxarv_num: get_i32(h, off::NXARV_NUM),
-            last_arv_num_for_syscrashes: get_i32(h, off::LAST_ARV_NUM_FOR_SYSCRASHES),
-            last_deleted_arv_num: get_i32(h, off::LAST_DELETED_ARV_NUM),
-            bkup_level_lsa: [
-                Lsa::read(h, off::BKUP_LEVEL0_LSA),
-                Lsa::read(h, off::BKUP_LEVEL1_LSA),
-                Lsa::read(h, off::BKUP_LEVEL2_LSA),
-            ],
-            prefix_name: cstr(&h[off::PREFIX_NAME..off::PREFIX_NAME + PREFIX_NAME_LEN]),
-            has_logging_been_skipped: h[off::HAS_LOGGING_BEEN_SKIPPED] != 0,
-            vacuum_last_blockid: get_i64(h, off::VACUUM_LAST_BLOCKID),
-            perm_status_obsolete: get_i32(h, off::PERM_STATUS_OBSOLETE),
-            bkinfo,
-            ha_server_state: get_i32(h, off::HA_SERVER_STATE),
-            ha_file_status: get_i32(h, off::HA_FILE_STATUS),
-            eof_lsa: Lsa::read(h, off::EOF_LSA),
-            smallest_lsa_at_last_chkpt: Lsa::read(h, off::SMALLEST_LSA_AT_LAST_CHKPT),
-            mvcc_op_log_lsa: Lsa::read(h, off::MVCC_OP_LOG_LSA),
-            oldest_visible_mvccid: get_i64(h, off::OLDEST_VISIBLE_MVCCID) as u64,
-            newest_block_mvccid: get_i64(h, off::NEWEST_BLOCK_MVCCID) as u64,
-            ha_promotion_time: get_i64(h, off::HA_PROMOTION_TIME),
-            db_restore_time: get_i64(h, off::DB_RESTORE_TIME),
-            mark_will_del: h[off::MARK_WILL_DEL] != 0,
-            does_block_need_vacuum: h[off::DOES_BLOCK_NEED_VACUUM] != 0,
-            was_active_log_reset: h[off::WAS_ACTIVE_LOG_RESET] != 0,
+            magic: cstr(&h.magic),
+            cdc_arv_num_to_keep: h.cdc_arv_num_to_keep.get(),
+            db_creation: h.db_creation.get(),
+            vol_creation: Some(h.vol_creation.get()),
+            db_release: cstr(&h.db_release),
+            db_compatibility: h.db_compatibility.get(),
+            db_iopagesize: h.db_iopagesize.get(),
+            db_logpagesize: h.db_logpagesize.get(),
+            is_shutdown: h.is_shutdown != 0,
+            next_trid: h.next_trid.get(),
+            mvcc_next_id: h.mvcc_next_id.get(),
+            avg_ntrans: h.avg_ntrans.get(),
+            avg_nlocks: h.avg_nlocks.get(),
+            npages: h.npages.get(),
+            db_charset: h.db_charset,
+            was_copied: h.was_copied != 0,
+            sysmeta_version: h.sysmeta_version.get(),
+            fpageid: h.fpageid.get(),
+            append_lsa: h.append_lsa.get(),
+            chkpt_lsa: h.chkpt_lsa.get(),
+            nxarv_pageid: h.nxarv_pageid.get(),
+            nxarv_phy_pageid: h.nxarv_phy_pageid.get(),
+            nxarv_num: h.nxarv_num.get(),
+            last_arv_num_for_syscrashes: h.last_arv_num_for_syscrashes.get(),
+            last_deleted_arv_num: h.last_deleted_arv_num.get(),
+            bkup_level_lsa: h.bkup_level_lsa.map(|l| l.get()),
+            prefix_name: cstr(&h.prefix_name),
+            has_logging_been_skipped: h.has_logging_been_skipped != 0,
+            vacuum_last_blockid: h.vacuum_last_blockid.get(),
+            perm_status_obsolete: h.perm_status_obsolete.get(),
+            bkinfo: h.bkinfo,
+            ha_server_state: h.ha_server_state.get(),
+            ha_file_status: h.ha_file_status.get(),
+            eof_lsa: h.eof_lsa.get(),
+            smallest_lsa_at_last_chkpt: h.smallest_lsa_at_last_chkpt.get(),
+            mvcc_op_log_lsa: h.mvcc_op_log_lsa.get(),
+            oldest_visible_mvccid: h.oldest_visible_mvccid.get(),
+            newest_block_mvccid: h.newest_block_mvccid.get(),
+            ha_promotion_time: h.ha_promotion_time.get(),
+            db_restore_time: h.db_restore_time.get(),
+            mark_will_del: h.mark_will_del != 0,
+            does_block_need_vacuum: h.does_block_need_vacuum != 0,
+            was_active_log_reset: h.was_active_log_reset != 0,
         }
     }
 
     /// Encodes every field into the header area of `page` (bytes 16..400), padding zeroed. The log page header and
     /// checksum are left to [`crate::log_page`].
     pub fn write(&self, page: &mut [u8]) {
-        let h = &mut page[LOG_PAGE_HEADER_SIZE..LOG_PAGE_HEADER_SIZE + LOG_HEADER_SIZE];
-        h.fill(0);
-        put_cstr(&mut h[off::MAGIC..off::MAGIC + 25], &self.magic);
-        put_i32(h, off::CDC_ARV_NUM_TO_KEEP, self.cdc_arv_num_to_keep);
-        put_i64(h, off::DB_CREATION, self.db_creation);
-        let vol_creation = self
-            .vol_creation
-            .expect("the tool writes the 384 B layout only");
-        put_i64(h, off::VOL_CREATION, vol_creation);
-        put_cstr(
-            &mut h[off::DB_RELEASE..off::DB_RELEASE + DB_RELEASE_LEN],
-            &self.db_release,
+        let h = LogHeaderLe::mut_from_prefix(&mut page[LOG_PAGE_HEADER_SIZE..])
+            .expect("a log page holds the header")
+            .0;
+        h.as_mut_bytes().fill(0);
+        put_cstr(&mut h.magic, &self.magic);
+        h.cdc_arv_num_to_keep.set(self.cdc_arv_num_to_keep);
+        h.db_creation.set(self.db_creation);
+        h.vol_creation.set(
+            self.vol_creation
+                .expect("the tool writes the 384 B layout only"),
         );
-        put_f32(h, off::DB_COMPATIBILITY, self.db_compatibility);
-        put_i16(h, off::DB_IOPAGESIZE, self.db_iopagesize);
-        put_i16(h, off::DB_LOGPAGESIZE, self.db_logpagesize);
-        h[off::IS_SHUTDOWN] = self.is_shutdown as u8;
-        put_i32(h, off::NEXT_TRID, self.next_trid);
-        put_i64(h, off::MVCC_NEXT_ID, self.mvcc_next_id as i64);
-        put_i32(h, off::AVG_NTRANS, self.avg_ntrans);
-        put_i32(h, off::AVG_NLOCKS, self.avg_nlocks);
-        put_i32(h, off::NPAGES, self.npages);
-        h[off::DB_CHARSET] = self.db_charset as u8;
-        h[off::WAS_COPIED] = self.was_copied as u8;
-        put_u16(h, off::SYSMETA_VERSION, self.sysmeta_version);
-        put_i64(h, off::FPAGEID, self.fpageid);
-        self.append_lsa.write(h, off::APPEND_LSA);
-        self.chkpt_lsa.write(h, off::CHKPT_LSA);
-        put_i64(h, off::NXARV_PAGEID, self.nxarv_pageid);
-        put_i32(h, off::NXARV_PHY_PAGEID, self.nxarv_phy_pageid);
-        put_i32(h, off::NXARV_NUM, self.nxarv_num);
-        put_i32(
-            h,
-            off::LAST_ARV_NUM_FOR_SYSCRASHES,
-            self.last_arv_num_for_syscrashes,
-        );
-        put_i32(h, off::LAST_DELETED_ARV_NUM, self.last_deleted_arv_num);
-        for (i, o) in [
-            off::BKUP_LEVEL0_LSA,
-            off::BKUP_LEVEL1_LSA,
-            off::BKUP_LEVEL2_LSA,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            self.bkup_level_lsa[i].write(h, o);
+        put_cstr(&mut h.db_release, &self.db_release);
+        h.db_compatibility.set(self.db_compatibility);
+        h.db_iopagesize.set(self.db_iopagesize);
+        h.db_logpagesize.set(self.db_logpagesize);
+        h.is_shutdown = self.is_shutdown as u8;
+        h.next_trid.set(self.next_trid);
+        h.mvcc_next_id.set(self.mvcc_next_id);
+        h.avg_ntrans.set(self.avg_ntrans);
+        h.avg_nlocks.set(self.avg_nlocks);
+        h.npages.set(self.npages);
+        h.db_charset = self.db_charset;
+        h.was_copied = self.was_copied as u8;
+        h.sysmeta_version.set(self.sysmeta_version);
+        h.fpageid.set(self.fpageid);
+        h.append_lsa.set(self.append_lsa);
+        h.chkpt_lsa.set(self.chkpt_lsa);
+        h.nxarv_pageid.set(self.nxarv_pageid);
+        h.nxarv_phy_pageid.set(self.nxarv_phy_pageid);
+        h.nxarv_num.set(self.nxarv_num);
+        h.last_arv_num_for_syscrashes
+            .set(self.last_arv_num_for_syscrashes);
+        h.last_deleted_arv_num.set(self.last_deleted_arv_num);
+        for (le, lsa) in h.bkup_level_lsa.iter_mut().zip(self.bkup_level_lsa) {
+            le.set(lsa);
         }
-        put_cstr(
-            &mut h[off::PREFIX_NAME..off::PREFIX_NAME + PREFIX_NAME_LEN],
-            &self.prefix_name,
-        );
-        h[off::HAS_LOGGING_BEEN_SKIPPED] = self.has_logging_been_skipped as u8;
-        put_i64(h, off::VACUUM_LAST_BLOCKID, self.vacuum_last_blockid);
-        put_i32(h, off::PERM_STATUS_OBSOLETE, self.perm_status_obsolete);
-        h[off::BKINFO..off::BKINFO + BKINFO_LEN].copy_from_slice(&self.bkinfo);
-        put_i32(h, off::HA_SERVER_STATE, self.ha_server_state);
-        put_i32(h, off::HA_FILE_STATUS, self.ha_file_status);
-        self.eof_lsa.write(h, off::EOF_LSA);
-        self.smallest_lsa_at_last_chkpt
-            .write(h, off::SMALLEST_LSA_AT_LAST_CHKPT);
-        self.mvcc_op_log_lsa.write(h, off::MVCC_OP_LOG_LSA);
-        put_i64(
-            h,
-            off::OLDEST_VISIBLE_MVCCID,
-            self.oldest_visible_mvccid as i64,
-        );
-        put_i64(h, off::NEWEST_BLOCK_MVCCID, self.newest_block_mvccid as i64);
-        put_i64(h, off::HA_PROMOTION_TIME, self.ha_promotion_time);
-        put_i64(h, off::DB_RESTORE_TIME, self.db_restore_time);
-        h[off::MARK_WILL_DEL] = self.mark_will_del as u8;
-        h[off::DOES_BLOCK_NEED_VACUUM] = self.does_block_need_vacuum as u8;
-        h[off::WAS_ACTIVE_LOG_RESET] = self.was_active_log_reset as u8;
+        put_cstr(&mut h.prefix_name, &self.prefix_name);
+        h.has_logging_been_skipped = self.has_logging_been_skipped as u8;
+        h.vacuum_last_blockid.set(self.vacuum_last_blockid);
+        h.perm_status_obsolete.set(self.perm_status_obsolete);
+        h.bkinfo = self.bkinfo;
+        h.ha_server_state.set(self.ha_server_state);
+        h.ha_file_status.set(self.ha_file_status);
+        h.eof_lsa.set(self.eof_lsa);
+        h.smallest_lsa_at_last_chkpt
+            .set(self.smallest_lsa_at_last_chkpt);
+        h.mvcc_op_log_lsa.set(self.mvcc_op_log_lsa);
+        h.oldest_visible_mvccid.set(self.oldest_visible_mvccid);
+        h.newest_block_mvccid.set(self.newest_block_mvccid);
+        h.ha_promotion_time.set(self.ha_promotion_time);
+        h.db_restore_time.set(self.db_restore_time);
+        h.mark_will_del = self.mark_will_del as u8;
+        h.does_block_need_vacuum = self.does_block_need_vacuum as u8;
+        h.was_active_log_reset = self.was_active_log_reset as u8;
     }
 }

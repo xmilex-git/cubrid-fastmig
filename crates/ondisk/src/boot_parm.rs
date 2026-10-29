@@ -10,8 +10,10 @@
 
 use std::io;
 
-use crate::ids::{Ehid, Hfid, Oid, Vfid};
-use crate::le_field::{get_i16, get_i32, put_i16, put_i32};
+use zerocopy::little_endian::{I16, I32};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::ids::{Ehid, FileAndPageLe, Hfid, Oid, OidLe, Vfid, VfidLe};
 use crate::page::{db_area, db_area_mut};
 use crate::spage::{RecordType, SlottedPage, SpageEditor};
 use crate::volume_set::VolumeSet;
@@ -58,36 +60,67 @@ pub struct BootDbParm {
     pub tde_keyinfo_hfid: Hfid,
 }
 
+/// Engine `BOOT_DB_PARM` as stored, up to `dropped_files_vfid`: the whole 10.2 record; 11.0 and later append
+/// `tde_keyinfo_hfid` (an HFID).
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct BootDbParmLe {
+    trk_vfid: VfidLe,
+    hfid: FileAndPageLe,
+    rootclass_hfid: FileAndPageLe,
+    classname_table: FileAndPageLe,
+    ctid_vfid: VfidLe,
+    ctid_xhid: FileAndPageLe,
+    ctid_hpgid: I32,
+    query_vfid: VfidLe,
+    rootclass_name: [u8; 10],
+    pad: [u8; 2],
+    rootclass_oid: OidLe,
+    nvols: I16,
+    temp_nvols: I16,
+    last_volid: I16,
+    temp_last_volid: I16,
+    vacuum_log_block_npages: I32,
+    vacuum_data_vfid: VfidLe,
+    dropped_files_vfid: VfidLe,
+}
+const _: () = assert!(size_of::<BootDbParmLe>() == BOOT_DB_PARM_SIZE_10_2);
+const _: () = assert!(BOOT_DB_PARM_SIZE_10_2 + size_of::<FileAndPageLe>() == BOOT_DB_PARM_SIZE);
+
+fn le_mut(rec: &mut [u8]) -> &mut BootDbParmLe {
+    BootDbParmLe::mut_from_prefix(rec)
+        .expect("the record is a BOOT_DB_PARM")
+        .0
+}
+
 impl BootDbParm {
     pub fn decode(r: &[u8]) -> Self {
-        let name = &r[76..86];
+        let (p, rest) = BootDbParmLe::ref_from_prefix(r).expect("the record is a BOOT_DB_PARM");
+        let name = &p.rootclass_name;
         let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
         BootDbParm {
-            trk_vfid: Vfid::read(r, 0),
-            hfid: Hfid::read(r, 8),
-            rootclass_hfid: Hfid::read(r, 20),
-            classname_table: Ehid::read(r, 32),
+            trk_vfid: p.trk_vfid.get(),
+            hfid: p.hfid.get(),
+            rootclass_hfid: p.rootclass_hfid.get(),
+            classname_table: p.classname_table.get(),
             ctid: Ctid {
-                vfid: Vfid::read(r, 44),
-                xhid: Ehid::read(r, 52),
-                hpgid: get_i32(r, 64),
+                vfid: p.ctid_vfid.get(),
+                xhid: p.ctid_xhid.get(),
+                hpgid: p.ctid_hpgid.get(),
             },
-            query_vfid: Vfid::read(r, 68),
+            query_vfid: p.query_vfid.get(),
             rootclass_name: String::from_utf8_lossy(&name[..end]).into_owned(),
-            rootclass_oid: Oid::read(r, 88),
-            nvols: get_i16(r, 96),
-            temp_nvols: get_i16(r, 98),
-            last_volid: get_i16(r, 100),
-            temp_last_volid: get_i16(r, 102),
-            vacuum_log_block_npages: get_i32(r, 104),
-            vacuum_data_vfid: Vfid::read(r, 108),
-            dropped_files_vfid: Vfid::read(r, 116),
+            rootclass_oid: p.rootclass_oid.get(),
+            nvols: p.nvols.get(),
+            temp_nvols: p.temp_nvols.get(),
+            last_volid: p.last_volid.get(),
+            temp_last_volid: p.temp_last_volid.get(),
+            vacuum_log_block_npages: p.vacuum_log_block_npages.get(),
+            vacuum_data_vfid: p.vacuum_data_vfid.get(),
+            dropped_files_vfid: p.dropped_files_vfid.get(),
             // a 10.2 record ends before it
-            tde_keyinfo_hfid: if r.len() >= BOOT_DB_PARM_SIZE {
-                Hfid::read(r, 124)
-            } else {
-                Hfid::NULL
-            },
+            tde_keyinfo_hfid: FileAndPageLe::ref_from_prefix(rest)
+                .map_or(Hfid::NULL, |(h, _)| h.get()),
         }
     }
 
@@ -120,8 +153,9 @@ impl BootDbParm {
     /// (same record length, same slot).
     pub fn write_volume_counts(vols: &VolumeSet, nvols: i16, last_volid: i16) -> io::Result<()> {
         Self::update(vols, |rec| {
-            put_i16(rec, 96, nvols);
-            put_i16(rec, 100, last_volid);
+            let p = le_mut(rec);
+            p.nvols.set(nvols);
+            p.last_volid.set(last_volid);
         })
     }
 
@@ -129,8 +163,9 @@ impl BootDbParm {
     /// in place; `ctid.xhid` stays, develop never reads the catalog's extendible hash (workspace#492).
     pub fn write_ctid(vols: &VolumeSet, vfid: Vfid, hpgid: i32) -> io::Result<()> {
         Self::update(vols, |rec| {
-            vfid.write(rec, 44);
-            put_i32(rec, 64, hpgid);
+            let p = le_mut(rec);
+            p.ctid_vfid.set(vfid);
+            p.ctid_hpgid.set(hpgid);
         })
     }
 

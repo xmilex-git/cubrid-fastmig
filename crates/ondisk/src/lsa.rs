@@ -5,6 +5,9 @@
 //! one little-endian int64, pageid in the low 48 bits); `NULL_LSA` = pageid -1, offset -1 (all bytes 0xFF).
 //! Same in release/11.4 @46212adcd and develop @5b1867174; checked on T1 page headers (workspace#490).
 
+use zerocopy::little_endian::U64;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
 use crate::le_field::{get_u64, put_u64};
 
 /// Engine `LOG_LSA`.
@@ -56,5 +59,26 @@ impl Lsa {
 impl std::fmt::Display for Lsa {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}|{}", self.pageid, self.offset)
+    }
+}
+
+/// Engine `LOG_LSA` as it sits inside a fixed on-disk struct: one little-endian 64-bit word.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+pub struct LsaLe(U64);
+
+impl LsaLe {
+    pub fn get(&self) -> Lsa {
+        Lsa::from_u64(self.0.get())
+    }
+
+    pub fn set(&mut self, l: Lsa) {
+        self.0.set(l.to_u64());
+    }
+}
+
+impl From<Lsa> for LsaLe {
+    fn from(l: Lsa) -> Self {
+        LsaLe(l.to_u64().into())
     }
 }

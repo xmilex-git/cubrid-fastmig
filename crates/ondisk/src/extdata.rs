@@ -8,14 +8,27 @@
 
 use std::io;
 
-use crate::ids::Vpid;
-use crate::le_field::{get_i16, put_i16};
+use zerocopy::little_endian::I16;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::ids::{Vpid, VpidLe};
 use crate::page::IO_RESERVED_SIZE;
 use crate::volume_set::VolumeSet;
 
-/// Engine `FILE_EXTDATA_HEADER_ALIGNED_SIZE`: `vpid_next` @0, `max_size` i16 @8, `size_of_item` i16 @10,
-/// `n_items` i16 @12; items start at 16.
-pub const EXTDATA_HEADER_SIZE: usize = 16;
+/// Engine `FILE_EXTENSIBLE_DATA` header as stored (aligned to 16 B); items follow it.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct ExtdataHeaderLe {
+    vpid_next: VpidLe,
+    max_size: I16,
+    size_of_item: I16,
+    n_items: I16,
+    pad: [u8; 2],
+}
+
+/// Engine `FILE_EXTDATA_HEADER_ALIGNED_SIZE`: items start here.
+pub const EXTDATA_HEADER_SIZE: usize = size_of::<ExtdataHeaderLe>();
+const _: () = assert!(EXTDATA_HEADER_SIZE == 16);
 
 /// One component's header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,22 +44,27 @@ pub struct ExtdataHeader {
 impl ExtdataHeader {
     /// Reads the component at DB page offset `at` of `page` (whole IO page).
     pub fn read(page: &[u8], at: usize) -> Self {
-        let o = IO_RESERVED_SIZE + at;
+        let h = ExtdataHeaderLe::ref_from_prefix(&page[IO_RESERVED_SIZE + at..])
+            .expect("component inside the page")
+            .0;
         ExtdataHeader {
-            vpid_next: Vpid::read(page, o),
-            max_size: get_i16(page, o + 8),
-            size_of_item: get_i16(page, o + 10),
-            n_items: get_i16(page, o + 12),
+            vpid_next: h.vpid_next.get(),
+            max_size: h.max_size.get(),
+            size_of_item: h.size_of_item.get(),
+            n_items: h.n_items.get(),
         }
     }
 
     pub fn write(&self, page: &mut [u8], at: usize) {
-        let o = IO_RESERVED_SIZE + at;
-        self.vpid_next.write(page, o);
-        put_i16(page, o + 8, self.max_size);
-        put_i16(page, o + 10, self.size_of_item);
-        put_i16(page, o + 12, self.n_items);
-        put_i16(page, o + 14, 0);
+        let h = ExtdataHeaderLe {
+            vpid_next: self.vpid_next.into(),
+            max_size: self.max_size.into(),
+            size_of_item: self.size_of_item.into(),
+            n_items: self.n_items.into(),
+            pad: [0; 2],
+        };
+        h.write_to_prefix(&mut page[IO_RESERVED_SIZE + at..])
+            .expect("component inside the page");
     }
 
     /// Items the component can hold.

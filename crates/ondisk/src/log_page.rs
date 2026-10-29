@@ -7,8 +7,10 @@
 //! same in release/11.4 @46212adcd and develop @5b1867174; R5 § 2.7. Checksum checked on the T1 `_lgat` (workspace#490).
 
 use crate::crc32::crc32;
-use crate::le_field::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
-use crate::lsa::Lsa;
+use zerocopy::little_endian::{I16, I32, I64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::lsa::{Lsa, LsaLe};
 
 /// `sizeof (LOG_HDRPAGE)`; the page area (`LOG_PAGE::area`) starts here.
 pub const LOG_PAGE_HEADER_SIZE: usize = 16;
@@ -30,22 +32,47 @@ pub struct LogPageHeader {
     pub checksum: i32,
 }
 
+/// Engine `LOG_HDRPAGE` as stored at the start of every log page.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct LogPageHeaderLe {
+    logical_pageid: I64,
+    offset: I16,
+    flags: I16,
+    checksum: I32,
+}
+const _: () = assert!(size_of::<LogPageHeaderLe>() == LOG_PAGE_HEADER_SIZE);
+
+fn page_header(page: &[u8]) -> &LogPageHeaderLe {
+    LogPageHeaderLe::ref_from_prefix(page)
+        .expect("a log page holds its header")
+        .0
+}
+
+fn page_header_mut(page: &mut [u8]) -> &mut LogPageHeaderLe {
+    LogPageHeaderLe::mut_from_prefix(page)
+        .expect("a log page holds its header")
+        .0
+}
+
 impl LogPageHeader {
     pub fn read(page: &[u8]) -> Self {
+        let h = page_header(page);
         LogPageHeader {
-            logical_pageid: get_i64(page, 0),
-            offset: get_i16(page, 8),
-            flags: get_i16(page, 10),
-            checksum: get_i32(page, 12),
+            logical_pageid: h.logical_pageid.get(),
+            offset: h.offset.get(),
+            flags: h.flags.get(),
+            checksum: h.checksum.get(),
         }
     }
 
     /// Writes logical page id, offset and flags; the checksum is [`set_checksum`]'s.
     pub fn write(&self, page: &mut [u8]) {
-        put_i64(page, 0, self.logical_pageid);
-        put_i16(page, 8, self.offset);
-        put_i16(page, 10, self.flags);
-        put_i32(page, 12, self.checksum);
+        let h = page_header_mut(page);
+        h.logical_pageid.set(self.logical_pageid);
+        h.offset.set(self.offset);
+        h.flags.set(self.flags);
+        h.checksum.set(self.checksum);
     }
 }
 
@@ -65,11 +92,11 @@ pub fn compute_checksum(page: &[u8]) -> i32 {
 
 pub fn set_checksum(page: &mut [u8]) {
     let c = compute_checksum(page);
-    put_i32(page, 12, c);
+    page_header_mut(page).checksum.set(c);
 }
 
 pub fn checksum_ok(page: &[u8]) -> bool {
-    compute_checksum(page) == get_i32(page, 12)
+    compute_checksum(page) == page_header(page).checksum.get()
 }
 
 /// Engine `LOG_RECORD_HEADER`: `prev_tranlsa` @0, `back_lsa` @8, `forw_lsa` @16, `trid` i32 @24, `type` i32 @28.
@@ -96,20 +123,39 @@ impl LogRecordHeader {
     }
 
     pub fn read(buf: &[u8], off: usize) -> Self {
+        let h = LogRecordHeaderLe::ref_from_prefix(&buf[off..])
+            .expect("a log page holds the record header")
+            .0;
         LogRecordHeader {
-            prev_tranlsa: Lsa::read(buf, off),
-            back_lsa: Lsa::read(buf, off + 8),
-            forw_lsa: Lsa::read(buf, off + 16),
-            trid: get_i32(buf, off + 24),
-            rectype: get_i32(buf, off + 28),
+            prev_tranlsa: h.prev_tranlsa.get(),
+            back_lsa: h.back_lsa.get(),
+            forw_lsa: h.forw_lsa.get(),
+            trid: h.trid.get(),
+            rectype: h.rectype.get(),
         }
     }
 
     pub fn write(&self, buf: &mut [u8], off: usize) {
-        self.prev_tranlsa.write(buf, off);
-        self.back_lsa.write(buf, off + 8);
-        self.forw_lsa.write(buf, off + 16);
-        put_i32(buf, off + 24, self.trid);
-        put_i32(buf, off + 28, self.rectype);
+        let le = LogRecordHeaderLe {
+            prev_tranlsa: self.prev_tranlsa.into(),
+            back_lsa: self.back_lsa.into(),
+            forw_lsa: self.forw_lsa.into(),
+            trid: self.trid.into(),
+            rectype: self.rectype.into(),
+        };
+        le.write_to_prefix(&mut buf[off..])
+            .expect("a log page holds the record header");
     }
 }
+
+/// Engine `LOG_RECORD_HEADER` as stored.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct LogRecordHeaderLe {
+    prev_tranlsa: LsaLe,
+    back_lsa: LsaLe,
+    forw_lsa: LsaLe,
+    trid: I32,
+    rectype: I32,
+}
+const _: () = assert!(size_of::<LogRecordHeaderLe>() == LOG_RECORD_HEADER_SIZE);

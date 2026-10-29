@@ -24,7 +24,9 @@ use crate::file_table::FileTable;
 use crate::file_table_edit::{AllocType, PARTSECT_SIZE, SpaceOp};
 use crate::file_tracker::TrackItem;
 use crate::ids::{Vfid, Vpid};
-use crate::le_field::put_u64;
+use zerocopy::IntoBytes;
+
+use crate::file_table::PartialSectorLe;
 use crate::page::{self, PageType, db_pagesize};
 use crate::page_batch::PageBatch;
 use crate::sector_reserve::{DiskCache, VolumeGrowth};
@@ -159,10 +161,8 @@ impl<'v> SpaceManager<'v> {
             header.write(hp, op.line);
             part.write(hp, hsize);
             full.write(hp, full_at);
-            let mut ps = [0u8; PARTSECT_SIZE];
-            vsid.write(&mut ps, 0);
-            put_u64(&mut ps, 8, 1); // the header page itself
-            extdata::insert_at(hp, hsize, 0, &ps);
+            // the header page itself
+            extdata::insert_at(hp, hsize, 0, PartialSectorLe::new(vsid, 1).as_bytes());
 
             op.tracker_register(
                 trk,
@@ -193,7 +193,7 @@ impl<'v> SpaceManager<'v> {
             for v in ft.allocated_pages() {
                 let p = op.pages.get(v)?;
                 page::set_ptype(p, PageType::Unknown);
-                p[page::off::PFLAG] = 0;
+                page::reserved_mut(p).pflag = 0;
             }
             for s in &ft.sectors {
                 op.disk.release(vols, s.vsid)?;

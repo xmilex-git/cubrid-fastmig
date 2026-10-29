@@ -11,7 +11,9 @@
 
 use std::io;
 
-use crate::le_field::get_i32;
+use crate::overflow_part::{
+    FIRST_DATA_OFFSET, OverflowFirstPart, OverflowRestPart, REST_DATA_OFFSET,
+};
 use crate::page::db_area;
 use crate::record::heap_chain::{HeapChain, header_next_vpid};
 use crate::spage::{RecordType, SlottedPage};
@@ -48,22 +50,21 @@ fn slotted(page: &[u8], vpid: Vpid) -> io::Result<SlottedPage<'_>> {
         .ok_or_else(|| invalid(format!("heap page {vpid:?} is not a slotted page")))
 }
 
-/// Overflow page layouts (engine `OVERFLOW_FIRST_PART`: `next_vpid` @0, `length` i32 @8, data @12;
-/// `OVERFLOW_REST_PART`: `next_vpid` @0, data @8), in the DB area of each overflow page.
+/// Reads the value an overflow chain carries ([`crate::overflow_part`] layout), from the DB area of each page.
 pub(crate) fn read_overflow(vs: &VolumeSet, first: Vpid) -> io::Result<Vec<u8>> {
     let page = vs.read_page(first)?;
     let area = db_area(&page);
-    let length = get_i32(area, 8);
+    let length = OverflowFirstPart::of(area).length.get();
     if length < 0 {
         return Err(invalid(format!("overflow {first:?}: length {length}")));
     }
     let length = length as usize;
     let mut out = Vec::with_capacity(length);
-    let take = (area.len() - 12).min(length);
-    out.extend_from_slice(&area[12..12 + take]);
-    let mut next = Vpid::read(area, 0);
+    let take = (area.len() - FIRST_DATA_OFFSET).min(length);
+    out.extend_from_slice(&area[FIRST_DATA_OFFSET..FIRST_DATA_OFFSET + take]);
+    let mut next = OverflowRestPart::of(area).next_vpid.get();
     // a chain longer than the bytes it carries is a cycle; counting keeps memory constant
-    let max_pages = length / (area.len() - 8) + 1;
+    let max_pages = length / (area.len() - REST_DATA_OFFSET) + 1;
     let mut pages = 1;
     while out.len() < length {
         pages += 1;
@@ -75,9 +76,9 @@ pub(crate) fn read_overflow(vs: &VolumeSet, first: Vpid) -> io::Result<Vec<u8>> 
         }
         let page = vs.read_page(next)?;
         let area = db_area(&page);
-        let take = (area.len() - 8).min(length - out.len());
-        out.extend_from_slice(&area[8..8 + take]);
-        next = Vpid::read(area, 0);
+        let take = (area.len() - REST_DATA_OFFSET).min(length - out.len());
+        out.extend_from_slice(&area[REST_DATA_OFFSET..REST_DATA_OFFSET + take]);
+        next = OverflowRestPart::of(area).next_vpid.get();
     }
     Ok(out)
 }

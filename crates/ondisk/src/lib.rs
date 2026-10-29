@@ -21,6 +21,7 @@ pub mod le_field;
 pub mod log_header;
 pub mod log_page;
 pub mod lsa;
+pub mod overflow_part;
 pub mod page;
 pub mod page_batch;
 pub mod partition_stream;

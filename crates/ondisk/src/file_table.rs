@@ -13,8 +13,10 @@ use std::io;
 
 use crate::extdata::{self, ExtdataHeader};
 use crate::file_header::FileHeader;
-use crate::ids::{Vfid, Vpid, Vsid};
-use crate::le_field::get_u64;
+use zerocopy::little_endian::U64;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::ids::{Vfid, Vpid, Vsid, VsidLe};
 use crate::sector_table::SECTOR_NPAGES;
 use crate::volume_set::VolumeSet;
 
@@ -43,6 +45,34 @@ impl FileSector {
         (0..64)
             .filter(move |i| self.page_bitmap >> i & 1 != 0)
             .map(move |i| Vpid::new(base.volid, base.pageid + i))
+    }
+}
+
+/// Engine `FILE_PARTIAL_SECTOR`: an item of a file's partial sector table.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+pub struct PartialSectorLe {
+    /// @0
+    pub vsid: VsidLe,
+    /// @8, bit i = page `sectid*64 + i` allocated.
+    pub page_bitmap: U64,
+}
+
+impl PartialSectorLe {
+    pub fn new(vsid: Vsid, page_bitmap: u64) -> Self {
+        PartialSectorLe {
+            vsid: vsid.into(),
+            page_bitmap: page_bitmap.into(),
+        }
+    }
+
+    /// The item at the start of `item`.
+    pub fn of(item: &[u8]) -> &Self {
+        Self::ref_from_prefix(item).expect("a partial table item").0
+    }
+
+    pub fn of_mut(item: &mut [u8]) -> &mut Self {
+        Self::mut_from_prefix(item).expect("a partial table item").0
     }
 }
 
@@ -88,8 +118,8 @@ impl FileTable {
         };
         walk(header.offset_to_partial_ftab, &mut |it| {
             sectors.push(FileSector {
-                vsid: Vsid::read(it, 0),
-                page_bitmap: get_u64(it, 8),
+                vsid: PartialSectorLe::of(it).vsid.get(),
+                page_bitmap: PartialSectorLe::of(it).page_bitmap.get(),
                 full: false,
             })
         })?;

@@ -12,12 +12,24 @@ use std::io;
 use crate::extdata::{self, ExtdataHeader};
 use crate::file_header::{FileHeader, FileType};
 use crate::ids::{Vfid, Vpid};
-use crate::le_field::{get_i16, get_i32, get_u64, put_i16, put_i32, put_u64};
+use zerocopy::little_endian::{I16, I32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
 use crate::volume_set::VolumeSet;
 
-/// `sizeof (FILE_TRACK_ITEM)`: `fileid` i32 @0, `volid` i16 @4, `type` i16 @6, `metadata` 8 B @8 (heap: byte 0
-/// `is_marked_deleted`).
-pub const TRACK_ITEM_SIZE: usize = 16;
+/// Engine `FILE_TRACK_ITEM` as stored; the VFID's padding holds the file type.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct TrackItemLe {
+    fileid: I32,
+    volid: I16,
+    file_type: I16,
+    /// heap: byte 0 `is_marked_deleted`.
+    metadata: U64,
+}
+
+/// `sizeof (FILE_TRACK_ITEM)`.
+pub const TRACK_ITEM_SIZE: usize = size_of::<TrackItemLe>();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrackItem {
@@ -28,20 +40,22 @@ pub struct TrackItem {
 
 impl TrackItem {
     pub fn decode(b: &[u8]) -> Self {
+        let t = TrackItemLe::ref_from_prefix(b).expect("a tracker item").0;
         TrackItem {
-            vfid: Vfid::new(get_i16(b, 4), get_i32(b, 0)),
-            file_type_raw: get_i16(b, 6),
-            metadata: get_u64(b, 8),
+            vfid: Vfid::new(t.volid.get(), t.fileid.get()),
+            file_type_raw: t.file_type.get(),
+            metadata: t.metadata.get(),
         }
     }
 
     pub fn encode(&self) -> [u8; TRACK_ITEM_SIZE] {
-        let mut b = [0u8; TRACK_ITEM_SIZE];
-        put_i32(&mut b, 0, self.vfid.fileid);
-        put_i16(&mut b, 4, self.vfid.volid);
-        put_i16(&mut b, 6, self.file_type_raw);
-        put_u64(&mut b, 8, self.metadata);
-        b
+        let t = TrackItemLe {
+            fileid: self.vfid.fileid.into(),
+            volid: self.vfid.volid.into(),
+            file_type: self.file_type_raw.into(),
+            metadata: self.metadata.into(),
+        };
+        zerocopy::transmute!(t)
     }
 
     pub fn file_type(&self) -> Option<FileType> {

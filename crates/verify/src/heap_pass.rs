@@ -26,7 +26,7 @@ use fastmig_ondisk::record::{
     ExtractedKey, HeapHdrStats, RecordHeader, RecordLayout, decode_record, extract_key,
     resolve_record,
 };
-use fastmig_ondisk::spage::{RecordType, SPAGE_HEADER_SIZE, SPAGE_SLOT_SIZE, SlottedPage};
+use fastmig_ondisk::spage::{RecordType, SPAGE_HEADER_SIZE, SPAGE_SLOT_SIZE, Slot, SlottedPage};
 use fastmig_ondisk::value::{KeyDomain, Value};
 use fastmig_ondisk::{Hfid, Oid, Vpid};
 
@@ -496,7 +496,14 @@ fn check_slots(t: &HeapTarget, vpid: Vpid, sp: &SlottedPage, o: &mut Shared) {
     let mut extents: Vec<(usize, usize, usize)> = Vec::new();
     let mut used = 0usize;
     for slot in 0..n {
-        let (off, len, _) = sp.raw_slot(slot).unwrap();
+        let Some(Slot {
+            offset: off,
+            length: len,
+            ..
+        }) = sp.raw_slot(slot)
+        else {
+            continue;
+        };
         if off == 0 {
             continue;
         }

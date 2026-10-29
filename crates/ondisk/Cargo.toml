@@ -7,3 +7,4 @@ repository.workspace = true
 
 [dependencies]
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+zerocopy = { version = "0.8", features = ["derive"] }

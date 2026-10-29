@@ -8,8 +8,10 @@
 //! same in release/11.4 @46212adcd and develop @5b1867174; R1 § 2.2. Offsets checked on T1 pages (workspace#490).
 
 use crate::ids::Vpid;
-use crate::le_field::{get_i16, get_i32, put_i16, put_i32};
-use crate::lsa::Lsa;
+use zerocopy::little_endian::{I16, I32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::lsa::{Lsa, LsaLe};
 
 /// Default `IO_PAGESIZE` (createdb default, and every T1 baseline DB). A database's real page size is read from its
 /// volume header at run time ([`crate::volume_set::VolumeSet::io_pagesize`]); 4 KiB and 8 KiB also exist.
@@ -24,15 +26,41 @@ pub const fn db_pagesize(io_pagesize: usize) -> usize {
     io_pagesize - IO_RESERVED_SIZE - IO_TRAILER_SIZE
 }
 
-/// Engine `FILEIO_PAGE_RESERVED`, 32 B at page offset 0. Offsets (both versions):
-/// `lsa` @0 (8), `pageid` i32 @8, `volid` i16 @12, `ptype` u8 @14, `pflag` u8 @15, `p_reserve_1` @16,
-/// `p_reserve_2` @20, `tde_nonce` @24 (8). Watermark `prv2.lsa` at `io_pagesize - 8`.
-pub mod off {
-    pub const LSA: usize = 0;
-    pub const PAGEID: usize = 8;
-    pub const VOLID: usize = 12;
-    pub const PTYPE: usize = 14;
-    pub const PFLAG: usize = 15;
+/// Engine `FILEIO_PAGE_RESERVED`, 32 B at page offset 0, same in both versions. The watermark `prv2.lsa` (a copy of
+/// `lsa`) sits at `io_pagesize - 8`.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+pub struct PageReserved {
+    /// @0
+    pub lsa: LsaLe,
+    /// @8
+    pub pageid: I32,
+    /// @12
+    pub volid: I16,
+    /// @14, [`PageType`] as stored.
+    pub ptype: u8,
+    /// @15, TDE flags ([`PFLAG_TDE_MASK`]).
+    pub pflag: u8,
+    /// @16
+    pub p_reserve_1: I32,
+    /// @20
+    pub p_reserve_2: I32,
+    /// @24
+    pub tde_nonce: U64,
+}
+const _: () = assert!(size_of::<PageReserved>() == IO_RESERVED_SIZE);
+
+/// The reserved header of a whole IO page.
+pub fn reserved(page: &[u8]) -> &PageReserved {
+    PageReserved::ref_from_prefix(page)
+        .expect("an IO page holds its header")
+        .0
+}
+
+pub fn reserved_mut(page: &mut [u8]) -> &mut PageReserved {
+    PageReserved::mut_from_prefix(page)
+        .expect("an IO page holds its header")
+        .0
 }
 
 /// Engine `PAGE_TYPE` (u8 at page offset 14). Values are the same in 11.4 and develop.
@@ -82,7 +110,7 @@ impl PageType {
 pub const PFLAG_TDE_MASK: u8 = 0x3;
 
 pub fn lsa(page: &[u8]) -> Lsa {
-    Lsa::read(page, off::LSA)
+    reserved(page).lsa.get()
 }
 
 pub fn watermark(page: &[u8]) -> Lsa {
@@ -96,40 +124,42 @@ pub fn is_sane(page: &[u8]) -> bool {
 
 /// The VPID the page header claims; equals the page's position for every page the engine has written.
 pub fn vpid(page: &[u8]) -> Vpid {
-    Vpid::new(get_i16(page, off::VOLID), get_i32(page, off::PAGEID))
+    let r = reserved(page);
+    Vpid::new(r.volid.get(), r.pageid.get())
 }
 
 /// The raw page type byte; [`PageType::from_u8`] names it.
 pub fn ptype_raw(page: &[u8]) -> u8 {
-    page[off::PTYPE]
+    reserved(page).ptype
 }
 
 pub fn ptype(page: &[u8]) -> Option<PageType> {
-    PageType::from_u8(page[off::PTYPE])
+    PageType::from_u8(reserved(page).ptype)
 }
 
 pub fn pflag(page: &[u8]) -> u8 {
-    page[off::PFLAG]
+    reserved(page).pflag
 }
 
 /// Writes the LSA in both the header and the trailer, keeping the page sane.
 pub fn set_lsa(page: &mut [u8], lsa: Lsa) {
     let n = page.len();
-    lsa.write(page, off::LSA);
+    reserved_mut(page).lsa.set(lsa);
     lsa.write(page, n - IO_TRAILER_SIZE);
 }
 
 pub fn set_ptype(page: &mut [u8], ptype: PageType) {
-    page[off::PTYPE] = ptype as u8;
+    reserved_mut(page).ptype = ptype as u8;
 }
 
 /// Header of a page this tool allocates: given VPID and type, NULL LSA (G2, workspace#482), no TDE flag, reserved
 /// fields zero. The DB page area is left as is.
 pub fn init_header(page: &mut [u8], vpid: Vpid, ptype: PageType) {
-    page[..IO_RESERVED_SIZE].fill(0);
-    put_i32(page, off::PAGEID, vpid.pageid);
-    put_i16(page, off::VOLID, vpid.volid);
-    page[off::PTYPE] = ptype as u8;
+    let r = reserved_mut(page);
+    r.as_mut_bytes().fill(0);
+    r.pageid.set(vpid.pageid);
+    r.volid.set(vpid.volid);
+    r.ptype = ptype as u8;
     set_lsa(page, Lsa::NULL);
 }
 

@@ -17,14 +17,10 @@ use std::io;
 use crate::file_alloc::SpaceManager;
 use crate::page::{self, PageType, db_area, db_area_mut, db_pagesize};
 use crate::record::heap_chain::HeapChain;
-use crate::spage::{
-    Anchor, RecordType, SPAGE_SLOT_SIZE, SlottedPage, SpageBuilder, SpageEditor, SpageError,
-};
+use crate::record::heap_hdr_stats::HeapHdrStatsHeadLe;
+use crate::spage::{Anchor, RecordType, SlottedPage, SpageBuilder, SpageEditor, SpageError};
 use crate::volume_set::VolumeSet;
 use crate::{Hfid, Oid, Vfid, Vpid};
-
-/// develop `heap_hdr_stats.next_vpid` / 11.4 the same field: the header record's link to the next page (@16).
-const HEADER_NEXT_VPID: usize = 16;
 
 /// Engine `spage_collect_statistics` of one page: 1 page + 2 per REC_BIGONE; records = live slots other than
 /// slot 0 and REC_NEWHOME; length = REC_HOME and REC_NEWHOME lengths + 2 pages per REC_BIGONE.
@@ -74,20 +70,6 @@ pub struct PageInfo {
     /// Engine `spage_max_space_for_new_record`.
     pub max_space: usize,
     pub stats: PageStats,
-}
-
-fn max_space(sp: &SlottedPage) -> usize {
-    let mut free = sp.total_free();
-    let reuse = sp.anchor_raw() != Anchor::AnchoredDontReuseSlots as i16
-        && sp.num_slots() > sp.num_records();
-    if !reuse {
-        free -= SPAGE_SLOT_SIZE as i32;
-        if free < SPAGE_SLOT_SIZE as i32 {
-            free = 0;
-        }
-    }
-    let a = sp.alignment().max(1) as i32;
-    (free.max(0) / a * a) as usize
 }
 
 pub(crate) fn invalid(msg: String) -> io::Error {
@@ -186,7 +168,7 @@ impl<'s, 'v> HeapState<'s, 'v> {
         let info = PageInfo {
             vpid,
             total_free: sp.total_free(),
-            max_space: max_space(&sp),
+            max_space: sp.max_space_for_new_record(),
             stats: PageStats::of(&sp, self.db_pagesize()),
         };
         match self.index.get(&vpid) {
@@ -273,7 +255,7 @@ impl<'s, 'v> HeapState<'s, 'v> {
         let header = vpid == self.hfid.vpid();
         self.edit_slot0(vpid, |rec| {
             if header {
-                next.write(rec, HEADER_NEXT_VPID);
+                HeapHdrStatsHeadLe::of_mut(rec).next_vpid.set(next);
             } else if let Some(mut c) = HeapChain::read(rec) {
                 c.next_vpid = next;
                 c.write(rec);

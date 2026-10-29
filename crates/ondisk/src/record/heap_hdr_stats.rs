@@ -8,7 +8,10 @@
 //! (develop `src/storage/bestspace.hpp`, static_assert 8 B); R2 § 1.4 (offsets computed, checked on T1 header pages
 //! in workspace#499). Native (little-endian) layout.
 
-use crate::le_field::{get_f32, get_i32, get_u16, get_u64, put_f32, put_i32, put_u16, put_u64};
+use zerocopy::little_endian::{F32, I16, I32, U16, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+use crate::ids::{OidLe, VfidLe, VpidLe};
 use crate::value::{DecodeError, DecodeResult};
 use crate::{Oid, VersionLine, Vfid, Vpid};
 
@@ -26,30 +29,164 @@ pub struct BestspaceEntry {
     pub vpid: Vpid,
 }
 
+/// [`BestspaceEntry`] as stored (its VPID halves are in the opposite order of an engine `VPID`).
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+pub struct BestspaceEntryLe {
+    freespace: U16,
+    volid: I16,
+    pageid: I32,
+}
+
+impl From<&BestspaceEntryLe> for BestspaceEntry {
+    fn from(e: &BestspaceEntryLe) -> Self {
+        BestspaceEntry {
+            freespace: e.freespace.get(),
+            vpid: Vpid::new(e.volid.get(), e.pageid.get()),
+        }
+    }
+}
+
+impl From<&BestspaceEntry> for BestspaceEntryLe {
+    fn from(e: &BestspaceEntry) -> Self {
+        BestspaceEntryLe {
+            freespace: e.freespace.into(),
+            volid: e.vpid.volid.into(),
+            pageid: e.vpid.pageid.into(),
+        }
+    }
+}
+
 impl BestspaceEntry {
-    pub const SIZE: usize = 8;
+    pub const SIZE: usize = size_of::<BestspaceEntryLe>();
     /// `bestspace_entry::set_null`: no free space, NULL VPID.
     pub const NULL: BestspaceEntry = BestspaceEntry {
         freespace: 0,
         vpid: Vpid::NULL,
     };
 
-    pub fn read(buf: &[u8], off: usize) -> Self {
-        BestspaceEntry {
-            freespace: get_u16(buf, off),
-            vpid: Vpid::new(
-                i16::from_le_bytes([buf[off + 2], buf[off + 3]]),
-                get_i32(buf, off + 4),
-            ),
-        }
-    }
-
     pub fn write(&self, buf: &mut [u8], off: usize) {
-        put_u16(buf, off, self.freespace);
-        buf[off + 2..off + 4].copy_from_slice(&self.vpid.volid.to_le_bytes());
-        put_i32(buf, off + 4, self.vpid.pageid);
+        BestspaceEntryLe::from(self)
+            .write_to_prefix(&mut buf[off..])
+            .expect("entry inside the record");
     }
 }
+
+/// 11.4 `HEAP_BESTSPACE`: a page and its free space (12 B).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BestPage {
+    pub vpid: Vpid,
+    pub freespace: i32,
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct BestPageLe {
+    vpid: VpidLe,
+    freespace: I32,
+}
+
+/// The first 24 B of `HEAP_HDR_STATS`, the same in 11.4 and develop.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+pub struct HeapHdrStatsHeadLe {
+    /// @0
+    pub class_oid: OidLe,
+    /// @8
+    pub ovf_vfid: VfidLe,
+    /// @16, the header page's link to the first data page (develop: the first bestspace page).
+    pub next_vpid: VpidLe,
+}
+
+impl HeapHdrStatsHeadLe {
+    /// The shared head of a `HEAP_HDR_STATS` record of either line.
+    pub fn of(rec: &[u8]) -> &Self {
+        Self::ref_from_prefix(rec)
+            .expect("record holds HEAP_HDR_STATS")
+            .0
+    }
+
+    pub fn of_mut(rec: &mut [u8]) -> &mut Self {
+        Self::mut_from_prefix(rec)
+            .expect("record holds HEAP_HDR_STATS")
+            .0
+    }
+}
+
+/// 11.4 `HEAP_HDR_STATS` as stored (release/11.4 @46212adcd heap_file.c:192-232), 296 B.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct HeapHdrStats114Le {
+    /// @0
+    common: HeapHdrStatsHeadLe,
+    /// @24
+    unfill_space: I32,
+    /// @28, `estimates.num_pages`.
+    num_pages: I32,
+    /// @32
+    num_recs: I32,
+    /// @36
+    recs_sumlen: F32,
+    /// @40
+    num_other_high_best: I32,
+    /// @44
+    num_high_best: I32,
+    /// @48
+    num_substitutions: I32,
+    /// @52
+    num_second_best: I32,
+    /// @56
+    head_second_best: I32,
+    /// @60
+    tail_second_best: I32,
+    /// @64
+    head: I32,
+    /// @68
+    last_vpid: VpidLe,
+    /// @76
+    full_search_vpid: VpidLe,
+    /// @84
+    second_best: [VpidLe; NUM_BEST_11_4],
+    /// @164
+    best: [BestPageLe; NUM_BEST_11_4],
+    /// @284, `reserve0..2`.
+    reserve: [I32; 3],
+}
+
+/// develop `HEAP_HDR_STATS` as stored (develop @5b1867174 heap_file.c:190-224), 1152 B.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct HeapHdrStatsDevelopLe {
+    /// @0
+    common: HeapHdrStatsHeadLe,
+    /// @24
+    last_vpid: VpidLe,
+    /// @32
+    unfill_space: I32,
+    /// @36
+    num_pages: I32,
+    /// @40
+    num_recs: U64,
+    /// @48
+    recs_sumlen: U64,
+    /// @56, `bestspace.num_candidates`.
+    num_candidates: U64,
+    /// @64
+    candidates: [BestspaceEntryLe; MAX_CANDIDATES],
+    /// @1088
+    num_shards: U64,
+    /// @1096, `bestspace.num_pages`.
+    num_bestspace_pages: U64,
+    /// @1104
+    pages: [VpidLe; MAX_SHARD_PAGES],
+    /// @1136, `reserve0..2`, then the u64 alignment pad.
+    reserve: [I32; 3],
+    pad: [u8; 4],
+}
+
+const _: () = assert!(size_of::<HeapHdrStats114Le>() == HeapHdrStats::size(VersionLine::V11_4));
+const _: () =
+    assert!(size_of::<HeapHdrStatsDevelopLe>() == HeapHdrStats::size(VersionLine::Develop));
 
 /// 11.4 `estimates` fields other than the counts every line has: the best-page hint arrays.
 /// Offsets (11.4): `num_other_high_best` @40, `num_high_best` @44, `num_substitutions` @48, `num_second_best` @52,
@@ -66,7 +203,7 @@ pub struct Estimates114 {
     pub head: i32,
     pub full_search_vpid: Vpid,
     pub second_best: [Vpid; NUM_BEST_11_4],
-    pub best: [(Vpid, i32); NUM_BEST_11_4],
+    pub best: [BestPage; NUM_BEST_11_4],
 }
 
 /// develop `heap_hdr_stats.bestspace`. Offsets (develop): `num_candidates` u64 @56, `candidates[128]` @64,
@@ -144,61 +281,54 @@ impl HeapHdrStats {
         if rec.len() != Self::size(line) {
             return Err(short(rec, line));
         }
-        let shared =
-            |last_vpid, unfill_space, num_pages, num_recs, recs_sumlen, line| HeapHdrStats {
-                class_oid: Oid::read(rec, 0),
-                ovf_vfid: Vfid::read(rec, 8),
-                next_vpid: Vpid::read(rec, 16),
-                last_vpid,
-                unfill_space,
-                num_pages,
-                num_recs,
-                recs_sumlen,
-                line,
-            };
         Ok(match line {
             VersionLine::V11_4 => {
-                let est = Estimates114 {
-                    num_other_high_best: get_i32(rec, 40),
-                    num_high_best: get_i32(rec, 44),
-                    num_substitutions: get_i32(rec, 48),
-                    num_second_best: get_i32(rec, 52),
-                    head_second_best: get_i32(rec, 56),
-                    tail_second_best: get_i32(rec, 60),
-                    head: get_i32(rec, 64),
-                    full_search_vpid: Vpid::read(rec, 76),
-                    second_best: std::array::from_fn(|i| Vpid::read(rec, 84 + 8 * i)),
-                    best: std::array::from_fn(|i| {
-                        (Vpid::read(rec, 164 + 12 * i), get_i32(rec, 172 + 12 * i))
+                let h = HeapHdrStats114Le::ref_from_bytes(rec).map_err(|_| short(rec, line))?;
+                HeapHdrStats {
+                    class_oid: h.common.class_oid.get(),
+                    ovf_vfid: h.common.ovf_vfid.get(),
+                    next_vpid: h.common.next_vpid.get(),
+                    last_vpid: h.last_vpid.get(),
+                    unfill_space: h.unfill_space.get(),
+                    num_pages: h.num_pages.get(),
+                    num_recs: h.num_recs.get().max(0) as u64,
+                    recs_sumlen: h.recs_sumlen.get().max(0.0) as u64,
+                    line: LineFields::V11_4(Estimates114 {
+                        num_other_high_best: h.num_other_high_best.get(),
+                        num_high_best: h.num_high_best.get(),
+                        num_substitutions: h.num_substitutions.get(),
+                        num_second_best: h.num_second_best.get(),
+                        head_second_best: h.head_second_best.get(),
+                        tail_second_best: h.tail_second_best.get(),
+                        head: h.head.get(),
+                        full_search_vpid: h.full_search_vpid.get(),
+                        second_best: h.second_best.map(|v| v.get()),
+                        best: std::array::from_fn(|i| BestPage {
+                            vpid: h.best[i].vpid.get(),
+                            freespace: h.best[i].freespace.get(),
+                        }),
                     }),
-                };
-                shared(
-                    Vpid::read(rec, 68),
-                    get_i32(rec, 24),
-                    get_i32(rec, 28),
-                    get_i32(rec, 32).max(0) as u64,
-                    get_f32(rec, 36).max(0.0) as u64,
-                    LineFields::V11_4(est),
-                )
+                }
             }
             VersionLine::Develop => {
-                let ncand = (get_u64(rec, 56) as usize).min(MAX_CANDIDATES);
-                let npages = (get_u64(rec, 1096) as usize).min(MAX_SHARD_PAGES);
-                let dir = BestspaceDir {
-                    candidates: (0..ncand)
-                        .map(|i| BestspaceEntry::read(rec, 64 + 8 * i))
-                        .collect(),
-                    num_shards: get_u64(rec, 1088),
-                    pages: (0..npages).map(|i| Vpid::read(rec, 1104 + 8 * i)).collect(),
-                };
-                shared(
-                    Vpid::read(rec, 24),
-                    get_i32(rec, 32),
-                    get_i32(rec, 36),
-                    get_u64(rec, 40),
-                    get_u64(rec, 48),
-                    LineFields::Develop(dir),
-                )
+                let h = HeapHdrStatsDevelopLe::ref_from_bytes(rec).map_err(|_| short(rec, line))?;
+                let ncand = (h.num_candidates.get() as usize).min(MAX_CANDIDATES);
+                let npages = (h.num_bestspace_pages.get() as usize).min(MAX_SHARD_PAGES);
+                HeapHdrStats {
+                    class_oid: h.common.class_oid.get(),
+                    ovf_vfid: h.common.ovf_vfid.get(),
+                    next_vpid: h.common.next_vpid.get(),
+                    last_vpid: h.last_vpid.get(),
+                    unfill_space: h.unfill_space.get(),
+                    num_pages: h.num_pages.get(),
+                    num_recs: h.num_recs.get(),
+                    recs_sumlen: h.recs_sumlen.get(),
+                    line: LineFields::Develop(BestspaceDir {
+                        candidates: h.candidates[..ncand].iter().map(Into::into).collect(),
+                        num_shards: h.num_shards.get(),
+                        pages: h.pages[..npages].iter().map(VpidLe::get).collect(),
+                    }),
+                }
             }
         })
     }
@@ -208,57 +338,50 @@ impl HeapHdrStats {
     pub fn write(&self, rec: &mut [u8], line: VersionLine) {
         assert_eq!(rec.len(), Self::size(line), "HEAP_HDR_STATS buffer size");
         rec.fill(0);
-        self.class_oid.write(rec, 0);
-        self.ovf_vfid.write(rec, 8);
-        self.next_vpid.write(rec, 16);
         match (&self.line, line) {
             (LineFields::V11_4(e), VersionLine::V11_4) => {
-                put_i32(rec, 24, self.unfill_space);
-                put_i32(rec, 28, self.num_pages);
-                put_i32(rec, 32, self.num_recs.min(i32::MAX as u64) as i32);
-                put_f32(rec, 36, self.recs_sumlen as f32);
-                for (off, v) in [
-                    (40, e.num_other_high_best),
-                    (44, e.num_high_best),
-                    (48, e.num_substitutions),
-                    (52, e.num_second_best),
-                    (56, e.head_second_best),
-                    (60, e.tail_second_best),
-                    (64, e.head),
-                ] {
-                    put_i32(rec, off, v);
-                }
-                self.last_vpid.write(rec, 68);
-                e.full_search_vpid.write(rec, 76);
-                for (i, v) in e.second_best.iter().enumerate() {
-                    v.write(rec, 84 + 8 * i);
-                }
-                for (i, (v, free)) in e.best.iter().enumerate() {
-                    v.write(rec, 164 + 12 * i);
-                    put_i32(rec, 172 + 12 * i, *free);
-                }
+                let h = HeapHdrStats114Le::mut_from_bytes(rec).expect("size checked above");
+                h.common.class_oid.set(self.class_oid);
+                h.common.ovf_vfid.set(self.ovf_vfid);
+                h.common.next_vpid.set(self.next_vpid);
+                h.unfill_space.set(self.unfill_space);
+                h.num_pages.set(self.num_pages);
+                h.num_recs.set(self.num_recs.min(i32::MAX as u64) as i32);
+                h.recs_sumlen.set(self.recs_sumlen as f32);
+                h.num_other_high_best.set(e.num_other_high_best);
+                h.num_high_best.set(e.num_high_best);
+                h.num_substitutions.set(e.num_substitutions);
+                h.num_second_best.set(e.num_second_best);
+                h.head_second_best.set(e.head_second_best);
+                h.tail_second_best.set(e.tail_second_best);
+                h.head.set(e.head);
+                h.last_vpid.set(self.last_vpid);
+                h.full_search_vpid.set(e.full_search_vpid);
+                h.second_best = e.second_best.map(VpidLe::from);
+                h.best = e.best.map(|b| BestPageLe {
+                    vpid: b.vpid.into(),
+                    freespace: b.freespace.into(),
+                });
             }
             (LineFields::Develop(d), VersionLine::Develop) => {
                 assert!(d.candidates.len() <= MAX_CANDIDATES && d.pages.len() <= MAX_SHARD_PAGES);
-                self.last_vpid.write(rec, 24);
-                put_i32(rec, 32, self.unfill_space);
-                put_i32(rec, 36, self.num_pages);
-                put_u64(rec, 40, self.num_recs);
-                put_u64(rec, 48, self.recs_sumlen);
-                put_u64(rec, 56, d.candidates.len() as u64);
-                for i in 0..MAX_CANDIDATES {
-                    d.candidates
-                        .get(i)
-                        .unwrap_or(&BestspaceEntry::NULL)
-                        .write(rec, 64 + 8 * i);
+                let h = HeapHdrStatsDevelopLe::mut_from_bytes(rec).expect("size checked above");
+                h.common.class_oid.set(self.class_oid);
+                h.common.ovf_vfid.set(self.ovf_vfid);
+                h.common.next_vpid.set(self.next_vpid);
+                h.last_vpid.set(self.last_vpid);
+                h.unfill_space.set(self.unfill_space);
+                h.num_pages.set(self.num_pages);
+                h.num_recs.set(self.num_recs);
+                h.recs_sumlen.set(self.recs_sumlen);
+                h.num_candidates.set(d.candidates.len() as u64);
+                for (i, slot) in h.candidates.iter_mut().enumerate() {
+                    *slot = d.candidates.get(i).unwrap_or(&BestspaceEntry::NULL).into();
                 }
-                put_u64(rec, 1088, d.num_shards);
-                put_u64(rec, 1096, d.pages.len() as u64);
-                for i in 0..MAX_SHARD_PAGES {
-                    d.pages
-                        .get(i)
-                        .unwrap_or(&Vpid::NULL)
-                        .write(rec, 1104 + 8 * i);
+                h.num_shards.set(d.num_shards);
+                h.num_bestspace_pages.set(d.pages.len() as u64);
+                for (i, slot) in h.pages.iter_mut().enumerate() {
+                    slot.set(*d.pages.get(i).unwrap_or(&Vpid::NULL));
                 }
             }
             (_, line) => panic!("HeapHdrStats of another line written as {line:?}"),

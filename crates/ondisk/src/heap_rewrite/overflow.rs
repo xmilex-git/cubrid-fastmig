@@ -14,12 +14,12 @@ use std::io;
 
 use crate::file_alloc::{SpaceManager, perm_tablespace};
 use crate::file_header::{FILE_DESCRIPTORS_SIZE, FileType};
-use crate::le_field::{get_i32, put_i32};
+use crate::overflow_part::{
+    FIRST_DATA_OFFSET as FIRST_DATA, OverflowFirstPart, OverflowRestPart,
+    REST_DATA_OFFSET as REST_DATA,
+};
 use crate::page::{self, PageType, db_area, db_area_mut, db_pagesize};
 use crate::{Hfid, Oid, Vfid, Vpid};
-
-const FIRST_DATA: usize = 12;
-const REST_DATA: usize = 8;
 
 /// Writes `rec` as a new overflow chain of `ovf_vfid`; returns its first page and its page count.
 pub fn write_chain(space: &SpaceManager, ovf_vfid: Vfid, rec: &[u8]) -> io::Result<(Vpid, usize)> {
@@ -35,13 +35,10 @@ pub fn write_chain(space: &SpaceManager, ovf_vfid: Vfid, rec: &[u8]) -> io::Resu
         let mut p = vec![0u8; io_size];
         page::init_header(&mut p, vpid, PageType::Overflow);
         let area = db_area_mut(&mut p);
-        vpids
-            .get(i + 1)
-            .copied()
-            .unwrap_or(Vpid::NULL)
-            .write(area, 0);
+        let next = vpids.get(i + 1).copied().unwrap_or(Vpid::NULL);
+        OverflowRestPart::of_mut(area).next_vpid.set(next);
         let at = if i == 0 {
-            put_i32(area, 8, rec.len() as i32);
+            OverflowFirstPart::of_mut(area).length.set(rec.len() as i32);
             FIRST_DATA
         } else {
             REST_DATA
@@ -59,10 +56,10 @@ pub fn chain_pages(space: &SpaceManager, first: Vpid) -> io::Result<Vec<Vpid>> {
     let vs = space.volumes();
     let db = db_pagesize(vs.io_pagesize());
     let p = vs.read_page(first)?;
-    let len = get_i32(db_area(&p), 8).max(0) as usize;
+    let len = OverflowFirstPart::of(db_area(&p)).length.get().max(0) as usize;
     let npages = 1 + len.saturating_sub(db - FIRST_DATA).div_ceil(db - REST_DATA);
     let mut out = vec![first];
-    let mut next = Vpid::read(db_area(&p), 0);
+    let mut next = OverflowRestPart::of(db_area(&p)).next_vpid.get();
     while !next.is_null() {
         if out.len() >= npages {
             return Err(io::Error::new(
@@ -71,7 +68,9 @@ pub fn chain_pages(space: &SpaceManager, first: Vpid) -> io::Result<Vec<Vpid>> {
             ));
         }
         out.push(next);
-        next = Vpid::read(db_area(&vs.read_page(next)?), 0);
+        next = OverflowRestPart::of(db_area(&vs.read_page(next)?))
+            .next_vpid
+            .get();
     }
     Ok(out)
 }

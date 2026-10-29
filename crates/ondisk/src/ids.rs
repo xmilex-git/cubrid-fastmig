@@ -4,6 +4,9 @@
 //! Source: engine `src/storage/storage_common.h` (`struct vpid`, `vfid`, `vsid`, `hfid`, `btid`, `ehid`) and
 //! `src/compat/dbtype_def.h` (`struct db_identifier` = OID); same layout in release/11.4 @46212adcd and develop @5b1867174.
 
+use zerocopy::little_endian::{I16, I32};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
 use crate::le_field::{get_i16, get_i32, put_i16, put_i32};
 
 /// Engine `NULL_PAGEID` / `NULL_FILEID` / `NULL_SECTID`.
@@ -211,3 +214,144 @@ impl FileAndPage {
         put_i32(buf, off + 8, self.pageid);
     }
 }
+
+/// Engine `VPID` as it sits inside a fixed on-disk struct: `pageid` @0, `volid` @4, 2 B padding @6 (zero).
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+pub struct VpidLe {
+    pageid: I32,
+    volid: I16,
+    pad: [u8; 2],
+}
+
+impl VpidLe {
+    pub fn get(&self) -> Vpid {
+        Vpid::new(self.volid.get(), self.pageid.get())
+    }
+
+    /// Writes the identifier, padding zeroed.
+    pub fn set(&mut self, v: Vpid) {
+        *self = v.into();
+    }
+}
+
+impl From<Vpid> for VpidLe {
+    fn from(v: Vpid) -> Self {
+        VpidLe {
+            pageid: v.pageid.into(),
+            volid: v.volid.into(),
+            pad: [0; 2],
+        }
+    }
+}
+
+/// Engine `VFID` as it sits inside a fixed on-disk struct: `fileid` @0, `volid` @4, 2 B padding @6 (zero).
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+pub struct VfidLe {
+    fileid: I32,
+    volid: I16,
+    pad: [u8; 2],
+}
+
+impl VfidLe {
+    pub fn get(&self) -> Vfid {
+        Vfid::new(self.volid.get(), self.fileid.get())
+    }
+
+    /// Writes the identifier, padding zeroed.
+    pub fn set(&mut self, v: Vfid) {
+        *self = v.into();
+    }
+}
+
+impl From<Vfid> for VfidLe {
+    fn from(v: Vfid) -> Self {
+        VfidLe {
+            fileid: v.fileid.into(),
+            volid: v.volid.into(),
+            pad: [0; 2],
+        }
+    }
+}
+
+/// Engine `OID` as it sits inside a fixed on-disk struct: `pageid` @0, `slotid` @4, `volid` @6.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+pub struct OidLe {
+    pageid: I32,
+    slotid: I16,
+    volid: I16,
+}
+
+impl OidLe {
+    pub fn get(&self) -> Oid {
+        Oid::new(self.volid.get(), self.pageid.get(), self.slotid.get())
+    }
+
+    pub fn set(&mut self, o: Oid) {
+        *self = o.into();
+    }
+}
+
+impl From<Oid> for OidLe {
+    fn from(o: Oid) -> Self {
+        OidLe {
+            pageid: o.pageid.into(),
+            slotid: o.slotid.into(),
+            volid: o.volid.into(),
+        }
+    }
+}
+
+/// Engine `HFID` / `BTID` / `EHID` as it sits inside a fixed on-disk struct: VFID @0, page id @8.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+pub struct FileAndPageLe {
+    vfid: VfidLe,
+    pageid: I32,
+}
+
+impl FileAndPageLe {
+    pub fn get(&self) -> FileAndPage {
+        FileAndPage {
+            vfid: self.vfid.get(),
+            pageid: self.pageid.get(),
+        }
+    }
+
+    pub fn set(&mut self, f: FileAndPage) {
+        self.vfid.set(f.vfid);
+        self.pageid.set(f.pageid);
+    }
+}
+
+const _: () = assert!(size_of::<VpidLe>() == Vpid::SIZE && size_of::<VfidLe>() == Vfid::SIZE);
+const _: () =
+    assert!(size_of::<OidLe>() == Oid::SIZE && size_of::<FileAndPageLe>() == FileAndPage::SIZE);
+
+/// Engine `VSID` as it sits inside a fixed on-disk struct: `sectid` @0, `volid` @4, 2 B padding @6 (zero).
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Clone, Copy)]
+#[repr(C)]
+pub struct VsidLe {
+    sectid: I32,
+    volid: I16,
+    pad: [u8; 2],
+}
+
+impl VsidLe {
+    pub fn get(&self) -> Vsid {
+        Vsid::new(self.volid.get(), self.sectid.get())
+    }
+}
+
+impl From<Vsid> for VsidLe {
+    fn from(v: Vsid) -> Self {
+        VsidLe {
+            sectid: v.sectid.into(),
+            volid: v.volid.into(),
+            pad: [0; 2],
+        }
+    }
+}
+const _: () = assert!(size_of::<VsidLe>() == Vsid::SIZE);

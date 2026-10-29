@@ -62,6 +62,7 @@ External crates, each with the reason it is not a few lines of our own (add a ro
 |---|---|---|
 | `lz4_flex` | `ondisk::value` | LZ4 block format of compressed strings (engine `cubcompress::LZ4`) |
 | `md-5` | `catalog::serial_name` | develop names long auto_increment serials with an MD5 of the 11.4 name |
+| `zerocopy` | `ondisk` (headers, fixed records) | safe typed views of fixed on-disk structs (`#[repr(C)]`, little-endian fields) without `unsafe` or offset constants (workspace#525) |
 
 ## Files and modules
 
@@ -101,8 +102,12 @@ External crates, each with the reason it is not a few lines of our own (add a ro
 - **Volume bytes are untrusted input.** Every length, offset or count read from a page is checked
   before it indexes a slice; a decoder returns `DecodeResult` with the offset, never panics. A
   source database with a damaged record must yield a verify finding or a clean error, not an
-  aborted process. Read big-endian fields through `value::OrReader` and little-endian ones
-  through `le_field`; do not add a third set of helpers or slice `b[at..at + 4]` on a computed `at`.
+  aborted process. A fixed-size engine struct (a page, file or log header, a fixed record) is a
+  `#[repr(C)]` zerocopy struct of `little_endian` fields named `<Decoded>Le` (or the engine name when
+  nothing decodes it), one per version where the layout differs, with a `size_of` assert; read it
+  with `ref_from_prefix`, never with literal offsets. Big-endian variable records go through
+  `value::OrReader`, single little-endian values at a computed offset through `le_field`; do not add
+  a fourth way or slice `b[at..at + 4]` on a computed `at`.
   `panic!`/`unwrap` stay only for invariants of our own code (a match the type already rules out).
 - **Do not port engine C idioms.** Take the byte format from the engine, not its code shape:
   no out-parameters, no error codes, no setjmp-style escapes, no manual buffer bookkeeping a slice

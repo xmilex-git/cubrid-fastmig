@@ -42,13 +42,18 @@ pub enum HeaderLayout {
     Since11_4,
 }
 
-/// Log header offsets of the two fields that tell the version, per layout (add [`LOG_PAGE_HEADER_SIZE`]).
+/// Log header offsets of the two fields that tell the version, per layout (add [`LOG_PAGE_HEADER_SIZE`]): the 376 B
+/// layout lacks the 8 B `vol_creation` before them.
 mod off {
-    pub const DB_RELEASE_BEFORE_11_4: usize = 40;
-    pub const DB_COMPATIBILITY_BEFORE_11_4: usize = 56;
-    pub const DB_COMPATIBILITY_SINCE_11_4: usize = 64;
-    /// Engine `REL_MAX_RELEASE_LENGTH`.
-    pub const DB_RELEASE_LEN: usize = 15;
+    use std::mem::offset_of;
+
+    use crate::log_header::LogHeaderLe;
+
+    pub const DB_COMPATIBILITY_SINCE_11_4: usize = offset_of!(LogHeaderLe, db_compatibility);
+    pub const DB_COMPATIBILITY_BEFORE_11_4: usize = DB_COMPATIBILITY_SINCE_11_4 - 8;
+    pub const DB_RELEASE_BEFORE_11_4: usize = offset_of!(LogHeaderLe, db_release) - 8;
+    pub(crate) use crate::log_header::DB_RELEASE_LEN;
+    const _: () = assert!(DB_RELEASE_BEFORE_11_4 == 40 && DB_COMPATIBILITY_BEFORE_11_4 == 56);
 }
 
 impl SourceVersion {
