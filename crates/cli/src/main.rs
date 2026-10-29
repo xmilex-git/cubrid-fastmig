@@ -11,6 +11,7 @@ mod catalog_regeneration;
 mod finalize;
 mod heap_counter;
 mod limits;
+mod local_datetime;
 mod migrate;
 mod partition_streams;
 mod plan;

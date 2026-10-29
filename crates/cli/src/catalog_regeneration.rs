@@ -31,7 +31,6 @@ use fastmig_ondisk::catalog_dir::{BtStats, PKEYS_NUM};
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::{HeapReport, VacuumHorizon};
 use fastmig_ondisk::log_header::LogHeader;
-use fastmig_ondisk::value::Value;
 use fastmig_ondisk::{Btid, Oid, SourceVersion, VersionLine};
 use fastmig_progress::Meter;
 use std::collections::{BTreeMap, HashMap};
@@ -39,6 +38,7 @@ use std::io;
 use std::path::Path;
 
 use crate::limits::Limits;
+use crate::local_datetime::now_datetime;
 
 /// What the catalog part did, for report.json.
 pub struct CatalogOutcome {
@@ -73,18 +73,6 @@ impl CatalogOutcome {
             self.indexes_built,
             rows.join(", ")
         )
-    }
-}
-
-/// The migrate start time as a DATETIME (`created_time` / `updated_time` of new catalog rows, workspace#482 8).
-pub fn now_datetime() -> Value {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64);
-    // Julian day of 1970-01-01 is 2440588
-    Value::Datetime {
-        date: (2_440_588 + ms.div_euclid(86_400_000)) as u32,
-        time: ms.rem_euclid(86_400_000) as u32,
     }
 }
 

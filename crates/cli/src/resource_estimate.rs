@@ -35,7 +35,7 @@ use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 use fastmig_plan::version_pair::VersionPair;
 
-use crate::catalog_regeneration::now_datetime;
+use crate::local_datetime::now_datetime;
 
 /// One index's pairs, by its owner class (a BTID shared by classes has one row per class).
 pub struct IndexPairs {
