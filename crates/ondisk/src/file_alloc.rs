@@ -180,8 +180,13 @@ impl<'v> SpaceManager<'v> {
         })
     }
 
-    /// Engine `file_destroy` of a permanent file: every allocated page set to `PAGE_UNKNOWN` (as
-    /// `pgbuf_dealloc_page` leaves it), every sector released in the STAB, the tracker entry removed (R5 F1-F4).
+    /// Engine `file_destroy` of a permanent file: every sector released in the STAB, the tracker entry removed (R5
+    /// F1-F4). The pages keep their bytes; the engine's `pgbuf_dealloc_page` (`PAGE_UNKNOWN`) is left out: the engine
+    /// decides allocation from the file and sector tables, fixes a reallocated page as NEW_PAGE without reading it
+    /// (develop `page_buffer.c` `pgbuf_claim_bcb_for_fix`), and reads `PAGE_UNKNOWN` only through
+    /// OLD_PAGE_MAYBE_DEALLOCATED fixes of pages of a live heap (`heap_file.c`, `bestspace.cpp`, `btree_load.c`,
+    /// px_scan, the histogram sampler), which a destroyed file's pages are not. Rewriting them cost 2.2 GB of
+    /// copy-on-write on a clone target (workspace#536).
     pub fn destroy_file(&self, vfid: Vfid) -> io::Result<()> {
         let trk = self.trk_vfid;
         self.run(|op| {
@@ -193,15 +198,6 @@ impl<'v> SpaceManager<'v> {
                     "file {}|{} inconsistent: {issues:?}",
                     vfid.volid, vfid.fileid
                 )));
-            }
-            // page by page, not through the batch: nothing else in this operation touches the file's pages, and
-            // the batch would hold the whole file in memory (a big B-tree: ~400 MiB, workspace#526)
-            let mut p = vec![0u8; vols.io_pagesize()];
-            for v in ft.allocated_pages() {
-                vols.read_page_into(v, &mut p)?;
-                page::set_ptype(&mut p, PageType::Unknown);
-                page::reserved_mut(&mut p).pflag = 0;
-                vols.write_page(v, &p)?;
             }
             for s in &ft.sectors {
                 op.disk.release(vols, s.vsid)?;
