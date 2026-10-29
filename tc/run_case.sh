@@ -97,7 +97,7 @@ switch_bad=$(awk -F'\t' '$2 != 0 || $3 != 0 || $4 != 0 || $5 != 0 || $6 != 0 || 
 cores=$(wc -l <"$J/cores.txt")
 internal=$(wc -l <"$J/internal-errors.txt" 2>/dev/null || echo 0)
 # migration defects by code over every switched database, e.g. oids-not-ascending:10 (- when none)
-verify_codes=$(cat "$J"/switch/*/verify.jsonl 2>/dev/null | /usr/bin/grep -o "\"origin\":\"migration\".*\"code\":\"[a-z-]*\"" \
+verify_codes=$(cat "$J"/switch/*/volumes/fastmig/verify.jsonl 2>/dev/null | /usr/bin/grep -o "\"origin\":\"migration\".*\"code\":\"[a-z-]*\"" \
   | sed "s/.*\"code\":\"//; s/\"$//" | sort | uniq -c | awk "{printf \"%s%s:%s\", (NR > 1 ? \",\" : \"\"), \$2, \$1}")
 verdict=PASS
 [ "$ok" -ge 1 ] && [ "$nok" -eq 0 ] || verdict=FAIL
