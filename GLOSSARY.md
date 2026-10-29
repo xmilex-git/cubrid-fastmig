@@ -121,6 +121,14 @@ _Avoid_: 체크섬, 해시
 검증을 통과한 뒤 출발 DB의 파일을 지우는 단계. 출발을 지우는 것은 이 단계뿐이다.
 _Avoid_: 정리, cleanup, 커밋
 
+**포팅 TC (ported testcase)**:
+CUBRID shell 테스트케이스 가운데 unloaddb→loaddb를 거치는 것을, 원본을 고치지 않고 `tc/` 하네스로 돌려 첫 unloaddb 자리에서 cubrid-fastmig로 옮긴 DB를 쓰게 한 것. 기대 답은 원 TC의 것을 그대로 쓴다. TC 본문과 목록은 비공개 저장소에 있어 이 저장소에 두지 않는다.
+_Avoid_: 이식 TC, 변환 TC
+
+**전환 지점 (switch point)**:
+포팅 TC가 처음 unloaddb를 부르는 자리. 하네스가 여기서 그 TC가 만든 DB 전부를 migrate·verify·집합 비교하고, TC가 이어서 쓰는 DB를 도착 DB로 바꾼다.
+_Avoid_: 훅, 가로채기
+
 ## 볼륨 밖 자산
 
 **볼륨 밖 자산 (out-of-volume asset)**:

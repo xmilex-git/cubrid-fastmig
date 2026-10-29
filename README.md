@@ -42,6 +42,7 @@ not reported as migration defects.
 | `crates/index` | Parallel index rebuild |
 | `crates/verify` | Heap, index and catalog verifier |
 | `crates/cli` | The `cubrid-fastmig` command |
+| `tc/` | Ported testcases: CUBRID shell testcases run through the switch point (`just tc`, [tc/README.md](tc/README.md)) |
 
 ## Build
 

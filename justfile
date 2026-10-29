@@ -37,3 +37,7 @@ basedb VERSION VARIANT:
 
 _require-toolchain:
     @test -x .toolchain/bin/cargo || { echo "error: .toolchain is missing; run 'just toolchain' first" >&2; exit 1; }
+
+# Run ported testcases (tc/README.md) against the release build; needs FASTMIG_TC_CTP and FASTMIG_TC_SERVER_CTL.
+tc TC_ROOT TC_LIST INSTALL OUT: release
+    bash tc/run.sh {{TC_ROOT}} {{TC_LIST}} {{INSTALL}} target/release/cubrid-fastmig "${FASTMIG_TC_CTP:?FASTMIG_TC_CTP required}" "${FASTMIG_TC_SERVER_CTL:?FASTMIG_TC_SERVER_CTL required}" {{OUT}}
