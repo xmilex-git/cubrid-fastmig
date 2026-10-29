@@ -5,6 +5,8 @@ pub mod bt_stats;
 pub mod btree_page;
 pub mod build;
 pub mod build_error;
+pub mod build_many;
+pub mod heap_scan;
 pub mod index_shape;
 pub mod key_order;
 pub mod kway_merge;
@@ -22,6 +24,7 @@ pub mod worker_budget;
 
 pub use build::{BuiltIndex, build_index};
 pub use build_error::BuildError;
+pub use build_many::{IndexJob, build_indexes};
 pub use index_shape::IndexShape;
 pub use key_order::KeyOrder;
 pub use page_sink::PageSink;
