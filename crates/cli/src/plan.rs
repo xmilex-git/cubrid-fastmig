@@ -21,7 +21,7 @@ use fastmig_plan::{Plan, PlanInputs};
 
 use crate::args::{CliError, Parsed, parse};
 use crate::limits::{self, Limits};
-use crate::{plan_report, resource_estimate};
+use crate::{plan_report, resource_estimate, target_space};
 
 const HELP: &str = "\
 cubrid-fastmig plan <db> --dest <dir> [options]
@@ -190,6 +190,19 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
                 "resources: not estimated for 11.4 sources yet (migrate counts on the target)"
             ),
         }
+        let t = target_space::bound(
+            &plan,
+            est.as_ref(),
+            s.vols.io_pagesize() as u64,
+            fs::metadata(&s.lgat_path)?.len(),
+        );
+        let mib = |b: u64| b.div_ceil(1 << 20);
+        println!(
+            "target space taken at the start: {} MiB byte-copied volumes + {} MiB reserved (upper bound of the rest); {} MiB free",
+            mib(t.copy_bytes),
+            mib(t.extra_bytes),
+            mib(plan.available_bytes)
+        );
     }
     Ok(u8::from(!plan.refusals.is_empty()))
 }

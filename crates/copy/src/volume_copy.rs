@@ -13,6 +13,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use fastmig_ondisk::preallocate;
 use fastmig_progress::Meter;
 
 use crate::byte_copy::{CopyRange, InlineTreatment, copy_range};
@@ -33,6 +34,9 @@ pub struct VolumeJob {
     pub source: File,
     pub target: PathBuf,
     pub io_pagesize: usize,
+    /// The target was created and allocated in full by [`preallocate_targets`] at the start of the run: it is
+    /// byte-copied into, never cloned (workspace#526).
+    pub preallocated: bool,
 }
 
 pub use fastmig_plan::CopyMethod;
@@ -66,6 +70,11 @@ pub fn copy_volumes(
                 "volume {} size {size} is not a multiple of the IO page size {}",
                 job.volid, job.io_pagesize
             )));
+        }
+        if job.preallocated {
+            let dst = OpenOptions::new().write(true).open(&job.target)?;
+            *prepared[i].lock().unwrap() = Some((dst, CopyMethod::Copy, size));
+            return Ok(());
         }
         marker.record(&job.target)?;
         let dst = create_target(&job.target)?;
@@ -130,6 +139,24 @@ pub fn copy_volumes(
             bytes: *size,
         })
         .collect())
+}
+
+/// Creates the target of every job marked `preallocated` and allocates its full size, before the run writes
+/// anything else (workspace#526: the space a byte copy needs is taken at the start, so another process cannot take
+/// it during the run). Recorded in the marker first, like every target.
+pub fn preallocate_targets(jobs: &[VolumeJob], marker: &IncompleteMarker) -> io::Result<()> {
+    for job in jobs.iter().filter(|j| j.preallocated) {
+        let size = job.source.metadata()?.len();
+        marker.record(&job.target)?;
+        let dst = create_target(&job.target)?;
+        preallocate::allocate(&dst, size).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("allocating {size} B for {}: {e}", job.target.display()),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Creates the target new (an existing file is an error).

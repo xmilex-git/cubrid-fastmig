@@ -12,10 +12,11 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use fastmig_ondisk::preallocate;
 
 /// One range of the arena file: byte offset and length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,10 +33,6 @@ pub struct SpillArena {
     free: Mutex<BTreeMap<u64, u64>>,
 }
 
-unsafe extern "C" {
-    fn posix_fallocate(fd: i32, offset: i64, len: i64) -> i32;
-}
-
 impl SpillArena {
     /// Creates the file (it must not exist) and allocates all of its `size` bytes on the filesystem.
     pub fn create(path: &Path, size: u64) -> io::Result<Self> {
@@ -44,14 +41,9 @@ impl SpillArena {
             .write(true)
             .create_new(true)
             .open(path)?;
-        if size > 0 {
-            let len = i64::try_from(size).map_err(io::Error::other)?;
-            // SAFETY: the descriptor is open for writing for the whole call; offset 0 and len are in range
-            let rc = unsafe { posix_fallocate(file.as_raw_fd(), 0, len) };
-            if rc != 0 {
-                let _ = std::fs::remove_file(path);
-                return Err(io::Error::from_raw_os_error(rc));
-            }
+        if let Err(e) = preallocate::allocate(&file, size) {
+            let _ = std::fs::remove_file(path);
+            return Err(e);
         }
         Ok(Self {
             file,

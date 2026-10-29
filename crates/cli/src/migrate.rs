@@ -25,6 +25,7 @@ use std::time::Instant;
 use fastmig_catalog::output_sql::UPDATE_STATISTICS_SQL;
 use fastmig_copy::out_of_volume_asset::{self, AssetOutcome};
 use fastmig_copy::volume_copy::IO_BUF_BYTES;
+use fastmig_copy::volume_copy::preallocate_targets;
 use fastmig_copy::{
     AsIs, CopyMethod, IncompleteMarker, VolumeJob, VolumeOutcome, copy_volumes, durable,
     lob_manifest, new_log, new_log_start, open_source, register_db, volinfo, volume_paths,
@@ -50,6 +51,7 @@ use crate::limits::{self, Limits};
 use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
 use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
+use crate::target_space::{self, Reservation, TargetSpace};
 use crate::verify::{DbArg, run_verifier};
 use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
 use fastmig_index::spill_arena::SpillArena;
@@ -187,12 +189,18 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         limits::physical_memory()?,
     )?;
     let mem = o.limits.memory_limit_bytes;
+    let target = target_space::bound(
+        &plan,
+        est.as_ref(),
+        src.vols.io_pagesize() as u64,
+        fs::metadata(&src.lgat_path)?.len(),
+    );
     let temp_limit = temp_disk_choice::choose(
         temp_disk,
         est.as_ref(),
         mem,
         o.verify,
-        plan.needed_bytes,
+        target.total(),
         plan.available_bytes,
         &o.limits.spill_dir,
         &o.plan.target_dir,
@@ -207,6 +215,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             plan,
             est,
             temp_limit,
+            target,
         },
         progress,
     )
@@ -246,6 +255,7 @@ struct Begun {
     plan: Plan,
     est: Option<ResourceEstimate>,
     temp_limit: Option<u64>,
+    target: TargetSpace,
 }
 
 /// Returns report.json.
@@ -267,6 +277,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     };
     let resources = b.est.as_ref().map_or("null".into(), |e| e.json(mem));
     let temp_limit = b.temp_limit;
+    let target = b.target;
     for w in &plan.warnings {
         rep.progress.warn(format!("warning: {w}"));
     }
@@ -289,6 +300,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             source: open_source(&v.path)?,
             target,
             io_pagesize: src.vols.io_pagesize(),
+            preallocated: v.copy_method == CopyMethod::Copy,
         });
     }
     let bytes = plan.volumes.iter().map(|v| v.bytes).sum();
@@ -297,7 +309,17 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     // until the copy shows what was cloned, assume every byte is written and synced
     rep.progress.set_total(DURABLE_SYNC, bytes);
     let marker = IncompleteMarker::prepare(&po.target_dir)?;
-    // the temp disk limit is taken from the filesystem now, before the first byte of the target (workspace#526)
+    marker.create_dir_all(&o.log_dir)?;
+    let fastmig_dir = po.target_dir.join("fastmig");
+    marker.create_dir_all(&fastmig_dir)?;
+    // every byte the run may write is taken from the filesystems now, before the first byte of the target
+    // (workspace#526): byte-copied volumes in full, one reservation for the rest, the temp disk limit
+    preallocate_targets(&jobs, &marker)?;
+    let _reservation = Reservation::take(
+        &marker,
+        &fastmig_dir.join("reserve-target"),
+        b.target.extra_bytes,
+    )?;
     if let Some(l) = temp_limit {
         marker.create_dir_all(&limits.spill_dir)?;
         let path = limits.spill_dir.join("arena");
@@ -309,9 +331,6 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             ))
         })?));
     }
-    marker.create_dir_all(&o.log_dir)?;
-    let fastmig_dir = po.target_dir.join("fastmig");
-    marker.create_dir_all(&fastmig_dir)?;
     write_outputs(
         &marker,
         &fastmig_dir,
@@ -532,10 +551,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &catalog.json(),
         added_volumes,
         &format!(
-            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}}}",
+            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_reserved_bytes\": {}}}",
             temp_limit.map_or("null".into(), |l| l.to_string()),
             limits.temp_disk.is_some(),
-            TEMP_DISK.now_and_peak().1
+            TEMP_DISK.now_and_peak().1,
+            target.copy_bytes,
+            target.extra_bytes
         ),
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;

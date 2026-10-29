@@ -116,6 +116,12 @@ pub struct Plan {
     pub lob: LobScan,
     pub java: DirSize,
     pub java_static: DirSize,
+    /// Pages of the source's B-tree and overflow key files (what the rebuilt trees replace).
+    pub source_btree_pages: u64,
+    /// Heap pages the run may rewrite in place, an upper bound (workspace#526): what a cloned volume must unshare
+    /// besides the new B-trees — every heap page when the catalog is regenerated (11.4 → develop), else the
+    /// treated pages and the root heap (class objects get the rebuilt BTIDs).
+    pub rewritten_pages_bound: u64,
     /// Bytes the target filesystem needs and has (pre-check).
     pub needed_bytes: u64,
     pub available_bytes: u64,
@@ -511,6 +517,11 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     // system ones belong to the catalog regeneration; same-version path: every class heap and the root heap)
     let pending = VacuumHorizon::read(i.vols, i.log, boot.vacuum_data_vfid)?.pending;
     let pages_of = |h: Hfid| heap_pages.get(&(h.vfid.volid, h.vfid.fileid)).copied();
+    let rewritten_pages_bound = if regenerates {
+        heap_pages.values().sum()
+    } else {
+        root_heap_pages(&heap_pages, boot.rootclass_hfid)
+    };
     let mut treated_pages: u64 = classes
         .iter()
         .zip(&treatments)
@@ -568,6 +579,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         lob,
         java,
         java_static,
+        source_btree_pages: btree_pages,
+        rewritten_pages_bound: rewritten_pages_bound + if regenerates { 0 } else { treated_pages },
         needed_bytes: needed,
         available_bytes: available,
         refusals,
@@ -591,4 +604,12 @@ fn sharing_lob_base(dbtxt: &Path, me: &str, base: &Path) -> io::Result<Vec<Strin
         .filter(|f| f[4].strip_prefix("file:").map(Path::new) == Some(base))
         .map(|f| f[0].to_string())
         .collect())
+}
+
+/// Pages of the root heap (its class objects are rewritten with the rebuilt BTIDs on every path).
+fn root_heap_pages(heap_pages: &std::collections::HashMap<(i16, i32), u64>, root: Hfid) -> u64 {
+    heap_pages
+        .get(&(root.vfid.volid, root.vfid.fileid))
+        .copied()
+        .unwrap_or(0)
 }

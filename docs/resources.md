@@ -51,6 +51,22 @@ This is an upper bound: the table never shows less than a run can write.
 - A limit at or above temp max runs as one batch; below it the run counts the pairs again on the target (after
   page treatment, exact) and batches by those counts.
 
+## The target side
+
+Right after the incomplete marker, before the first byte of the target, `migrate` also takes the target space:
+
+- every volume the plan byte-copies is created and allocated in full (`volume_copy::preallocate_targets`); the
+  copy then writes into it and never clones it;
+- one reservation file, `<dest>/fastmig/reserve-target`, holds an upper bound of everything else the run may
+  write, until the run ends: the pages a cloned volume unshares (`Plan::rewritten_pages_bound` — every heap page
+  when the catalog is regenerated, else the treated pages and the root heap), the new B-trees (a leaf record takes
+  at most twice a pair's spill record, leaves at most 90 % full, non-leaf pages fewer than leaves:
+  `5 · T_i / page + 4` pages per index), 64 pages of catalog slack, the referenced LOB and Java files and the new
+  log. Counting it twice while the run writes is accepted.
+
+The free-space check (with the temp limit when the spill directory is on the target filesystem) uses this total;
+`plan` prints it.
+
 ## The spill arena
 
 With a temp disk limit, `migrate` allocates one file of that size (`<spill-dir>/arena`, `posix_fallocate`) right
@@ -69,4 +85,5 @@ at any moment of the run (the build and, with `--verify`, the verifier).
   refused, `--temp-disk <size>` is taken and checked against the exact count on the target before the build.
 - The verifier does not batch: with `--verify` the limit must be temp max (T1 develop dirty, `--mem 64M`,
   `--temp-disk min --verify` before this rule: build peak 0.85 MB under a 1.48 MB limit, the verifier 7.5 MB).
-- The target side is not reserved yet: another process can still fill the target filesystem during the copy.
+- The B-tree bound for 11.4 sources is three times the source's B-tree pages until their pair counts exist
+  (`target_space` shortcut).

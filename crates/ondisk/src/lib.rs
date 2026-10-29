@@ -24,6 +24,7 @@ pub mod lsa;
 pub mod page;
 pub mod page_batch;
 pub mod partition_stream;
+pub mod preallocate;
 pub mod record;
 pub mod sector_reserve;
 pub mod sector_table;
