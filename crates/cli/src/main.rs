@@ -2,7 +2,7 @@
 //!
 //! Input: the command line. Output: the subcommand's effect; exit code 0 on success, 2 on usage errors, 1 on
 //! failures.
-//! Source: decision G1 workspace#481 (commands plan, migrate, verify, finalize). `migrate` and `verify` exist so far.
+//! Source: decision G1 workspace#481 (commands plan, migrate, verify, finalize). `migrate`, `verify` and the check `set-comparison` (ADR 0007) exist so far.
 //!
 //! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
@@ -12,12 +12,14 @@ mod limits;
 mod migrate;
 mod partition_streams;
 mod progress_args;
+mod set_comparison;
 mod template_extract;
+mod unload_files;
 mod verify;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cubrid-fastmig migrate <db> --dest <dir> [options]   (cubrid-fastmig migrate --help)\n       cubrid-fastmig verify <db> [options]                  (cubrid-fastmig verify --help)";
+const USAGE: &str = "usage: cubrid-fastmig migrate <db> --dest <dir> [options]   (cubrid-fastmig migrate --help)\n       cubrid-fastmig verify <db> [options]                  (cubrid-fastmig verify --help)\n       cubrid-fastmig set-comparison <source-prefix> <target-prefix>   (cubrid-fastmig set-comparison --help)";
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -26,19 +28,9 @@ fn main() -> ExitCode {
         Some("template-extract") => template_extract::run(&argv[1..]),
         Some("partition-streams") => partition_streams::run(&argv[1..]),
         // verify has its own exit codes: 1 = migration defects, 2 = usage or tool error (G3 workspace#483)
-        Some("verify") => {
-            return match verify::run(&argv[1..]) {
-                Ok(code) => ExitCode::from(code),
-                Err(args::CliError::Usage(m)) => {
-                    eprintln!("error: {m}\n{USAGE}");
-                    ExitCode::from(2)
-                }
-                Err(args::CliError::Failed(e)) => {
-                    eprintln!("error: {e}");
-                    ExitCode::from(2)
-                }
-            };
-        }
+        Some("verify") => return checker_exit(verify::run(&argv[1..])),
+        // 1 = the two unload sets differ (ADR 0007)
+        Some("set-comparison") => return checker_exit(set_comparison::run(&argv[1..])),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -53,6 +45,21 @@ fn main() -> ExitCode {
         Err(args::CliError::Failed(e)) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Exit code of a checking subcommand: its own code (0 = clean, 1 = findings), 2 on usage or tool error.
+fn checker_exit(r: Result<u8, args::CliError>) -> ExitCode {
+    match r {
+        Ok(code) => ExitCode::from(code),
+        Err(args::CliError::Usage(m)) => {
+            eprintln!("error: {m}\n{USAGE}");
+            ExitCode::from(2)
+        }
+        Err(args::CliError::Failed(e)) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
         }
     }
 }
