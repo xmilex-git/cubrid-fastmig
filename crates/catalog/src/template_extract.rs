@@ -14,10 +14,11 @@ use fastmig_ondisk::volume_set::VolumeSet;
 use crate::source_classes::{read_classes, read_rows};
 use crate::template::{CatalogTemplate, TemplateRecord};
 
-/// System classes whose rows the template carries: the static rows (`_db_data_type`, `dual`), and the users,
+/// System classes whose rows the template carries: the static rows (`_db_data_type`, `dual`), the users,
 /// passwords, authorizations and grants of a fresh database (DBA, PUBLIC, INFORMATION_SCHEMA and their grants on
-/// system classes); `db_root` for its one row.
-pub const ROW_CLASSES: [&str; 7] = [
+/// system classes), `db_root` for its one row, and the built-in charsets and collations the source's rows are
+/// checked against (workspace#482 decision 3).
+pub const ROW_CLASSES: [&str; 9] = [
     "_db_data_type",
     "dual",
     "_db_user",
@@ -25,6 +26,8 @@ pub const ROW_CLASSES: [&str; 7] = [
     "_db_authorization",
     "_db_auth",
     "db_root",
+    "_db_charset",
+    "_db_collation",
 ];
 
 pub fn extract(

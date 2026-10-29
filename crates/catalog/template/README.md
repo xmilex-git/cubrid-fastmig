@@ -27,7 +27,7 @@ databases and can be removed afterwards. The script runs `just run template-extr
 
 The format is described in `src/template.rs`. Per file: 74 `class` lines (30 catalog tables, 25 system views,
 19 `INFORMATION_SCHEMA` views) and the rows of `_db_data_type`, `dual`, `_db_user`, `_db_password`,
-`_db_authorization`, `_db_auth` and `db_root` (`ROW_CLASSES` in `src/template_extract.rs`).
+`_db_authorization`, `_db_auth`, `db_root`, `_db_charset` and `_db_collation` (`ROW_CLASSES` in `src/template_extract.rs`).
 
 Two builds from the same install differ only in the `created_time`/`updated_time` values of the `_db_user` and
 `_db_auth` rows; regeneration replaces those with the migration start time (workspace#482 decision 8).
