@@ -149,41 +149,7 @@ impl HeapScan<'_> {
     }
 
     fn resolve(&self, oid: Oid, rtype: RecordType, rec: &[u8]) -> io::Result<Option<HeapRecord>> {
-        Ok(Some(match rtype {
-            RecordType::Home => HeapRecord {
-                oid,
-                kind: HomeKind::Home,
-                bytes: rec.to_vec(),
-            },
-            RecordType::Relocation => {
-                let newhome = Oid::read(rec, 0);
-                let page = self.vs.read_page(newhome.vpid())?;
-                let (t, bytes) = slotted(&page, newhome.vpid())?
-                    .record(newhome.slotid as usize)
-                    .ok_or_else(|| {
-                        invalid(format!("{oid:?}: relocation to empty slot {newhome:?}"))
-                    })?;
-                if t != RecordType::NewHome {
-                    return Err(invalid(format!(
-                        "{oid:?}: relocation target {newhome:?} is {t:?}"
-                    )));
-                }
-                HeapRecord {
-                    oid,
-                    kind: HomeKind::Relocated { newhome },
-                    bytes: bytes.to_vec(),
-                }
-            }
-            RecordType::BigOne => {
-                let first_overflow = Oid::read(rec, 0).vpid();
-                HeapRecord {
-                    oid,
-                    kind: HomeKind::Big { first_overflow },
-                    bytes: read_overflow(self.vs, first_overflow)?,
-                }
-            }
-            _ => return Ok(None),
-        }))
+        resolve_record(self.vs, oid, rtype, rec)
     }
 
     fn step(&mut self) -> io::Result<Option<HeapRecord>> {
@@ -207,6 +173,49 @@ impl HeapScan<'_> {
             self.page = None;
         }
     }
+}
+
+/// The whole record of the object whose home slot `oid` holds `rec` of type `rtype`: REC_HOME as is, REC_RELOCATION
+/// resolved to its REC_NEWHOME, REC_BIGONE assembled from its overflow pages; `None` for any other slot type.
+pub fn resolve_record(
+    vs: &VolumeSet,
+    oid: Oid,
+    rtype: RecordType,
+    rec: &[u8],
+) -> io::Result<Option<HeapRecord>> {
+    Ok(Some(match rtype {
+        RecordType::Home => HeapRecord {
+            oid,
+            kind: HomeKind::Home,
+            bytes: rec.to_vec(),
+        },
+        RecordType::Relocation => {
+            let newhome = Oid::read(rec, 0);
+            let page = vs.read_page(newhome.vpid())?;
+            let (t, bytes) = slotted(&page, newhome.vpid())?
+                .record(newhome.slotid as usize)
+                .ok_or_else(|| invalid(format!("{oid:?}: relocation to empty slot {newhome:?}")))?;
+            if t != RecordType::NewHome {
+                return Err(invalid(format!(
+                    "{oid:?}: relocation target {newhome:?} is {t:?}"
+                )));
+            }
+            HeapRecord {
+                oid,
+                kind: HomeKind::Relocated { newhome },
+                bytes: bytes.to_vec(),
+            }
+        }
+        RecordType::BigOne => {
+            let first_overflow = Oid::read(rec, 0).vpid();
+            HeapRecord {
+                oid,
+                kind: HomeKind::Big { first_overflow },
+                bytes: read_overflow(vs, first_overflow)?,
+            }
+        }
+        _ => return Ok(None),
+    }))
 }
 
 impl Iterator for HeapScan<'_> {

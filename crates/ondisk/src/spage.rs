@@ -113,6 +113,28 @@ impl<'a> SlottedPage<'a> {
         get_i32(self.area, 8)
     }
 
+    pub fn cont_free(&self) -> i32 {
+        get_i32(self.area, 12)
+    }
+
+    pub fn offset_to_free_area(&self) -> i32 {
+        get_i32(self.area, 16)
+    }
+
+    /// Slot `slotid` as stored, unchecked: (offset, length, record type bits); `None` past `num_slots`.
+    /// For checkers that must see the slots `record` treats as unknown.
+    pub fn raw_slot(&self, slotid: usize) -> Option<(usize, usize, u32)> {
+        (slotid < self.num_slots()).then(|| {
+            let raw = get_u32(self.area, slot_pos(self.area.len(), slotid));
+            ((raw & 0x3fff) as usize, (raw >> 14 & 0x3fff) as usize, raw >> 28)
+        })
+    }
+
+    /// Length of the user area this page view covers.
+    pub fn area_len(&self) -> usize {
+        self.area.len()
+    }
+
     /// The record in `slotid` with its type, or `None` for a slot the engine treats as unknown
     /// (out of range, empty offset, offset inside the header) or one whose bytes overrun the page.
     pub fn record(&self, slotid: usize) -> Option<(RecordType, &'a [u8])> {
