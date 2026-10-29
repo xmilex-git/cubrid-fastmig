@@ -32,6 +32,7 @@ comes from, without reading the rest of the tree.
   | [R6](https://github.com/xmilex-git/workspace/blob/research/fastmig-r6-index-build/docs/research/fastmig/r6-index-build.md) | index build port |
   | [R7](https://github.com/xmilex-git/workspace/blob/research/fastmig-r7-xasl-streams/docs/research/fastmig/r7-xasl-streams.md) | serialized XASL streams and stored opcodes |
   | [R8](https://github.com/xmilex-git/workspace/blob/research/fastmig-r8-older-pairs/docs/research/fastmig/r8-older-pairs.md) | 10.2..11.3 sources: on-disk differences from 11.4 |
+  | [R11](https://github.com/xmilex-git/workspace/blob/research/fastmig-r11-old-system-class-text/docs/research/fastmig/r11-old-system-class-text.md) | system class names in user text before develop: the system name mapping table |
 
   A later research doc gets a row here in the commit that first cites it.
 - **Engine source**: `~/dev/cubrid-worktree/develop` on the dev host, release lines at

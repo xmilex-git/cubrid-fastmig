@@ -7,7 +7,6 @@ pub mod copy_method;
 pub mod free_space;
 pub mod lob_scan;
 pub mod migration_plan;
-pub mod system_view_refs;
 pub mod version_pair;
 
 pub use copy_method::CopyMethod;

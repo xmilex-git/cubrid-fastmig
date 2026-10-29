@@ -96,6 +96,10 @@ _Avoid_: 보통 인덱스, 기본 인덱스
 키나 포함 여부가 식 평가에 달린 함수 인덱스와 필터 인덱스. 도구는 만들지 않고, 사용자가 도착 DB에서 실행할 DDL로만 넘긴다.
 _Avoid_: 미지원 인덱스, 누락 인덱스
 
+**시스템 이름 사상 (system name mapping)**:
+사용자 뷰 query spec과 trigger condition·action에 저장된 출발 시스템 클래스 이름을 develop 이름으로 바꿔 쓰는 일(`db_trig`→`db_trigger`, `db_password`→`_db_password`, owner가 DBA 그룹이면 `db_trigger`·`db_user`·`db_authorization`·`db_serial`→`_db_*`). FROM·JOIN 항의 클래스 이름 토큰만 바꾸고 별칭과 칼럼 참조는 둔다. 텍스트마다 결과는 재작성·거부(바꿔도 의미를 지킬 수 없음, 예: `db_authorizations`, `db_user`의 `triggers`)·그대로+경고 셋 중 하나다. 클래스 객체와 `_db_query_spec`·`_db_trigger` 행에 같은 값을 쓰고, 재작성 목록은 plan 출력과 plan.json `system_name_rewrites`에 남는다. 컴파일된 코드를 그대로 복사하는 PL/CSQL 소스는 바꾸지 않고 거부·경고만 한다([workspace#542](https://github.com/xmilex-git/workspace/issues/542), 근거 R11 [workspace#519](https://github.com/xmilex-git/workspace/issues/519)).
+_Avoid_: 이름 치환, 시스템 뷰 검사(옛 G1 거부·경고만 하던 검사)
+
 ## 검증과 원본 삭제
 
 **검증기 (verifier)**:

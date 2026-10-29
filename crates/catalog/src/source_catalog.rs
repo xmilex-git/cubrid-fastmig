@@ -18,6 +18,7 @@ use crate::classify::{ClassPlan, classify};
 use crate::rows_before_11_4::to_11_4_shape;
 use crate::source_classes::{SourceClass, read_classes};
 use crate::static_rows::FROM_SOURCE;
+use crate::stored_texts::map_stored_texts;
 use crate::system_classes::same_slot;
 use crate::system_table::SystemTable;
 
@@ -48,7 +49,7 @@ impl SourceCatalog {
         let line = version.line().ok_or_else(|| {
             io::Error::other(format!("source {} has no codec line", version.name()))
         })?;
-        let classes = read_classes(vs, line)?;
+        let mut classes = read_classes(vs, line)?;
         let plans = classify(&classes);
         let rows = |name: &str| -> io::Result<Vec<Row>> {
             let c = classes
@@ -57,7 +58,7 @@ impl SourceCatalog {
                 .ok_or_else(|| missing(name))?;
             read_rows(vs, line, c)
         };
-        let mut same_slot = same_slot(version)
+        let mut same_slot: HashMap<SystemTable, Vec<Row>> = same_slot(version)
             .map(|t| Ok((t, rows(t.source_name().unwrap_or_default())?)))
             .collect::<io::Result<_>>()?;
         to_11_4_shape(version, &mut same_slot, &classes)
@@ -66,6 +67,17 @@ impl SourceCatalog {
             .iter()
             .map(|t| Ok((*t, rows(t.name())?)))
             .collect::<io::Result<_>>()?;
+        // old system class names in view and trigger texts become develop names (workspace#542); a text the mapping
+        // refuses stays as it is: the plan reports it and migrate does not start
+        let mut triggers = same_slot
+            .remove(&SystemTable::DbTrigger)
+            .unwrap_or_default();
+        let users = same_slot
+            .get(&SystemTable::DbUser)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        map_stored_texts(version, &mut classes, users, &mut triggers);
+        same_slot.insert(SystemTable::DbTrigger, triggers);
         Ok(SourceCatalog {
             version,
             line,

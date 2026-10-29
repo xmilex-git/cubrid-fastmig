@@ -158,7 +158,12 @@ pub mod serial {
 
 /// `_db_trigger` (11.4 `db_trigger`).
 pub mod trigger {
-    use super::{Values, text};
+    use super::{Values, object, text};
+    use fastmig_ondisk::Oid;
+
+    pub fn owner(r: &Values) -> Option<Oid> {
+        object(r.get("owner"))
+    }
 
     pub fn name(r: &Values) -> Option<&[u8]> {
         text(r.get("name"))

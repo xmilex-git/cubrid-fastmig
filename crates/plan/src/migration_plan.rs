@@ -1,6 +1,6 @@
 //! The migration plan: everything decided before a byte is written — the version pair, each volume's copy method,
 //! each class's page treatment grade, the deferred indexes, the LOB manifest, and the pre-check's refusals and
-//! warnings. `plan` prints it; `migrate` builds the same plan, refuses on any refusal, and follows it.
+//! warnings and the system name rewrites. `plan` prints it; `migrate` builds the same plan, refuses on any refusal, and follows it.
 //!
 //! Input: [`PlanInputs`] (the open source, its log header, the target directory and choices). Output: [`Plan`].
 //! Source: decision G1 workspace#481 (plan command, pre-check refusals and warnings, copy method × page treatment
@@ -21,8 +21,10 @@ use fastmig_catalog::output_sql::{deferred_indexes_sql, plcsql_routines, recompi
 use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
 use fastmig_catalog::sp_target_signature::{TARGET_CLASS_LEN, split_target_signature};
+use fastmig_catalog::stored_texts::map_stored_texts;
 use fastmig_catalog::system_classes::SystemClassRole;
-use fastmig_catalog::system_rows::{stored_procedure, stored_procedure_code, trigger};
+use fastmig_catalog::system_name_mapping::judge;
+use fastmig_catalog::system_rows::{stored_procedure, stored_procedure_code};
 use fastmig_catalog::system_table::SystemTable;
 use fastmig_catalog::{attr_default, template_store};
 use fastmig_ondisk::boot_parm::BootDbParm;
@@ -38,7 +40,6 @@ use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, file_tracker};
 use crate::copy_method::{self, CopyMethod};
 use crate::free_space;
 use crate::lob_scan::{self, LobScan};
-use crate::system_view_refs;
 use crate::version_pair::VersionPair;
 
 pub struct PlanInputs<'a> {
@@ -126,6 +127,9 @@ pub struct Plan {
     /// Free bytes of the target filesystem (the need is `cubrid-fastmig` `target_space`, with the resource estimate).
     pub available_bytes: u64,
     /// Non-empty means migrate does not start.
+    /// Old system class names replaced in view and trigger text: `<object>: <from> -> <to> at byte <n>`
+    /// (workspace#542).
+    pub system_name_rewrites: Vec<String>,
     pub refusals: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -237,6 +241,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     let regenerates = pair.regenerates_catalog();
     refusals.extend(pair.refusal());
     let mut warnings = Vec::new();
+    let mut system_name_rewrites = Vec::new();
 
     // the log and the volumes: one cleanly shut down database
     if !i.log.is_shutdown {
@@ -452,41 +457,51 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                 Err(e) => refusals.push(format!("{}: class object rewrite: {}", p.name, e.what)),
             }
         }
-        // user SQL text naming 11.4 system views (G1)
-        let mut texts: Vec<(String, Vec<u8>)> = Vec::new();
-        for c in classes.iter().filter(|c| !c.class.is_system_class()) {
-            for q in &c.class.query_specs {
-                texts.push((
-                    format!("view {}", String::from_utf8_lossy(&c.class.name)),
-                    q.clone(),
-                ));
+        // user SQL text naming old system classes: views and triggers get the develop names, the rest refuses or
+        // warns (workspace#542); the engine recompiles view and trigger text, so only that text is rewritten
+        let mut mapped = classes.clone();
+        let users = rows_of(i.vols, line, &classes, SystemTable::DbUser)?;
+        let mut triggers = rows_of(i.vols, line, &classes, SystemTable::DbTrigger)?;
+        for (object, j) in map_stored_texts(version, &mut mapped, &users, &mut triggers) {
+            for r in &j.renames {
+                system_name_rewrites
+                    .push(format!("{object}: {} -> {} at byte {}", r.from, r.to, r.at));
             }
+            refusals.extend(j.refusals.iter().map(|r| {
+                format!("{object} {r}; fix: recreate it on the source without that name, then migrate again")
+            }));
+            warnings.extend(j.warnings.iter().map(|w| {
+                format!(
+                    "{object} {w}; fix: recreate it on the target if it must read the renamed table"
+                )
+            }));
         }
-        for r in rows_of(i.vols, line, &classes, SystemTable::DbTrigger)? {
-            let name = trigger::name(&r.values)
-                .map(String::from_utf8_lossy)
-                .unwrap_or_default();
-            let columns = [
-                ("condition", trigger::condition(&r.values)),
-                ("action_definition", trigger::action_definition(&r.values)),
-            ];
-            for (col, text) in columns {
-                if let Some(t) = text {
-                    texts.push((format!("trigger {name} {col}"), t.to_vec()));
-                }
-            }
-        }
+        // PL/CSQL keeps its compiled code, which develop cannot recompile from a rewritten source (workspace#542)
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedureCode)? {
             let name = stored_procedure_code::name(&r.values)
                 .map(String::from_utf8_lossy)
                 .unwrap_or_default();
-            if let Some(t) = stored_procedure_code::scode(&r.values) {
-                texts.push((format!("stored procedure code {name}"), t.to_vec()));
-            }
+            let Some(t) = stored_procedure_code::scode(&r.values) else {
+                continue;
+            };
+            let j = judge(version, t, false);
+            let object = format!("stored procedure code {name}");
+            refusals.extend(j.renames.iter().map(|r| {
+                format!(
+                    "{object} names system class {}, which develop names {}; its compiled code is copied as is; \
+                     fix: drop it on the source, migrate, then create it on the target with {}",
+                    r.from, r.to, r.to
+                )
+            }));
+            refusals.extend(j.refusals.iter().map(|r| {
+                format!("{object} {r}; fix: drop it on the source, migrate, then create it on the target")
+            }));
+            warnings.extend(j.warnings.iter().map(|w| {
+                format!(
+                    "{object} {w}; fix: on the target, edit its source before running fastmig/recompile-plcsql.sql"
+                )
+            }));
         }
-        let v = system_view_refs::check(texts.iter().map(|(o, t)| (o.clone(), t.as_slice())));
-        refusals.extend(v.refusals);
-        warnings.extend(v.warnings);
     }
 
     // PL/CSQL routines keep their compiled code; the user may recompile (G6 6)
@@ -605,6 +620,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         java_static,
         rewritten_pages_bound: rewritten_pages_bound + if regenerates { 0 } else { treated_pages },
         available_bytes: available,
+        system_name_rewrites,
         refusals,
         warnings,
     })

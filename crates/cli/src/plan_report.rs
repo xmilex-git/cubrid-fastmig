@@ -68,7 +68,7 @@ pub fn json(p: &Plan, t: &TargetSpace, resources: &str) -> String {
         })
         .collect();
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"copy_bytes\": {}, \"log_bytes\": {}, \"reserved_bytes\": {}, \"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"copy_bytes\": {}, \"log_bytes\": {}, \"reserved_bytes\": {}, \"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
         p.source_version.name(),
         line_name(p.version_pair.target),
         strings(p.refusals.iter().map(String::as_str)),
@@ -76,6 +76,7 @@ pub fn json(p: &Plan, t: &TargetSpace, resources: &str) -> String {
         vols.join(", "),
         strings(p.re_encoded()),
         strings(p.deferred_indexes.iter().map(String::as_str)),
+        strings(p.system_name_rewrites.iter().map(String::as_str)),
         p.plcsql_routines,
         l.referenced.len(),
         l.referenced_bytes(),
@@ -133,6 +134,13 @@ pub fn table(p: &Plan, t: &TargetSpace) -> String {
         p.deferred_indexes.len(),
         p.deferred_indexes.join(", ")
     ));
+    s.push_str(&format!(
+        "system name rewrites ({}):\n",
+        p.system_name_rewrites.len()
+    ));
+    p.system_name_rewrites
+        .iter()
+        .for_each(|r| s.push_str(&format!("  {r}\n")));
     s.push_str(&format!(
         "LOB: {} referenced files ({} B), {} orphan files ({} B), {} outside the base\n",
         p.lob.referenced.len(),
