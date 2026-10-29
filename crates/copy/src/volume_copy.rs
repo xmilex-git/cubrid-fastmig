@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use fastmig_progress::Meter;
 
-use crate::byte_copy::{CopyRange, PageTreatment, copy_range};
+use crate::byte_copy::{CopyRange, InlineTreatment, copy_range};
 use crate::clone_file::try_clone;
 use crate::incomplete_marker::IncompleteMarker;
 use crate::worker_pool;
@@ -54,7 +54,7 @@ pub struct VolumeOutcome {
 pub fn copy_volumes(
     jobs: &[VolumeJob],
     worker_limit: usize,
-    treatment: &dyn PageTreatment,
+    treatment: &dyn InlineTreatment,
     allow_clone: bool,
     marker: &IncompleteMarker,
     meter: Meter,

@@ -11,7 +11,9 @@ use std::io;
 use std::os::unix::fs::FileExt;
 
 /// A page treatment applied by the copy method copy to pages on their way to the target.
-pub trait PageTreatment: Sync {
+/// (The page treatment grade itself is `fastmig_ondisk::PageTreatment`; this trait is the function that applies it
+/// to a chunk inside the copy pass.)
+pub trait InlineTreatment: Sync {
     /// `pages` holds whole IO pages of volume `volid`; the first one is page `first_pageid`.
     fn patch(
         &self,
@@ -25,7 +27,7 @@ pub trait PageTreatment: Sync {
 /// The "as is" treatment: pages are copied byte for byte.
 pub struct AsIs;
 
-impl PageTreatment for AsIs {
+impl InlineTreatment for AsIs {
     fn patch(&self, _: i16, _: i32, _: usize, _: &mut [u8]) -> io::Result<()> {
         Ok(())
     }
@@ -45,7 +47,7 @@ pub struct CopyRange<'a> {
 pub fn copy_range(
     range: &CopyRange,
     buf: &mut [u8],
-    treatment: &dyn PageTreatment,
+    treatment: &dyn InlineTreatment,
 ) -> io::Result<()> {
     let mut pos = range.start;
     while pos < range.end {
