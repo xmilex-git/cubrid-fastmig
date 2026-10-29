@@ -14,6 +14,7 @@
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -128,6 +129,24 @@ impl IncompleteMarker {
     pub fn finish(self) -> io::Result<()> {
         fs::remove_file(&self.path)
     }
+}
+
+/// Bytes the files a previous run listed in `target_dir`'s marker hold on `target_dir`'s filesystem: a rerun
+/// removes them before it writes, so its free-space check counts them as free (workspace#526: a rerun after a kill
+/// on a filesystem the first run filled was refused). 0 without a marker.
+pub fn reclaimable_bytes(target_dir: &Path) -> io::Result<u64> {
+    let listed = match fs::read_to_string(target_dir.join(MARKER_NAME)) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let dev = fs::metadata(target_dir)?.dev();
+    Ok(listed
+        .lines()
+        .filter_map(|l| fs::symlink_metadata(l.strip_prefix(SCRATCH).unwrap_or(l)).ok())
+        .filter(|m| m.is_file() && m.dev() == dev)
+        .map(|m| m.blocks() * 512)
+        .sum())
 }
 
 /// Removes the paths a previous run listed, newest first, so directories are empty by the time they are reached.

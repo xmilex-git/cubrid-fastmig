@@ -41,7 +41,13 @@ fn room_for(
     })
 }
 
-fn choices(e: &ResourceEstimate) -> String {
+fn choices(e: &ResourceEstimate, verify: bool) -> String {
+    if let Some(v) = e.verify_min().filter(|_| verify) {
+        return format!(
+            "a limit of at least {} MiB (--verify: the verifier spills every index at once), or no --verify",
+            mib(v)
+        );
+    }
     let (lo, hi) = (e.temp_min(), e.temp_max());
     let b = e.batches(lo).unwrap_or(0);
     format!(
@@ -80,7 +86,7 @@ pub fn choose(
                     "max ({} MiB) and the target's {} MiB do not fit the free space; choose {}",
                     mib(hi),
                     mib(needed),
-                    choices(e)
+                    choices(e, verify)
                 )));
             }
             hi
@@ -116,7 +122,7 @@ fn ask(e: &ResourceEstimate, mem: u64, lo: u64, hi: u64) -> io::Result<u64> {
         err,
         "{}Choose the temp disk limit of this run: {}.\ntemp disk [max]: ",
         e.table(mem),
-        choices(e)
+        choices(e, lo == hi)
     )?;
     err.flush()?;
     let mut line = String::new();

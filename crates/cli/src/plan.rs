@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fastmig_copy::{new_log, open_locked_log, register_db};
+use fastmig_copy::{incomplete_marker, new_log, open_locked_log, register_db};
 use fastmig_ondisk::databases_txt::{self, DatabaseEntry};
 use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
@@ -163,6 +163,8 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
     if let Err(e) = register_db::check_name_free(&o.target_dbtxt, &o.target_name) {
         plan.refusals.push(e.to_string());
     }
+    // a rerun removes what the previous run left before it writes: that space is free to it (workspace#526)
+    plan.available_bytes += incomplete_marker::reclaimable_bytes(&o.target_dir)?;
     Ok(plan)
 }
 

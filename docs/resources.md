@@ -103,6 +103,16 @@ The verifier read the whole active log to parse its header (64 MiB on T1); it re
 - Without it otherwise: max when it fits the free space, else a refusal naming `--temp-disk min` and its cost.
 - A limit at or above temp max runs as one batch; below it the run counts the pairs again on the target (after
   page treatment, exact) and batches by those counts.
+- With `--verify`, min and max are both verify min.
+- Over a target a killed run left (`FASTMIG_INCOMPLETE`), the free space counts the files that run listed on the
+  target filesystem as free: the rerun removes them before it writes (`incomplete_marker::reclaimable_bytes`).
+  Without it a rerun on a filesystem the first run filled was refused. A spill arena left in a spill directory
+  on another filesystem is not counted.
+
+Measured on T1 11.4 dirty (`--no-clone --mem 64M --verify`, target on a tmpfs capped at plan's need): 16 MiB
+short → refused, nothing written; need + 4 MiB → rc 0, migration 0; need + 64 MiB with another process taking all
+free space but the unreserved writes once the run took its space → rc 0; kill -9 with the arena present, a second
+migrate meanwhile refused by the marker lock, rerun on the same filesystem → rc 0, nothing left over.
 
 ## The target side
 
