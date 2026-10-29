@@ -10,6 +10,7 @@ fastmig-catalog = { path = "../catalog" }
 fastmig-copy = { path = "../copy" }
 fastmig-index = { path = "../index" }
 fastmig-ondisk = { path = "../ondisk" }
+fastmig-plan = { path = "../plan" }
 fastmig-progress = { path = "../progress" }
 fastmig-verify = { path = "../verify" }
 

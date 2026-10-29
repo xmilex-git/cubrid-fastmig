@@ -44,7 +44,7 @@ Roles: [README § Layout](README.md#layout). Dependencies point toward `ondisk` 
 ```
 ondisk   ← every other crate but progress; the only crate that knows byte layouts
 progress   depends on nothing; run phases, their counters and the progress display
-plan     → ondisk
+plan     → ondisk, catalog
 copy     → ondisk, plan, progress
 catalog  → ondisk, progress
 index    → ondisk, catalog, progress

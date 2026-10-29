@@ -4,3 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[dependencies]
+fastmig-catalog = { path = "../catalog" }
+fastmig-ondisk = { path = "../ondisk" }

@@ -26,7 +26,9 @@ The first target is 11.4 → develop.
 
 ## The source database is deleted only after verification
 
-Do not delete the source database until the verifier has passed on the migrated database.
+`migrate` verifies the target at its end; only a target with no migration defect is registered and loses
+its `FASTMIG_INCOMPLETE` marker. `finalize <target-dir>` is the only command that deletes the source, and it
+refuses unless that verification passed and the source is unchanged since the migration (ADR 0008).
 The verifier runs on both source and target, so defects already present in the source are
 not reported as migration defects.
 
@@ -35,7 +37,7 @@ not reported as migration defects.
 | Crate | Role |
 |---|---|
 | `crates/ondisk` | On-disk structures: volume and page headers, heap records, file headers, log header |
-| `crates/plan` | Per-volume choice of clone, copy, patch or transform |
+| `crates/plan` | The migration plan: version pair, copy method per volume, page treatment grade per class, deferred indexes, LOB manifest, pre-check |
 | `crates/progress` | Phases of a run, their per-worker counters, ETA, and the progress display (screen or lines) |
 | `crates/copy` | Parallel copy, patch and transform passes |
 | `crates/catalog` | Catalog regeneration in the target format |

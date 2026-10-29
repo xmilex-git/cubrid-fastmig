@@ -35,6 +35,7 @@ dependencies = [
  "fastmig-copy",
  "fastmig-index",
  "fastmig-ondisk",
+ "fastmig-plan",
  "fastmig-progress",
  "fastmig-verify",
 ]
@@ -62,6 +63,7 @@ name = "fastmig-copy"
 version = "0.1.0"
 dependencies = [
  "fastmig-ondisk",
+ "fastmig-plan",
  "fastmig-progress",
 ]
 
@@ -82,6 +84,10 @@ dependencies = [
 [[package]]
 name = "fastmig-plan"
 version = "0.1.0"
+dependencies = [
+ "fastmig-catalog",
+ "fastmig-ondisk",
+]
 
 [[package]]
 name = "fastmig-progress"

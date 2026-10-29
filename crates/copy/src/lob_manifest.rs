@@ -1,6 +1,6 @@
 //! The LOB manifest `<dest>/fastmig/lob-manifest`: the referenced LOB files of the source, one per line as
 //! `<size>\t<path relative to the lob-base-path>`. Built once per migration (by the scan that decodes LOB locators,
-//! outside this crate) and shared by the copy step, the verifier and finalize.
+//! `fastmig_plan::lob_scan`) and shared by the copy step, the verifier and finalize.
 //!
 //! Input: entries, or the file. Output: the file, or the entries.
 //! Source: decision G6 workspace#488; ADR 0009.
@@ -9,12 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReferencedLobFile {
-    pub size: u64,
-    /// Relative to the lob-base-path, e.g. `ces_014/<meta>.<20 digits>_<4 digits>`.
-    pub rel_path: PathBuf,
-}
+pub use fastmig_plan::ReferencedLobFile;
 
 pub fn write(path: &Path, entries: &[ReferencedLobFile]) -> io::Result<()> {
     let mut text = String::new();

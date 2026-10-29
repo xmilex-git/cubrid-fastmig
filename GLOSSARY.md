@@ -13,7 +13,7 @@ _Avoid_: 원본 DB, 소스, 구 DB
 _Avoid_: 대상 DB, 신규 DB, 결과 DB
 
 **버전쌍 (version pair)**:
-출발 DB의 버전과 도착 DB의 버전의 조합. 페이지마다 무엇을 고칠지는 버전쌍마다 정해진다. 중간 버전을 거치지 않는 직행 쌍만 있다.
+출발 DB의 버전과 도착 DB의 버전의 조합. 페이지마다 무엇을 고칠지는 버전쌍마다 정해진다. 중간 버전을 거치지 않는 직행 쌍만 있다. 도착 버전은 plan이 `--target-version`(기본 develop)으로 한 번 정하고, 이후 단계는 그 값만 읽는다([workspace#505](https://github.com/xmilex-git/workspace/issues/505)).
 _Avoid_: 업그레이드 경로, 홉
 
 **기준 DB (baseline database)**:
@@ -159,7 +159,7 @@ _Avoid_: 스왑, 임시 볼륨(엔진 용어와 섞인다)
 ## 진행 표시
 
 **단계 (phase)**:
-한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, out-of-volume-assets, new-log, durable-sync, register(P1 통합이 page treatment, catalog-regeneration, index-build, verifier 단계를 더한다). `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
+한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier, register. `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
 _Avoid_: 스텝(짧은 고정 작업만 가리킬 때 외에는), 스테이지
 
 **진행 표시 (progress display)**:

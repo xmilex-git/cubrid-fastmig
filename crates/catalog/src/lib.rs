@@ -10,6 +10,7 @@ pub mod classify;
 pub mod collation_check;
 pub mod ct_index_rows;
 pub mod ct_rows;
+pub mod deferred_indexes;
 pub mod disk_repr_build;
 pub mod dry_run;
 pub mod output_sql;

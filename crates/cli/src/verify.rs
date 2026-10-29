@@ -6,8 +6,8 @@
 //! Output: the JSONL report (`--report`, default `<target volume dir>/fastmig/verify.jsonl`), the summary line on
 //! stdout; exit code 0 = no migration defect, 1 = migration defects, 2 = usage or tool error.
 //! Source: G1 workspace#481 (verify command; finalize reads the exit code and the report), G3 workspace#483 Q9;
-//! G2 workspace#482 + workspace#495 (`--measured-classes`: one class OID `volid|pageid|slotid` per line, written by
-//! the migration until plan.json carries it).
+//! G2 workspace#482 + workspace#495 (`--measured-classes`: one class OID `volid|pageid|slotid` per line; migrate
+//! writes `<dest>/fastmig/measured-classes`).
 
 use std::collections::BTreeSet;
 use std::io;
@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use fastmig_index::{MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::Oid;
 use fastmig_ondisk::databases_txt;
+use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::volume_set::Locate;
 use fastmig_verify::report::{defect_line, exit_code, summary_line};
 use fastmig_verify::{Database, Role, classify, verify_database};
@@ -47,11 +48,13 @@ const FLAGS: &[&str] = &[
 ];
 
 /// Where one database is and how to read it.
-struct DbArg {
-    first_volume: PathBuf,
-    locate: Locate,
-    log: PathBuf,
-    lob_base: Option<PathBuf>,
+pub struct DbArg {
+    pub first_volume: PathBuf,
+    pub locate: Locate,
+    pub log: PathBuf,
+    /// The log header as already read through a locked handle (migrate): the log is not reopened.
+    pub log_header: Option<LogHeader>,
+    pub lob_base: Option<PathBuf>,
 }
 
 fn resolve(arg: &str, dbtxt: Option<&str>) -> Result<DbArg, CliError> {
@@ -63,6 +66,7 @@ fn resolve(arg: &str, dbtxt: Option<&str>) -> Result<DbArg, CliError> {
             log: PathBuf::from(format!("{}_lgat", first.display())),
             first_volume: first,
             locate: Locate::FirstVolumeDir,
+            log_header: None,
             lob_base: lob.is_dir().then_some(lob),
         });
     }
@@ -83,13 +87,28 @@ fn resolve(arg: &str, dbtxt: Option<&str>) -> Result<DbArg, CliError> {
     Ok(DbArg {
         first_volume: e.first_volume(),
         locate: Locate::Recorded,
+        log_header: None,
         log: e.log_path.join(format!("{arg}_lgat")),
         lob_base,
     })
 }
 
 fn open(a: &DbArg, role: Role) -> io::Result<Database> {
-    Database::open(&a.first_volume, a.locate, &a.log, role, a.lob_base.clone())
+    match &a.log_header {
+        Some(lh) => {
+            Database::open_with_log(&a.first_volume, a.locate, lh, role, a.lob_base.clone())
+        }
+        None => Database::open(&a.first_volume, a.locate, &a.log, role, a.lob_base.clone()),
+    }
+}
+
+fn horizon(a: &DbArg) -> io::Result<fastmig_ondisk::heap_rewrite::VacuumHorizon> {
+    match &a.log_header {
+        Some(lh) => {
+            fastmig_verify::database::vacuum_horizon_with_log(&a.first_volume, a.locate, lh)
+        }
+        None => fastmig_verify::database::vacuum_horizon(&a.first_volume, a.locate, &a.log),
+    }
 }
 
 fn read_measured(path: &str) -> io::Result<BTreeSet<Oid>> {
@@ -164,6 +183,30 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         .transpose()?
         .unwrap_or_default();
 
+    let (code, summary) = run_verifier(
+        &target,
+        source.as_ref(),
+        role,
+        &measured,
+        worker_limit,
+        &lim,
+        &report,
+    )?;
+    println!("{summary}");
+    Ok(code)
+}
+
+/// Verifies `target` (and `source`), writes the JSONL report, returns the exit code (0 or 1) and the summary line.
+#[allow(clippy::too_many_arguments)]
+pub fn run_verifier(
+    target: &DbArg,
+    source: Option<&DbArg>,
+    role: Role,
+    measured: &BTreeSet<Oid>,
+    worker_limit: usize,
+    lim: &Limits,
+    report: &Path,
+) -> io::Result<(u8, String)> {
     let wb = WorkerLimit::new(worker_limit);
     let mb = MemoryLimit::new(usize::try_from(lim.memory_limit_bytes).unwrap_or(usize::MAX));
     let spill = SpillDir::create(&lim.spill_dir)?;
@@ -172,17 +215,13 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         memory: &mb,
         spill: &spill,
     };
-    let mut tdb = open(&target, role)?;
-    if let Some(s) = &source {
-        tdb.source_horizon = Some(fastmig_verify::database::vacuum_horizon(
-            &s.first_volume,
-            s.locate,
-            &s.log,
-        )?);
+    let mut tdb = open(target, role)?;
+    if let Some(s) = source {
+        tdb.source_horizon = Some(horizon(s)?);
     }
-    let tres = verify_database(&tdb, &measured, &limits)?;
+    let tres = verify_database(&tdb, measured, &limits)?;
     drop(tdb);
-    let sres = match &source {
+    let sres = match source {
         Some(s) => {
             let sdb = open(s, Role::Source)?;
             Some(verify_database(&sdb, &BTreeSet::new(), &limits)?)
@@ -204,7 +243,6 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     if let Some(dir) = report.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&report, text)?;
-    println!("{summary}");
-    Ok(exit_code(&all))
+    std::fs::write(report, text)?;
+    Ok((exit_code(&all), summary))
 }

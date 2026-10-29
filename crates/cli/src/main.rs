@@ -2,33 +2,40 @@
 //!
 //! Input: the command line. Output: the subcommand's effect; exit code 0 on success, 2 on usage errors, 1 on
 //! failures.
-//! Source: decision G1 workspace#481 (commands plan, migrate, verify, finalize). `migrate`, `verify` and the check `set-comparison` (ADR 0007) exist so far.
+//! Source: decision G1 workspace#481 (commands plan, migrate, verify, finalize). Plus the check `set-comparison` (ADR 0007).
 //!
 //! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
 mod args;
+mod finalize;
 mod heap_counter;
 mod limits;
 mod migrate;
 mod partition_streams;
+mod plan;
+mod plan_report;
 mod progress_args;
 mod set_comparison;
+mod source_fingerprint;
 mod template_extract;
 mod unload_files;
 mod verify;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cubrid-fastmig migrate <db> --dest <dir> [options]   (cubrid-fastmig migrate --help)\n       cubrid-fastmig verify <db> [options]                  (cubrid-fastmig verify --help)\n       cubrid-fastmig set-comparison <source-prefix> <target-prefix>   (cubrid-fastmig set-comparison --help)";
+const USAGE: &str = "usage: cubrid-fastmig plan <db> --dest <dir> [options]      (cubrid-fastmig plan --help)\n       cubrid-fastmig migrate <db> --dest <dir> [options]   (cubrid-fastmig migrate --help)\n       cubrid-fastmig verify <db> [options]                  (cubrid-fastmig verify --help)\n       cubrid-fastmig set-comparison <source-prefix> <target-prefix>   (cubrid-fastmig set-comparison --help)\n       cubrid-fastmig finalize <target-dir>                  (cubrid-fastmig finalize --help)";
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = match argv.first().map(String::as_str) {
         Some("migrate") => migrate::run(&argv[1..]),
+        Some("finalize") => finalize::run(&argv[1..]),
         Some("template-extract") => template_extract::run(&argv[1..]),
         Some("partition-streams") => partition_streams::run(&argv[1..]),
         // verify has its own exit codes: 1 = migration defects, 2 = usage or tool error (G3 workspace#483)
         Some("verify") => return checker_exit(verify::run(&argv[1..])),
+        // 1 = the plan refuses the migration (G1 workspace#481)
+        Some("plan") => return checker_exit(plan::run(&argv[1..])),
         // 1 = the two unload sets differ (ADR 0007)
         Some("set-comparison") => return checker_exit(set_comparison::run(&argv[1..])),
         _ => {

@@ -35,11 +35,7 @@ pub struct VolumeJob {
     pub io_pagesize: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CopyMethod {
-    Clone,
-    Copy,
-}
+pub use fastmig_plan::CopyMethod;
 
 #[derive(Debug)]
 pub struct VolumeOutcome {

@@ -6,5 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+fastmig-plan = { path = "../plan" }
 fastmig-ondisk = { path = "../ondisk" }
 fastmig-progress = { path = "../progress" }

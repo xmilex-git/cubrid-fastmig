@@ -21,6 +21,7 @@ use fastmig_ondisk::value::Value;
 use crate::class_rewrite::{RewriteInputs, rewrite_user_class};
 use crate::class_rows::read_rows;
 use crate::classify::{ClassKind, classify};
+use crate::deferred_indexes::{deferred_indexes, report_name};
 use crate::output_sql::plcsql_routines;
 use crate::serial_name::{name_11_4, name_develop};
 use crate::source_classes::{SourceClass, read_classes};
@@ -193,7 +194,6 @@ pub fn dry_run(
 
     // 4. index builds: every plain constraint index of the kept and template classes; function/filter deferred
     let mut lines = Vec::new();
-    let mut deferred = Vec::new();
     for (c, p) in classes.iter().zip(&plans) {
         if p.kind != ClassKind::User {
             continue;
@@ -201,9 +201,7 @@ pub fn dry_run(
         let props = class_properties(&c.class.properties, line)
             .map_err(|e| invalid(format!("{} properties: {e}", p.name)))?;
         for k in &props.constraints {
-            if k.has_filter || k.has_function {
-                deferred.push((&c.class, k.clone()));
-            } else if k.btid.is_some() {
+            if !(k.has_filter || k.has_function) && k.btid.is_some() {
                 lines.push(format!(
                     "build {:?} {}.{} keys {:?} (old BTID {})",
                     k.kind,
@@ -228,16 +226,10 @@ pub fn dry_run(
             ));
         }
     }
-    let deferred_names: Vec<String> = deferred
+    let deferred_names: Vec<String> = deferred_indexes(&classes, line)?
         .iter()
-        .filter(|(c, _)| !c.partitions.iter().any(|p| p.pname.is_some()))
-        .map(|(c, k)| {
-            format!(
-                "deferred {}.{}",
-                String::from_utf8_lossy(&c.name),
-                String::from_utf8_lossy(&k.name)
-            )
-        })
+        .filter_map(|(c, k)| report_name(c, k))
+        .map(|n| format!("deferred {n}"))
         .collect();
     lines.extend(deferred_names.iter().cloned());
     d.sections.push((

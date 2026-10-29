@@ -62,10 +62,19 @@ pub fn vacuum_horizon(
     locate: Locate,
     log: &Path,
 ) -> io::Result<VacuumHorizon> {
-    let lh = read_log(log)?;
+    vacuum_horizon_with_log(first_volume, locate, &read_log(log)?)
+}
+
+/// [`vacuum_horizon`] from a log header already read (a caller holding the log locked must not reopen it: closing any
+/// descriptor of the file drops the lock).
+pub fn vacuum_horizon_with_log(
+    first_volume: &Path,
+    locate: Locate,
+    lh: &LogHeader,
+) -> io::Result<VacuumHorizon> {
     let vols = VolumeSet::open(first_volume, locate, Access::ReadOnly)?;
     let (_, boot) = BootDbParm::read(&vols)?;
-    VacuumHorizon::read(&vols, &lh, boot.vacuum_data_vfid)
+    VacuumHorizon::read(&vols, lh, boot.vacuum_data_vfid)
 }
 
 impl Database {
@@ -76,7 +85,17 @@ impl Database {
         role: Role,
         lob_base: Option<PathBuf>,
     ) -> io::Result<Database> {
-        let lh = read_log(log)?;
+        Self::open_with_log(first_volume, locate, &read_log(log)?, role, lob_base)
+    }
+
+    /// [`Database::open`] from a log header already read (see [`vacuum_horizon_with_log`]).
+    pub fn open_with_log(
+        first_volume: &Path,
+        locate: Locate,
+        lh: &LogHeader,
+        role: Role,
+        lob_base: Option<PathBuf>,
+    ) -> io::Result<Database> {
         let line = VersionLine::from_db_compatibility(lh.db_compatibility).ok_or_else(|| {
             io::Error::other(format!(
                 "unsupported db_compatibility {}",
