@@ -119,6 +119,105 @@ pub fn remove_at(page: &mut [u8], at: usize, i: usize) {
     h.write(page, at);
 }
 
+/// Engine `file_extdata_remaining_capacity`.
+pub fn remaining(page: &[u8], at: usize) -> usize {
+    let h = ExtdataHeader::read(page, at);
+    h.capacity() - h.n_items as usize
+}
+
+/// Engine `file_extdata_find_ordered` (`util_bsearch`) over a component whose items are ordered by `key`:
+/// `Ok(i)` where item `i` compares equal, else `Err(i)` = the position of the first bigger item.
+pub fn find_ordered(
+    page: &[u8],
+    at: usize,
+    cmp: impl Fn(&[u8]) -> std::cmp::Ordering,
+) -> Result<usize, usize> {
+    let n = ExtdataHeader::read(page, at).n_items as usize;
+    let (mut lo, mut hi) = (0usize, n);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        match cmp(item(page, at, mid)) {
+            std::cmp::Ordering::Equal => return Ok(mid),
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+        }
+    }
+    Err(lo)
+}
+
+/// Engine `file_extdata_append_array`: appends whole items (`bytes.len()` a multiple of the item size). False if
+/// they do not fit.
+pub fn append_items(page: &mut [u8], at: usize, bytes: &[u8]) -> bool {
+    let mut h = ExtdataHeader::read(page, at);
+    let sz = h.size_of_item as usize;
+    let k = bytes.len() / sz;
+    assert_eq!(k * sz, bytes.len());
+    if remaining(page, at) < k {
+        return false;
+    }
+    let s = IO_RESERVED_SIZE + at + EXTDATA_HEADER_SIZE + h.n_items as usize * sz;
+    page[s..s + bytes.len()].copy_from_slice(bytes);
+    h.n_items += k as i16;
+    h.write(page, at);
+    true
+}
+
+/// The bytes of items `from..to`.
+pub fn items(page: &[u8], at: usize, from: usize, to: usize) -> &[u8] {
+    let sz = ExtdataHeader::read(page, at).size_of_item as usize;
+    let base = IO_RESERVED_SIZE + at + EXTDATA_HEADER_SIZE;
+    &page[base + from * sz..base + to * sz]
+}
+
+/// Engine `file_extdata_remove_at` of `count` items from `i`, shifting later items down; the freed tail is zeroed.
+pub fn remove_range(page: &mut [u8], at: usize, i: usize, count: usize) {
+    let mut h = ExtdataHeader::read(page, at);
+    let n = h.n_items as usize;
+    let sz = h.size_of_item as usize;
+    assert!(i + count <= n);
+    let base = IO_RESERVED_SIZE + at + EXTDATA_HEADER_SIZE;
+    page.copy_within(base + (i + count) * sz..base + n * sz, base + i * sz);
+    page[base + (n - count) * sz..base + n * sz].fill(0);
+    h.n_items -= count as i16;
+    h.write(page, at);
+}
+
+/// Engine `file_extdata_merge_pages` with an ordered merge: if `dst` has room for every item of `src`, merges them
+/// in `key` order into `dst`, takes over `src`'s next link and returns true (the caller deallocates `src`'s page).
+pub fn merge_ordered<K: Ord>(
+    src: &[u8],
+    src_at: usize,
+    dst: &mut [u8],
+    dst_at: usize,
+    key: impl Fn(&[u8]) -> K,
+) -> bool {
+    let sh = ExtdataHeader::read(src, src_at);
+    if remaining(dst, dst_at) < sh.n_items as usize {
+        return false;
+    }
+    let mut dh = ExtdataHeader::read(dst, dst_at);
+    let sz = dh.size_of_item as usize;
+    let mut all: Vec<&[u8]> = items(src, src_at, 0, sh.n_items as usize)
+        .chunks(sz)
+        .collect();
+    let old = items(dst, dst_at, 0, dh.n_items as usize).to_vec();
+    all.extend(old.chunks(sz));
+    all.sort_by_key(|it| key(it));
+    let merged = all.concat();
+    let base = IO_RESERVED_SIZE + dst_at + EXTDATA_HEADER_SIZE;
+    dst[base..base + merged.len()].copy_from_slice(&merged);
+    dh.n_items += sh.n_items;
+    dh.vpid_next = sh.vpid_next;
+    dh.write(dst, dst_at);
+    true
+}
+
+/// Engine `file_extdata_init (item_size, DB_PAGESIZE, page)`: an empty component over a whole table page.
+pub fn init_page(page: &mut [u8], item_size: usize) {
+    let db = crate::page::db_pagesize(page.len());
+    ExtdataHeader::init(db, item_size).write(page, 0);
+}
+
 /// One component of a chain: the page it lives in and its DB page offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Component {

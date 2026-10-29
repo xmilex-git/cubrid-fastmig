@@ -42,6 +42,18 @@ _Avoid_: 쓰레기 레코드, MVCC 찌꺼기
 vacuum 잔여를 지우려고 레코드 단위로 고치는 힙 페이지. 힙 헤더 페이지는 항상 들어가고, 데이터 페이지는 출발에서 vacuum 상태가 ONCE이거나, UNKNOWN이면서 max_mvccid가 출발의 가장 오래된 미처리 MVCCID 이상일 때 들어간다. 그 밖의 페이지는 체인 레코드까지 바이트 그대로 둔다. 재인코딩 클래스의 페이지는 이 구분 없이 전부 다시 쓴다([workspace#499](https://github.com/xmilex-git/workspace/issues/499)).
 _Avoid_: vacuum 대상 페이지, 더러운 페이지
 
+**볼륨 확장 (volume expansion)**:
+도착 DB의 영구 데이터 볼륨 하나의 섹터 수(`nsect_total`)를 그 볼륨의 최대(`nsect_max`)까지 늘리는 일. 새 인덱스·bestspace 페이지·재인코딩 레코드가 기존 여유 섹터에 다 들어가지 않을 때 엔진 자동 확장과 같은 규칙으로 먼저 한다([ADR 0013](docs/adr/0013-target-grows-like-engine-auto-extension.md)).
+_Avoid_: 볼륨 증설, 볼륨 늘리기, resize
+
+**볼륨 추가 (volume addition)**:
+새 영구 데이터 볼륨 `<db>_x<NNN>`을 도착 디렉터리에 만들어 볼륨 헤더 체인 끝에 잇고 `_vinf`·`BOOT_DB_PARM`에 올리는 일. 확장할 볼륨이 최대에 닿은 뒤에만 하며, 크기 상한은 도착 쪽 `db_volume_size`다.
+_Avoid_: addvol, 볼륨 생성(엔진 createdb와 섞인다)
+
+**볼륨 성장 (volume growth)**:
+볼륨 확장과 볼륨 추가를 함께 이르는 말: 도착 DB가 공간이 모자랄 때 늘어나는 방식과 그 설정(`db_volume_size`, 새 볼륨의 자리).
+_Avoid_: 자동 확장(엔진 기능 이름과 섞인다), 공간 확보
+
 ## 카탈로그와 인덱스
 
 **클래스 객체 (class object)**:

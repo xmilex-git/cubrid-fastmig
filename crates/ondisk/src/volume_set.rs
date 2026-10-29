@@ -2,17 +2,23 @@
 //!
 //! Input: the first volume's path (or a databases.txt entry) and how to find the next volumes. Output: a
 //! [`VolumeSet`] whose `read_page`/`write_page` take `&self` (positioned I/O), so threads share it freely.
+//! The set grows in place when the space manager expands or adds a volume (workspace#500): the volume list sits
+//! behind a lock and [`VolumeSet::volume`] hands out a shared snapshot of one volume.
 //! Source: volumes are enumerated by the header chain (`next_volid`, `next_vol_fullname`), not by `_vinf`
-//! (G1, workspace#481); engine `disk_manager.c` volume header, `boot_find_rest_permanent_volumes`.
+//! (G1, workspace#481); engine `disk_manager.c` volume header, `boot_find_rest_permanent_volumes`;
+//! `file_io.c:fileio_expand_to`, `fileio_initialize_res` (the bytes of a page no one has written yet).
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use crate::databases_txt::DatabaseEntry;
 use crate::ids::Vpid;
-use crate::page;
+use crate::le_field::{put_i16, put_i32};
+use crate::lsa::Lsa;
+use crate::page::{self, IO_TRAILER_SIZE};
 use crate::volume_header::VolumeHeader;
 
 /// How to find volume n+1 from volume n's header.
@@ -46,7 +52,8 @@ pub struct Volume {
 #[derive(Debug)]
 pub struct VolumeSet {
     io_pagesize: usize,
-    volumes: Vec<Volume>,
+    access: Access,
+    volumes: RwLock<Vec<Arc<Volume>>>,
 }
 
 fn invalid(msg: String) -> io::Error {
@@ -63,26 +70,12 @@ impl VolumeSet {
     /// place in the chain, and its page size against volume 0's.
     pub fn open(first: &Path, locate: Locate, access: Access) -> io::Result<Self> {
         let dir = first.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let mut volumes: Vec<Volume> = Vec::new();
+        let mut volumes: Vec<Arc<Volume>> = Vec::new();
         let mut path = first.to_path_buf();
         let mut io_pagesize = 0usize;
         loop {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(access == Access::ReadWrite)
-                .open(&path)
-                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
-            // the volume header fits in the smallest page size (4 KiB); read that much, then the real size
-            let mut head = vec![0u8; 4096];
-            file.read_exact_at(&mut head, 0)?;
-            let probe = VolumeHeader::read(&head)?;
-            let size = probe.iopagesize as usize;
-            if !(4096..=65536).contains(&size) || !size.is_power_of_two() {
-                return Err(invalid(format!("{}: iopagesize {size}", path.display())));
-            }
-            let mut p0 = vec![0u8; size];
-            file.read_exact_at(&mut p0, 0)?;
-            let header = VolumeHeader::read(&p0)?;
+            let (file, header) = open_volume(&path, access)?;
+            let size = header.iopagesize as usize;
             if volumes.is_empty() {
                 io_pagesize = size;
             } else if size != io_pagesize {
@@ -100,12 +93,12 @@ impl VolumeSet {
                 )));
             }
             let next = (header.next_volid >= 0).then(|| PathBuf::from(&header.next_vol_fullname));
-            volumes.push(Volume {
+            volumes.push(Arc::new(Volume {
                 volid: header.volid,
                 path: path.clone(),
                 header,
                 file,
-            });
+            }));
             match next {
                 None => break,
                 Some(n) => {
@@ -123,7 +116,8 @@ impl VolumeSet {
         }
         Ok(VolumeSet {
             io_pagesize,
-            volumes,
+            access,
+            volumes: RwLock::new(volumes),
         })
     }
 
@@ -132,18 +126,24 @@ impl VolumeSet {
         self.io_pagesize
     }
 
-    pub fn volumes(&self) -> &[Volume] {
-        &self.volumes
+    /// A snapshot of the volumes in volid order.
+    pub fn volumes(&self) -> Vec<Arc<Volume>> {
+        self.volumes.read().unwrap().clone()
     }
 
-    pub fn volume(&self, volid: i16) -> io::Result<&Volume> {
+    pub fn nvols(&self) -> usize {
+        self.volumes.read().unwrap().len()
+    }
+
+    /// A snapshot of one volume (its header as of the last change this process made).
+    pub fn volume(&self, volid: i16) -> io::Result<Arc<Volume>> {
         usize::try_from(volid)
             .ok()
-            .and_then(|i| self.volumes.get(i))
+            .and_then(|i| self.volumes.read().unwrap().get(i).cloned())
             .ok_or_else(|| invalid(format!("no volume {volid}")))
     }
 
-    fn offset(&self, vpid: Vpid) -> io::Result<(&Volume, u64)> {
+    fn offset(&self, vpid: Vpid) -> io::Result<(Arc<Volume>, u64)> {
         let v = self.volume(vpid.volid)?;
         let npages = v.header.nsect_total as i64 * v.header.sect_npgs as i64;
         if vpid.pageid < 0 || vpid.pageid as i64 >= npages {
@@ -197,6 +197,99 @@ impl VolumeSet {
 
     /// fsyncs every volume.
     pub fn sync(&self) -> io::Result<()> {
-        self.volumes.iter().try_for_each(|v| v.file.sync_all())
+        self.volumes().iter().try_for_each(|v| v.file.sync_all())
     }
+
+    /// Grows volume `volid`'s file to `npages` pages, the new pages as `fileio_expand_to` writes them
+    /// ([`unwritten_page`]). The header is not touched; see [`Self::reload_header`].
+    pub(crate) fn extend_file(&self, volid: i16, npages: i64) -> io::Result<()> {
+        let v = self.volume(volid)?;
+        let have = v.file.metadata()?.len() / self.io_pagesize as u64;
+        write_unwritten_pages(&v.file, self.io_pagesize, have, npages as u64)
+    }
+
+    /// Re-reads volume `volid`'s header after this process rewrote page 0 (a new `nsect_total`, a new link).
+    pub(crate) fn reload_header(&self, volid: i16) -> io::Result<()> {
+        let mut p0 = vec![0u8; self.io_pagesize];
+        let v = self.volume(volid)?;
+        v.file.read_exact_at(&mut p0, 0)?;
+        let header = VolumeHeader::read(&p0)?;
+        let fresh = Arc::new(Volume {
+            volid,
+            path: v.path.clone(),
+            header,
+            file: v.file.try_clone()?,
+        });
+        self.volumes.write().unwrap()[volid as usize] = fresh;
+        Ok(())
+    }
+
+    /// Opens the volume just formatted at `path` and appends it; its volid must be the next one.
+    pub(crate) fn attach(&self, path: &Path) -> io::Result<i16> {
+        let (file, header) = open_volume(path, self.access)?;
+        let mut vols = self.volumes.write().unwrap();
+        if header.volid as usize != vols.len() || header.iopagesize as usize != self.io_pagesize {
+            return Err(invalid(format!(
+                "{}: volid {} / iopagesize {} does not continue the set",
+                path.display(),
+                header.volid,
+                header.iopagesize
+            )));
+        }
+        vols.push(Arc::new(Volume {
+            volid: header.volid,
+            path: path.to_path_buf(),
+            header,
+            file,
+        }));
+        Ok(vols.len() as i16 - 1)
+    }
+}
+
+/// Opens one volume file and reads its header at the page size the header names.
+fn open_volume(path: &Path, access: Access) -> io::Result<(File, VolumeHeader)> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(access == Access::ReadWrite)
+        .open(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    // the volume header fits in the smallest page size (4 KiB); read that much, then the real size
+    let mut head = vec![0u8; 4096];
+    file.read_exact_at(&mut head, 0)?;
+    let size = VolumeHeader::read(&head)?.iopagesize as usize;
+    if !(4096..=65536).contains(&size) || !size.is_power_of_two() {
+        return Err(invalid(format!("{}: iopagesize {size}", path.display())));
+    }
+    let mut p0 = vec![0u8; size];
+    file.read_exact_at(&mut p0, 0)?;
+    Ok((file, VolumeHeader::read(&p0)?))
+}
+
+/// Engine `fileio_initialize_res`: the bytes of a volume page formatted but never written — zero, NULL LSA in the
+/// header and the trailer, pageid -1, volid -1.
+pub fn unwritten_page(io_pagesize: usize) -> Vec<u8> {
+    let mut p = vec![0u8; io_pagesize];
+    Lsa::NULL.write(&mut p, page::off::LSA);
+    Lsa::NULL.write(&mut p, io_pagesize - IO_TRAILER_SIZE);
+    put_i32(&mut p, page::off::PAGEID, -1);
+    put_i16(&mut p, page::off::VOLID, -1);
+    p
+}
+
+/// Writes [`unwritten_page`] over pages `from..to` of `file` (engine `fileio_initialize_pages`), 1 MiB per write.
+pub(crate) fn write_unwritten_pages(
+    file: &File,
+    io_pagesize: usize,
+    from: u64,
+    to: u64,
+) -> io::Result<()> {
+    let per = (1 << 20) / io_pagesize as u64;
+    let buf = unwritten_page(io_pagesize).repeat(per as usize);
+    let mut p = from;
+    while p < to {
+        let n = per.min(to - p);
+        file.write_all_at(&buf[..(n as usize) * io_pagesize], p * io_pagesize as u64)?;
+        p += n;
+    }
+    Ok(())
 }

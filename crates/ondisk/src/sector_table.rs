@@ -44,9 +44,25 @@ pub fn system_sectors(vh: &VolumeHeader) -> std::ops::RangeInclusive<i32> {
     0..=sector_of(vh.sys_lastpage)
 }
 
+/// Engine `DISK_SECTS_ROUND_UP`: volume sizes in sectors are kept a multiple of one STAB unit (64 sectors).
+pub fn round_up_sectors(nsects: i32) -> i32 {
+    (nsects + 63) / 64 * 64
+}
+
+/// Engine `DISK_STAB_NPAGES`: STAB pages of a volume that may grow to `nsect_max` sectors.
+pub fn stab_npages(io_pagesize: usize, nsect_max: i32) -> i32 {
+    (nsect_max + sectors_per_page(io_pagesize) - 1) / sectors_per_page(io_pagesize)
+}
+
+/// Engine `DISK_SYS_NSECT_SIZE`: sectors taken by the volume header page and the STAB pages.
+pub fn sys_nsect(io_pagesize: usize, nsect_max: i32) -> i32 {
+    (1 + stab_npages(io_pagesize, nsect_max) + SECTOR_NPAGES - 1) / SECTOR_NPAGES
+}
+
 /// Every sector of the volume whose bit is set, ascending.
 pub fn used_sectors(vols: &VolumeSet, volid: i16) -> io::Result<Vec<i32>> {
-    let vh = &vols.volume(volid)?.header;
+    let vol = vols.volume(volid)?;
+    let vh = &vol.header;
     let per_page = sectors_per_page(vols.io_pagesize());
     let mut out = Vec::new();
     for p in 0..vh.stab_npages {

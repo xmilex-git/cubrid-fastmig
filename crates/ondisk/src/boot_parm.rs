@@ -10,9 +10,9 @@
 use std::io;
 
 use crate::ids::{Ehid, Hfid, Oid, Vfid};
-use crate::le_field::{get_i16, get_i32};
-use crate::page::db_area;
-use crate::spage::{RecordType, SlottedPage};
+use crate::le_field::{get_i16, get_i32, put_i16};
+use crate::page::{db_area, db_area_mut};
+use crate::spage::{RecordType, SlottedPage, SpageEditor};
 use crate::volume_set::VolumeSet;
 
 /// `sizeof (BOOT_DB_PARM)`.
@@ -106,5 +106,24 @@ impl BootDbParm {
             io::ErrorKind::NotFound,
             "no BOOT_DB_PARM record in the boot heap header page",
         ))
+    }
+
+    /// Engine `boot_dbparm_save_volume` for a permanent volume: `nvols` and `last_volid` rewritten in place
+    /// (same record length, same slot).
+    pub fn write_volume_counts(vols: &VolumeSet, nvols: i16, last_volid: i16) -> io::Result<()> {
+        let (oid, _) = Self::read(vols)?;
+        let mut page = vols.read_page(oid.vpid())?;
+        let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
+        let mut ed =
+            SpageEditor::new(db_area_mut(&mut page)).ok_or_else(|| bad("boot heap page"))?;
+        let mut rec = match ed.view().record(oid.slotid as usize) {
+            Some((RecordType::Home, r)) => r.to_vec(),
+            _ => return Err(bad("BOOT_DB_PARM record moved")),
+        };
+        put_i16(&mut rec, 96, nvols);
+        put_i16(&mut rec, 100, last_volid);
+        ed.update(oid.slotid as usize, &rec)
+            .map_err(|e| bad(&format!("BOOT_DB_PARM update: {e:?}")))?;
+        vols.write_page(oid.vpid(), &page)
     }
 }

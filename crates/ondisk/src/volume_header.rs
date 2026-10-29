@@ -9,7 +9,7 @@
 use std::io;
 
 use crate::ids::Hfid;
-use crate::le_field::{get_i16, get_i32, get_i64, put_i16, put_i64};
+use crate::le_field::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::lsa::Lsa;
 use crate::page::{IO_RESERVED_SIZE, IO_TRAILER_SIZE};
 
@@ -122,6 +122,61 @@ impl VolumeHeader {
     }
 }
 
+/// What a new permanent data volume's header holds (engine `disk_format`, workspace#500).
+#[derive(Clone, Debug)]
+pub struct NewVolume<'a> {
+    pub volid: i16,
+    pub db_charset: i8,
+    pub nsect_total: i32,
+    pub nsect_max: i32,
+    pub stab_npages: i32,
+    pub db_creation: i64,
+    pub vol_creation: i64,
+    pub chkpt_lsa: Lsa,
+    pub vol_fullname: &'a str,
+    pub vol_remarks: &'a str,
+}
+
+/// Engine `disk_format`: the DB page of a new permanent data volume's header — purpose and type permanent,
+/// `hint_allocsect` NULL, STAB from page 1, boot HFID NULL, no next volume. The page header (VPID, type, LSA) is the
+/// caller's.
+pub fn format(page: &mut [u8], v: &NewVolume) -> io::Result<()> {
+    let db_end = page.len() - IO_TRAILER_SIZE;
+    let d = &mut page[IO_RESERVED_SIZE..db_end];
+    d.fill(0);
+    d[off::MAGIC..off::MAGIC + MAGIC.len()].copy_from_slice(MAGIC.as_bytes());
+    put_i16(d, off::IOPAGESIZE, (db_end + IO_TRAILER_SIZE) as i16);
+    put_i16(d, off::VOLID, v.volid);
+    d[off::DB_CHARSET] = v.db_charset as u8;
+    put_i32(d, off::PURPOSE, 0); // DB_PERMANENT_DATA_PURPOSE
+    put_i32(d, off::TYPE, 0); // DB_PERMANENT_VOLTYPE
+    put_i32(d, off::SECT_NPGS, 64);
+    put_i32(d, off::NSECT_TOTAL, v.nsect_total);
+    put_i32(d, off::NSECT_MAX, v.nsect_max);
+    put_i32(d, off::HINT_ALLOCSECT, -1);
+    put_i32(d, off::STAB_NPAGES, v.stab_npages);
+    put_i32(d, off::STAB_FIRST_PAGE, 1);
+    put_i32(d, off::SYS_LASTPAGE, v.stab_npages);
+    put_i64(d, off::DB_CREATION, v.db_creation);
+    put_i64(d, off::VOL_CREATION, v.vol_creation);
+    v.chkpt_lsa.write(d, off::CHKPT_LSA);
+    Hfid::NULL.write(d, off::BOOT_HFID);
+    put_i16(d, off::NEXT_VOLID, -1);
+    set_paths_db(d, [v.vol_fullname, "", v.vol_remarks])
+}
+
+/// Writes `nsect_total` (engine `disk_volume_expand`).
+pub fn set_nsect_total(page: &mut [u8], nsect_total: i32) {
+    put_i32(&mut page[IO_RESERVED_SIZE..], off::NSECT_TOTAL, nsect_total);
+}
+
+/// Engine `disk_set_link`: links the volume to the next one (id and path); its own path and remarks are kept.
+pub fn set_link(page: &mut [u8], next_volid: i16, next_vol_fullname: &str) -> io::Result<()> {
+    let h = VolumeHeader::read(page)?;
+    put_i16(&mut page[IO_RESERVED_SIZE..], off::NEXT_VOLID, next_volid);
+    set_paths(page, &h.vol_fullname, next_vol_fullname)
+}
+
 /// Writes `db_creation` (must equal the new log header's, R5 L4).
 pub fn set_db_creation(page: &mut [u8], v: i64) {
     put_i64(&mut page[IO_RESERVED_SIZE..], off::DB_CREATION, v);
@@ -139,8 +194,14 @@ pub fn set_chkpt_lsa(page: &mut [u8], lsa: Lsa) {
 pub fn set_paths(page: &mut [u8], vol_fullname: &str, next_vol_fullname: &str) -> io::Result<()> {
     let remarks = VolumeHeader::read(page)?.vol_remarks;
     let db_end = page.len() - IO_TRAILER_SIZE;
-    let d = &mut page[IO_RESERVED_SIZE..db_end];
-    let fields = [vol_fullname, next_vol_fullname, remarks.as_str()];
+    set_paths_db(
+        &mut page[IO_RESERVED_SIZE..db_end],
+        [vol_fullname, next_vol_fullname, remarks.as_str()],
+    )
+}
+
+/// Writes the three variable fields into the DB page `d` and their offsets (engine `disk_vhdr_set_*`).
+fn set_paths_db(d: &mut [u8], fields: [&str; 3]) -> io::Result<()> {
     let total: usize = fields.iter().map(|s| s.len() + 1).sum();
     if off::VAR_FIELDS + total > d.len() || fields.iter().any(|s| s.as_bytes().contains(&0)) {
         return Err(io::Error::new(
