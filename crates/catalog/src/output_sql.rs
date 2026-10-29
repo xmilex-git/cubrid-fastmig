@@ -115,7 +115,7 @@ pub fn create_index(
             let expr = text(f.first().map(|e| &e.value)).ok_or("function info without expr_str")?;
             let desc = match text(f.get(4).map(|e| &e.value)) {
                 Some(d) => decode_packed_domain(line, &mut OrReader::new(&d))
-                    .map(|(ds, _)| ds.first().is_some_and(|d| d.is_desc))
+                    .map(|ds| ds.first().is_some_and(|d| d.is_desc))
                     .unwrap_or(false),
                 None => false,
             };

@@ -73,18 +73,42 @@ fn builtin_index(version: VersionLine, ty: DbType) -> u32 {
     }
 }
 
-/// Reads one packed domain chain (engine `or_get_domain` without a caller domain). Returns the chain and whether
-/// the first carrier had the tagged-NULL bit (meaningful only when the domain tags a value).
-pub fn decode_packed_domain(
+/// What the 0x40 bit of a carrier means. The engine caller decides by passing `is_null` to `or_get_domain` or not
+/// (`unpack_domain`, develop @5b1867174 :3376-3400).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bit40 {
+    /// A value tag (`or_get_value`): the bit marks a NULL value; the tag is never DESC.
+    Null,
+    /// A domain (index key, set, XASL): the bit marks a DESC key column.
+    Desc,
+}
+
+/// Reads one packed domain chain whose 0x40 bit means DESC (engine `or_get_domain` with `is_null == NULL`): index
+/// key domains, set domains, XASL domains.
+pub fn decode_packed_domain(version: VersionLine, r: &mut OrReader) -> DecodeResult<Vec<Domain>> {
+    Ok(decode_chain(version, r, Bit40::Desc)?.0)
+}
+
+/// Reads the packed domain that tags a value (engine `or_get_domain` with `is_null`): the chain, never DESC, and
+/// whether the first carrier marks the value NULL.
+pub fn decode_value_tag(
     version: VersionLine,
     r: &mut OrReader,
+) -> DecodeResult<(Vec<Domain>, bool)> {
+    decode_chain(version, r, Bit40::Null)
+}
+
+fn decode_chain(
+    version: VersionLine,
+    r: &mut OrReader,
+    bit40: Bit40,
 ) -> DecodeResult<(Vec<Domain>, bool)> {
     let mut chain = Vec::new();
     let mut is_null = false;
     loop {
         let carrier = r.u32()?;
         let id = carrier & TYPE_MASK;
-        if chain.is_empty() {
+        if chain.is_empty() && bit40 == Bit40::Null {
             is_null = carrier & NULL_OR_DESC_FLAG != 0;
         }
         if id == 0 && carrier & FLAG_100 != 0 {
@@ -100,7 +124,7 @@ pub fn decode_packed_domain(
         let ty = DbType::from_id(version, id)
             .ok_or_else(|| r.error(format!("unknown domain type id {id}")))?;
         let mut d = Domain::of_type(ty);
-        d.is_desc = carrier & NULL_OR_DESC_FLAG != 0;
+        d.is_desc = bit40 == Bit40::Desc && carrier & NULL_OR_DESC_FLAG != 0;
         let mut precision = 0u32;
         let mut scale = 0u32;
         let mut has_collation = false;
@@ -170,7 +194,7 @@ pub fn decode_packed_domain(
             d.json_schema = Some(read_string(r)?);
         }
         if has_set_domain(ty) && carrier & FLAG_100 != 0 {
-            d.set_domain = decode_packed_domain(version, r)?.0;
+            d.set_domain = decode_packed_domain(version, r)?;
         }
         chain.push(d);
         if carrier & NEXT_FLAG == 0 {

@@ -90,7 +90,7 @@ impl KeyDomain {
 
     /// Parses a packed key domain (B-tree root header) and builds the key domain.
     pub fn from_packed(version: VersionLine, packed: &[u8]) -> DecodeResult<KeyDomain> {
-        let (chain, _) = decode_packed_domain(version, &mut OrReader::new(packed))?;
+        let chain = decode_packed_domain(version, &mut OrReader::new(packed))?;
         let top = chain
             .first()
             .ok_or_else(|| err("empty key domain".into()))?;

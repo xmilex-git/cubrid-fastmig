@@ -10,7 +10,7 @@
 
 use fastmig_ondisk::catalog_dir::{BtStats, DiskAttr, DiskRepr};
 use fastmig_ondisk::class_object::ClassObject;
-use fastmig_ondisk::value::{DecodeError, DecodeResult, OrReader, decode_packed_domain};
+use fastmig_ondisk::value::{DecodeError, DecodeResult, OrReader, decode_value_tag};
 use fastmig_ondisk::{Btid, VersionLine};
 
 /// `btids(attr_id)` gives that attribute's indexes as `(btid, is function index on the first key)`.
@@ -70,7 +70,7 @@ fn default_value(packed: &[u8], line: VersionLine) -> DecodeResult<Vec<u8>> {
         return Ok(Vec::new());
     }
     let mut r = OrReader::new(packed);
-    let (_, is_null) = decode_packed_domain(line, &mut r)?;
+    let (_, is_null) = decode_value_tag(line, &mut r)?;
     Ok(if is_null {
         Vec::new()
     } else {

@@ -139,12 +139,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `or_get_value` of a tagged value. The tag's 0x40 bit is the NULL mark, which the domain decoder also reports
-    /// as DESC; a value tag is never DESC, so that is cleared.
+    /// `or_get_value` of a tagged value.
     fn tagged(off: usize, line: VersionLine, r: &mut OrReader) -> DecodeResult<(Domain, Value)> {
-        let (mut tag, value) = Self::rebase(off, decode_tagged(line, r, None))?;
-        tag.is_desc = false;
-        Ok((tag, value))
+        Self::rebase(off, decode_tagged(line, r, None))
     }
 
     fn db_value(&mut self, off: usize) -> DecodeResult<Node> {
@@ -160,13 +157,13 @@ impl<'a> Parser<'a> {
             off,
             (|| {
                 Ok((
-                    decode_packed_domain(line, &mut r)?.0,
+                    decode_packed_domain(line, &mut r)?,
                     // develop: `xts_regu_converts`, then the original domain and conv_mode when set
                     match line {
                         VersionLine::V11_4 => None,
                         VersionLine::Develop => match r.i32()? {
                             0 => None,
-                            _ => Some((decode_packed_domain(line, &mut r)?.0, r.i32()?)),
+                            _ => Some((decode_packed_domain(line, &mut r)?, r.i32()?)),
                         },
                     },
                     r.i32()?,
@@ -259,7 +256,7 @@ impl<'a> Parser<'a> {
             off,
             (|| {
                 Ok((
-                    decode_packed_domain(self.line, &mut r)?.0,
+                    decode_packed_domain(self.line, &mut r)?,
                     r.i32()?,
                     r.i32()?,
                     r.i32()?,

@@ -67,7 +67,7 @@ pub fn decode_set(
     }
     let own_domain = if header & DOMAIN_BIT != 0 {
         let _size = r.i32()?;
-        decode_packed_domain(version, r)?.0.into_iter().next()
+        decode_packed_domain(version, r)?.into_iter().next()
     } else {
         None
     };
