@@ -1,0 +1,233 @@
+//! Rewrites the records whose home is the current heap page: vacuum-residue removal (patch) or re-encoding, then
+//! the page's slotted area compacted, the 11.4-only header bit cleared and the chain record reset.
+//!
+//! Input: a [`HeapState`] whose current page is the page to rewrite, and the [`PageMode`]. Output: the page (and the
+//! NEWHOME/overflow pages its records reach) edited; counts in [`PageCounts`].
+//! Source: R2 § 3 R3 (record rules; a REC_NEWHOME is reached from its home, never on its own; slots are never
+//! removed), R4 (`spage_compact` result, `need_update_best_hint` cleared), R5 (chain `max_mvccid` = 0, flags = 0;
+//! applied to rewritten pages only, workspace#499 replaces "every page"), R7 (re-encoding); engine `vacuum.c`
+//! `vacuum_heap_record` (:2190-2440: a deleted REC_RELOCATION also deletes its NEWHOME as
+//! REC_DELETED_WILL_REUSE, a deleted REC_BIGONE releases its overflow pages), `spage_vacuum_slot`; develop
+//! @5b1867174, same in release/11.4 @46212adcd.
+
+use std::io;
+
+use crate::heap_rewrite::heap_state::{HeapState, editor, invalid, spage_err};
+use crate::heap_rewrite::overflow;
+use crate::heap_rewrite::placement::{self, home_slot, slot_record};
+use crate::heap_rewrite::record_patch::{
+    OVERFLOW_FIRST_DATA, reset_overflow_header, strip_insid_and_prev,
+};
+use crate::heap_rewrite::reencode::Reencode;
+use crate::page::{db_area, db_area_mut};
+use crate::record::HomeKind;
+use crate::record::heap_chain::HeapChain;
+use crate::record::heap_scan::read_overflow;
+use crate::record::mvcc_header::RecordHeader;
+use crate::spage::{RecordType, SlottedPage};
+use crate::{Oid, Vpid};
+
+#[derive(Clone, Copy)]
+pub enum PageMode<'a> {
+    /// Remove vacuum residue, bytes otherwise kept.
+    Patch,
+    /// Write every live record again through the re-encoder.
+    Reencode(&'a dyn Reencode),
+}
+
+/// What a rewrite did, summed over pages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageCounts {
+    /// Committed deletes removed (home slot vacuumed).
+    pub deleted: u64,
+    /// Records whose INSID / previous-version LSA was dropped, or whose overflow header was reset.
+    pub cleaned: u64,
+    /// Re-encoded records by where they ended up.
+    pub home: u64,
+    pub relocated: u64,
+    pub big: u64,
+    pub overflow_pages_released: u64,
+}
+
+impl PageCounts {
+    pub fn add(&mut self, o: PageCounts) {
+        self.deleted += o.deleted;
+        self.cleaned += o.cleaned;
+        self.home += o.home;
+        self.relocated += o.relocated;
+        self.big += o.big;
+        self.overflow_pages_released += o.overflow_pages_released;
+    }
+}
+
+fn header_of(oid: Oid, rec: &[u8]) -> io::Result<RecordHeader> {
+    RecordHeader::read(rec).map_err(|e| invalid(format!("{oid:?}: {e}")))
+}
+
+fn vacuum(st: &mut HeapState, oid: Oid, reusable: bool) -> io::Result<()> {
+    st.edit(oid.vpid(), |p| {
+        editor(p, oid.vpid())?
+            .vacuum_slot(oid.slotid as usize, reusable)
+            .map_err(|e| spage_err(oid.vpid(), e))
+    })
+}
+
+fn update(st: &mut HeapState, oid: Oid, rec: &[u8]) -> io::Result<()> {
+    st.edit(oid.vpid(), |p| {
+        editor(p, oid.vpid())?
+            .update(oid.slotid as usize, rec)
+            .map_err(|e| spage_err(oid.vpid(), e))
+    })
+}
+
+/// The record bytes an object's home slot leads to, and the object's MVCC header.
+enum Target {
+    Home(Vec<u8>),
+    Relocated(Oid, Vec<u8>),
+    Big(Vpid),
+}
+
+fn patch_object(
+    st: &mut HeapState,
+    oid: Oid,
+    target: Target,
+    c: &mut PageCounts,
+) -> io::Result<()> {
+    let reuse = st.reuse_slots;
+    match target {
+        Target::Home(rec) => {
+            if header_of(oid, &rec)?.is_deleted() {
+                vacuum(st, oid, reuse)?;
+                c.deleted += 1;
+            } else if let Some(b) =
+                strip_insid_and_prev(&rec).map_err(|e| invalid(format!("{oid:?}: {e}")))?
+            {
+                update(st, oid, &b)?;
+                c.cleaned += 1;
+            }
+        }
+        Target::Relocated(nh, rec) => {
+            if header_of(nh, &rec)?.is_deleted() {
+                vacuum(st, nh, true)?;
+                vacuum(st, oid, reuse)?;
+                c.deleted += 1;
+            } else if let Some(b) =
+                strip_insid_and_prev(&rec).map_err(|e| invalid(format!("{nh:?}: {e}")))?
+            {
+                update(st, nh, &b)?;
+                c.cleaned += 1;
+            }
+        }
+        Target::Big(first) => {
+            let vs = st.vs();
+            let mut p = vs.read_page(first)?;
+            let h = header_of(oid, &db_area(&p)[OVERFLOW_FIRST_DATA..])?;
+            if h.is_deleted() {
+                c.overflow_pages_released +=
+                    overflow::release_chain(st.space, st.ovf_vfid, first)? as u64;
+                vacuum(st, oid, reuse)?;
+                c.deleted += 1;
+            } else if h.mvcc_flags != 0 {
+                let before = p.clone();
+                reset_overflow_header(db_area_mut(&mut p))
+                    .map_err(|e| invalid(format!("{oid:?}: {e}")))?;
+                if p != before {
+                    vs.write_page(first, &p)?;
+                    c.cleaned += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reencode_object(
+    st: &mut HeapState,
+    oid: Oid,
+    target: Target,
+    re: &dyn Reencode,
+    c: &mut PageCounts,
+) -> io::Result<()> {
+    let (deleted, rec) = match &target {
+        Target::Home(rec) | Target::Relocated(_, rec) => {
+            (header_of(oid, rec)?.is_deleted(), rec.clone())
+        }
+        Target::Big(first) => {
+            let rec = read_overflow(st.vs(), *first)?;
+            (header_of(oid, &rec)?.is_deleted(), rec)
+        }
+    };
+    if deleted {
+        c.overflow_pages_released += placement::release_target(st, oid)? as u64;
+        vacuum(st, oid, st.reuse_slots)?;
+        c.deleted += 1;
+        return Ok(());
+    }
+    let new = re
+        .reencode(oid, &rec)
+        .map_err(|e| invalid(format!("{oid:?}: re-encode: {e}")))?;
+    let (kind, released) = placement::place(st, oid, &new, re.mvcc())?;
+    c.overflow_pages_released += released as u64;
+    match kind {
+        HomeKind::Home => c.home += 1,
+        HomeKind::Relocated { .. } => c.relocated += 1,
+        HomeKind::Big { .. } => c.big += 1,
+    }
+    Ok(())
+}
+
+/// Rewrites the current page's records under `mode`, then compacts it, clears the 11.4 header bit and, on a data
+/// page, resets the chain record.
+pub(crate) fn rewrite_current_page(st: &mut HeapState, mode: PageMode) -> io::Result<PageCounts> {
+    let vpid = st.current_vpid();
+    let nslots = st.peek(vpid, |p| {
+        Ok(SlottedPage::new(db_area(p)).map_or(0, |sp| sp.num_slots()))
+    })?;
+    let mut c = PageCounts::default();
+    for slot in 1..nslots {
+        let oid = Oid::new(vpid.volid, vpid.pageid, slot as i16);
+        let Some((t, body)) = slot_record(st, oid)? else {
+            continue; // deleted or address-only slot
+        };
+        let target = match t {
+            RecordType::Home => Target::Home(body),
+            RecordType::Relocation => {
+                let nh = Oid::read(&body, 0);
+                let (nt, rec) = home_slot(st, nh)?;
+                if nt != RecordType::NewHome {
+                    return Err(invalid(format!(
+                        "{oid:?}: relocation target {nh:?} is {nt:?}"
+                    )));
+                }
+                Target::Relocated(nh, rec)
+            }
+            RecordType::BigOne => Target::Big(Oid::read(&body, 0).vpid()),
+            _ => continue,
+        };
+        match mode {
+            PageMode::Patch => patch_object(st, oid, target, &mut c)?,
+            PageMode::Reencode(re) => reencode_object(st, oid, target, re, &mut c)?,
+        }
+    }
+    let header_page = vpid == st.hfid.vpid();
+    st.edit(vpid, |p| {
+        let mut ed = editor(p, vpid)?;
+        ed.compact().map_err(|e| spage_err(vpid, e))?;
+        ed.clear_need_update_best_hint();
+        if !header_page {
+            let mut rec = ed
+                .view()
+                .record(0)
+                .map(|(_, r)| r.to_vec())
+                .unwrap_or_default();
+            if let Some(mut chain) = HeapChain::read(&rec) {
+                chain.max_mvccid = 0;
+                chain.flags = 0;
+                chain.write(&mut rec);
+                ed.update(0, &rec).map_err(|e| spage_err(vpid, e))?;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(c)
+}

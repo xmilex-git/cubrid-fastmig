@@ -38,6 +38,10 @@ _Avoid_: 모드, 변환 모드
 출발 DB의 vacuum이 아직 치우지 않은 MVCC 흔적: 커밋된 삭제 레코드, 레코드의 insert/delete MVCCID와 이전 버전 LSA, 페이지의 vacuum 상태. 도착 DB는 이것이 0인 상태로 시작한다.
 _Avoid_: 쓰레기 레코드, MVCC 찌꺼기
 
+**patch 대상 페이지 (patch target page)**:
+vacuum 잔여를 지우려고 레코드 단위로 고치는 힙 페이지. 힙 헤더 페이지는 항상 들어가고, 데이터 페이지는 출발에서 vacuum 상태가 ONCE이거나, UNKNOWN이면서 max_mvccid가 출발의 가장 오래된 미처리 MVCCID 이상일 때 들어간다. 그 밖의 페이지는 체인 레코드까지 바이트 그대로 둔다. 재인코딩 클래스의 페이지는 이 구분 없이 전부 다시 쓴다([workspace#499](https://github.com/xmilex-git/workspace/issues/499)).
+_Avoid_: vacuum 대상 페이지, 더러운 페이지
+
 ## 카탈로그와 인덱스
 
 **클래스 객체 (class object)**:

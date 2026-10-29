@@ -11,6 +11,7 @@ pub mod file_alloc;
 pub mod file_header;
 pub mod file_table;
 pub mod file_tracker;
+pub mod heap_rewrite;
 pub mod ids;
 pub mod le_field;
 pub mod log_header;
