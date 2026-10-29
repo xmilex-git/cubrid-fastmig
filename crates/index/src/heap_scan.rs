@@ -1,5 +1,5 @@
 //! Scans a class's heap pages sector by sector in parallel and turns every live row into the (key, OID) runs of
-//! each of the class's indexes in one pass, inside the memory budget.
+//! each of the class's indexes in one pass, inside the memory limit.
 //!
 //! Input: the heap's user pages grouped by sector (workspace#490 `FileTable::user_pages_by_sector`, header and
 //! bestspace pages left out by the caller), the key order of each index, and a row callback that extracts each
@@ -11,15 +11,15 @@
 
 use crate::build_error::BuildError;
 use crate::key_order::KeyOrder;
-use crate::memory_budget::MemoryBudget;
+use crate::memory_limit::MemoryLimit;
 use crate::run_writer::{IndexRuns, RunWriter};
 use crate::spill_dir::SpillDir;
-use crate::worker_budget::WorkerBudget;
+use crate::worker_limit::WorkerLimit;
 use fastmig_ondisk::{Oid, Vpid, Vsid};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Memory one writer asks for; the grant is smaller when the budget is.
+/// Memory one writer asks for; the grant is smaller when the memory limit is.
 const WRITER_SHARE: usize = 64 << 20;
 
 /// What the key extractor found for one index of one row.
@@ -41,8 +41,8 @@ pub struct ClassRuns<'m> {
 pub fn scan_class<'m, F>(
     sectors: &[(Vsid, Vec<Vpid>)],
     orders: &[&dyn KeyOrder],
-    budget: &WorkerBudget,
-    memory: &'m MemoryBudget,
+    workers: &WorkerLimit,
+    memory: &'m MemoryLimit,
     spill: &SpillDir,
     page_rows: F,
 ) -> Result<ClassRuns<'m>, BuildError>
@@ -50,7 +50,7 @@ where
     F: Fn(Vpid, &mut dyn FnMut(usize, Oid, RowKey)) -> Result<(), BuildError> + Sync,
 {
     let indexes = orders.len();
-    let permits = budget.acquire(sectors.len());
+    let permits = workers.acquire(sectors.len());
     let writers = permits.count * indexes;
     let mut grant = memory.acquire(writers * WRITER_SHARE);
     let share = grant.bytes / writers.max(1);

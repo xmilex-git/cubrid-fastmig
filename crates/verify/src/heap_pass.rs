@@ -2,7 +2,7 @@
 //! from the heap comes out of that pass.
 //!
 //! Input: the database, the heap ([`HeapTarget`]), the indexes whose keys come from its rows ([`IndexKeys`]), and
-//! the shared worker and memory budgets. Output: [`HeapPass`] — the page links for the chain walk (`heap_chain`),
+//! the shared worker and memory limits. Output: [`HeapPass`] — the page links for the chain walk (`heap_chain`),
 //! check 1 defects of the pages and records (slot directory, chain record class, record homes, MVCC residue in a
 //! target, record decode), the live OIDs, the measured `num_recs`/`recs_sumlen`, the RELOCATION → NEWHOME pairs, the
 //! OBJECT references and LOB locators of live rows, and per index the sorted-run input of the (key, OID) merge.
@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 use fastmig_index::BuildError;
 use fastmig_index::heap_scan::{ClassRuns, RowKey, scan_class};
-use fastmig_index::{KeyOrder, MemoryBudget, SpillDir, WorkerBudget};
+use fastmig_index::{KeyOrder, MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{ClassObject, Constraint};
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::page::{self, PageType};
@@ -93,8 +93,8 @@ pub fn scan_heap<'m>(
     db: &Database,
     t: &HeapTarget,
     indexes: &[IndexKeys],
-    workers: &WorkerBudget,
-    memory: &'m MemoryBudget,
+    workers: &WorkerLimit,
+    memory: &'m MemoryLimit,
     spill: &SpillDir,
 ) -> Result<HeapPass<'m>, BuildError> {
     let ft = FileTable::read(&db.vols, t.hfid.vfid)?;

@@ -7,7 +7,7 @@
 //! temporary files when the sort buffer fills).
 
 use crate::key_order::KeyOrder;
-use crate::memory_budget::MemoryGrant;
+use crate::memory_limit::MemoryGrant;
 use crate::sort_run::Run;
 use crate::spill_dir::SpillDir;
 use crate::spill_run::SpillRun;

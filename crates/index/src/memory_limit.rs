@@ -9,19 +9,19 @@
 
 use std::sync::{Condvar, Mutex};
 
-pub struct MemoryBudget {
+pub struct MemoryLimit {
     free: Mutex<usize>,
     freed: Condvar,
     limit: usize,
 }
 
-/// Bytes held; returned to the budget on drop.
+/// Bytes held; returned to the limit on drop.
 pub struct MemoryGrant<'a> {
-    budget: &'a MemoryBudget,
+    limit: &'a MemoryLimit,
     pub bytes: usize,
 }
 
-impl MemoryBudget {
+impl MemoryLimit {
     pub fn new(limit_bytes: usize) -> Self {
         Self {
             free: Mutex::new(limit_bytes),
@@ -42,10 +42,7 @@ impl MemoryBudget {
             free = self.freed.wait(free).unwrap();
         }
         *free -= bytes;
-        MemoryGrant {
-            budget: self,
-            bytes,
-        }
+        MemoryGrant { limit: self, bytes }
     }
 
     /// Takes up to `bytes` of what is free now, without waiting (possibly nothing).
@@ -53,10 +50,7 @@ impl MemoryBudget {
         let mut free = self.free.lock().unwrap();
         let bytes = bytes.min(*free);
         *free -= bytes;
-        MemoryGrant {
-            budget: self,
-            bytes,
-        }
+        MemoryGrant { limit: self, bytes }
     }
 }
 
@@ -66,7 +60,7 @@ impl<'a> MemoryGrant<'a> {
         let bytes = bytes.min(self.bytes);
         self.bytes -= bytes;
         MemoryGrant {
-            budget: self.budget,
+            limit: self.limit,
             bytes,
         }
     }
@@ -74,7 +68,7 @@ impl<'a> MemoryGrant<'a> {
 
 impl Drop for MemoryGrant<'_> {
     fn drop(&mut self) {
-        *self.budget.free.lock().unwrap() += self.bytes;
-        self.budget.freed.notify_all();
+        *self.limit.free.lock().unwrap() += self.bytes;
+        self.limit.freed.notify_all();
     }
 }

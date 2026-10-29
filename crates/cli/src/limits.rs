@@ -1,4 +1,4 @@
-//! The process-wide resource limits every subcommand shares: `--mem` (the memory cap; default a quarter of the
+//! The process-wide resource limits every subcommand shares: `--mem` (the memory limit; default a quarter of the
 //! physical memory) and `--spill-dir` (where stages that exceed it spill; default `<dest>/fastmig/spill`).
 //!
 //! Input: the parsed `--mem` / `--spill-dir` values and the target directory. Output: [`Limits`].

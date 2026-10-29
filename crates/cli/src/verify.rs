@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fastmig_index::{MemoryBudget, SpillDir, WorkerBudget};
+use fastmig_index::{MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::Oid;
 use fastmig_ondisk::databases_txt;
 use fastmig_ondisk::volume_set::Locate;
@@ -164,8 +164,8 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         .transpose()?
         .unwrap_or_default();
 
-    let wb = WorkerBudget::new(worker_limit);
-    let mb = MemoryBudget::new(usize::try_from(lim.memory_limit_bytes).unwrap_or(usize::MAX));
+    let wb = WorkerLimit::new(worker_limit);
+    let mb = MemoryLimit::new(usize::try_from(lim.memory_limit_bytes).unwrap_or(usize::MAX));
     let spill = SpillDir::create(&lim.spill_dir)?;
     let limits = fastmig_verify::Limits {
         workers: &wb,

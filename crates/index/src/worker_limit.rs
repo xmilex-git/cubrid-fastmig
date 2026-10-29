@@ -6,19 +6,19 @@
 
 use std::sync::{Condvar, Mutex};
 
-pub struct WorkerBudget {
+pub struct WorkerLimit {
     free: Mutex<usize>,
     freed: Condvar,
     limit: usize,
 }
 
-/// Permits held; returned to the budget on drop.
+/// Permits held; returned to the limit on drop.
 pub struct Permits<'a> {
-    budget: &'a WorkerBudget,
+    limit: &'a WorkerLimit,
     pub count: usize,
 }
 
-impl WorkerBudget {
+impl WorkerLimit {
     pub fn new(limit: usize) -> Self {
         let limit = limit.max(1);
         Self {
@@ -38,10 +38,7 @@ impl WorkerBudget {
         let mut free = self.free.lock().unwrap();
         let count = want.min(*free);
         *free -= count;
-        Permits {
-            budget: self,
-            count,
-        }
+        Permits { limit: self, count }
     }
 
     /// Waits for at least one permit, then takes up to `want` of those free.
@@ -52,16 +49,13 @@ impl WorkerBudget {
         }
         let count = want.clamp(1, *free);
         *free -= count;
-        Permits {
-            budget: self,
-            count,
-        }
+        Permits { limit: self, count }
     }
 }
 
 impl Drop for Permits<'_> {
     fn drop(&mut self) {
-        *self.budget.free.lock().unwrap() += self.count;
-        self.budget.freed.notify_all();
+        *self.limit.free.lock().unwrap() += self.count;
+        self.limit.freed.notify_all();
     }
 }

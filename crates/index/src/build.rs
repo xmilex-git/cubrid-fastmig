@@ -3,7 +3,7 @@
 //!
 //! Input: the index's runs (in memory and spilled, from the heap scan's `RunWriter`s), the NULL-key row count,
 //! the index shape and key order, the B-tree file's sink (its first page is the root), and the shared worker and
-//! memory budgets.
+//! memory limits.
 //! Output: the root VPID, the root header written, the overflow key file if any, and `BtStats`.
 //! Source: R6 § 2 steps 5–11 (engine no-logging parallel load, `btsort_px_*`, `bt_load_patch_seam`
 //! btree_load.c:5481-5555, develop 5b1867174); workspace#481 G1 (one `--workers` limit for everything).
@@ -14,7 +14,7 @@ use crate::index_shape::IndexShape;
 use crate::key_order::KeyOrder;
 use crate::kway_merge::{Cursor, KwayMerge};
 use crate::leaf_builder::{ShardLeaves, build_shard};
-use crate::memory_budget::MemoryBudget;
+use crate::memory_limit::MemoryLimit;
 use crate::nonleaf_builder::{build_nonleaf_levels, write_empty_root};
 use crate::ovf_key_file::{MakeSink, OvfKeyFile};
 use crate::page_sink::PageSink;
@@ -22,7 +22,7 @@ use crate::run_writer::IndexRuns;
 use crate::sort_run::Run;
 use crate::spill_run::SpillCursor;
 use crate::splitter::{select_splitters, slice_runs};
-use crate::worker_budget::WorkerBudget;
+use crate::worker_limit::WorkerLimit;
 use fastmig_ondisk::btree::node_header::NodeHeader;
 use fastmig_ondisk::btree::root_header::RootHeader;
 use fastmig_ondisk::{Vfid, Vpid};
@@ -93,8 +93,8 @@ pub struct IndexJob<'a, 'm> {
 
 pub fn build_index(
     job: IndexJob,
-    budget: &WorkerBudget,
-    memory: &MemoryBudget,
+    worker_limit: &WorkerLimit,
+    memory: &MemoryLimit,
 ) -> Result<BuiltIndex, BuildError> {
     let IndexJob {
         shape,
@@ -105,13 +105,13 @@ pub fn build_index(
         make_ovf_key_sink,
     } = job;
     let shape = &shape;
-    let _own = budget.acquire(1);
+    let _own = worker_limit.acquire(1);
     let root = sink.alloc_page()?;
     let ovf_keys = OvfKeyFile::new(make_ovf_key_sink);
 
     let t0 = Instant::now();
     // spilled runs are sorted already; the in-memory ones sort inside the grant they were collected under
-    let extra = budget.try_acquire(runs.mem.len().saturating_sub(1));
+    let extra = worker_limit.try_acquire(runs.mem.len().saturating_sub(1));
     let workers = 1 + extra.count;
     {
         let slots: Vec<Mutex<&mut Run>> = runs.mem.iter_mut().map(Mutex::new).collect();
@@ -125,7 +125,8 @@ pub fn build_index(
     let t_sort = t0.elapsed();
 
     let t1 = Instant::now();
-    let extra = budget.try_acquire((runs.entries() / MIN_ENTRIES_PER_SHARD).saturating_sub(1));
+    let extra =
+        worker_limit.try_acquire((runs.entries() / MIN_ENTRIES_PER_SHARD).saturating_sub(1));
     let shard_count = 1 + extra.count;
     let splitters = select_splitters(&runs, shard_count, order);
     let bounds = slice_runs(&runs, &splitters, order)?;
@@ -133,8 +134,8 @@ pub fn build_index(
     // read buffers of the spill files every shard merges
     let open_files = shard_total * runs.spilled.len();
     let merge_grant = memory.try_acquire(open_files * MERGE_BUFFER);
-    // shortcut: with the budget spent, a spill file still gets a 4 KiB buffer outside it; a multi-pass merge
-    // would bound the open files when spill files outnumber budget / 4 KiB
+    // shortcut: with the memory limit spent, a spill file still gets a 4 KiB buffer outside it; a multi-pass merge
+    // would bound the open files when spill files outnumber the memory limit / 4 KiB
     let buf_bytes = (merge_grant.bytes / open_files.max(1)).clamp(4096, MERGE_BUFFER);
     let shards: Vec<Mutex<Option<ShardLeaves>>> =
         (0..shard_total).map(|_| Mutex::new(None)).collect();

@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use fastmig_index::{BuildError, IndexRuns, MemoryBudget, SpillDir, WorkerBudget};
+use fastmig_index::{BuildError, IndexRuns, MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{Constraint, class_properties};
 use fastmig_ondisk::{Btid, Oid};
 
@@ -30,8 +30,8 @@ use crate::object_refs::{ObjectRef, check_refs};
 use crate::sector_owner::check_sectors;
 
 pub struct Limits<'a> {
-    pub workers: &'a WorkerBudget,
-    pub memory: &'a MemoryBudget,
+    pub workers: &'a WorkerLimit,
+    pub memory: &'a MemoryLimit,
     pub spill: &'a SpillDir,
 }
 
