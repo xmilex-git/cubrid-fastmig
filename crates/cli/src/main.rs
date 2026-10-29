@@ -3,6 +3,8 @@
 //! Input: the command line. Output: the subcommand's effect; exit code 0 on success, 2 on usage errors, 1 on
 //! failures.
 //! Source: decision G1 workspace#481 (commands plan, migrate, verify, finalize). `migrate` and `verify` exist so far.
+//!
+//! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
 mod args;
 mod heap_counter;

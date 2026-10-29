@@ -6,6 +6,8 @@
 //! Entry points: [`database::Database::open`], [`run::verify_database`], [`classify::classify`], [`report`].
 //! Source: G3 workspace#483 (checks 1–4, report, exit codes), G6 workspace#488 (check 5), G5 workspace#486
 //! (deferred indexes), G2 workspace#482 (measured header statistics); ticket P1f workspace#495.
+//!
+//! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
 pub mod btree_walk;
 pub mod catalog_refs;

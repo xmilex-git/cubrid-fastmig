@@ -1,5 +1,7 @@
 //! Parallel B-tree rebuild of every index in the target database: the engine's no-logging parallel load path
 //! (R6, workspace#478) with the MSD radix run sort of CUBRID/cubrid#8209, writing develop-layout B-tree files.
+//!
+//! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
 pub mod bt_stats;
 pub mod btree_page;

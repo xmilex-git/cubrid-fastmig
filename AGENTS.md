@@ -67,6 +67,9 @@ External crates, each with the reason it is not a few lines of our own (add a ro
 - **One module, one job.** Name the file after that job (`heap_hdr_stats.rs`, `patch_page.rs`),
   never `utils.rs` or `common.rs`. A file that grows a second concern is split into two.
   `lib.rs` and `mod.rs` only declare modules and re-export.
+- **Names are GLOSSARY terms.** Types, functions, fields, variables, files and modules use the English term of
+  [GLOSSARY.md](GLOSSARY.md) (`re_encoded`, `MemoryLimit`, `DeferredIndex`), never a word on its _Avoid_ line; a
+  new concept goes into GLOSSARY in the same commit.
 - **Module header.** Every crate root and module opens with a `//!` doc comment in this shape:
 
   ```rust

@@ -1,4 +1,6 @@
 //! Regenerates the system catalog (class objects, representation directory, _db_* tables) in the target format.
+//!
+//! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
 pub mod attr_default;
 pub mod auth_rows;
