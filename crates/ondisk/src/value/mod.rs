@@ -6,9 +6,13 @@
 //! develop @5b1867174); R2 § 2.
 
 pub mod db_type;
+pub mod domain;
 pub mod or_buf;
+pub mod packed_domain;
 pub mod string;
 
 pub use db_type::DbType;
+pub use domain::{CollationFlag, Domain};
 pub use or_buf::{DecodeError, DecodeResult, OrReader, OrWriter};
+pub use packed_domain::{decode_packed_domain, encode_packed_domain};
 pub use string::{read_string, read_varchar, write_string};
