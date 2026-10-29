@@ -17,6 +17,7 @@ pub mod log_header;
 pub mod log_page;
 pub mod lsa;
 pub mod page;
+pub mod partition_stream;
 pub mod record;
 pub mod sector_table;
 pub mod spage;
