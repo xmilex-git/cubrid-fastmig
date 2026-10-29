@@ -171,7 +171,14 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     }
     let o = PlanOptions::from(&p, "plan")?;
     let s = OpenSource::open(&o)?;
-    let plan = make_plan(&o, &s)?;
+    let plan = match make_plan(&o, &s) {
+        // a source version with no codec line yet: its refusals, exit 1 like any refused plan
+        Err(e) if e.get_ref().is_some_and(|r| r.is::<fastmig_plan::Refused>()) => {
+            println!("{e}");
+            return Ok(1);
+        }
+        r => r?,
+    };
     let mem = Limits::from(&p, &o.target_dir)?.memory_limit_bytes;
     let est = resource_estimate::estimate(
         &s.vols,

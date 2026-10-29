@@ -62,6 +62,17 @@ pub fn decode_record(
     layout: &RecordLayout,
     rec: &[u8],
 ) -> DecodeResult<DecodedRecord> {
+    decode_record_attrs(version, layout, rec, |_| true)
+}
+
+/// [`decode_record`] of the attributes `want` names (by attribute id) only; the others read as [`Value::Null`]. For
+/// a source whose other values this tool cannot decode yet (10.2 LZO strings, workspace#520).
+pub fn decode_record_attrs(
+    version: VersionLine,
+    layout: &RecordLayout,
+    rec: &[u8],
+    want: impl Fn(i32) -> bool,
+) -> DecodeResult<DecodedRecord> {
     let header = RecordHeader::read(rec)?;
     let hs = header.size();
     let n_var = layout.n_variable();
@@ -80,7 +91,7 @@ pub fn decode_record(
     let mut values = Vec::with_capacity(layout.attrs.len());
     for (i, a) in layout.attrs[..layout.n_fixed].iter().enumerate() {
         let bound = !header.has_bound_bits || rec[bits_at + i / 8] & (1 << (i % 8)) != 0;
-        if !bound {
+        if !bound || !want(a.id) {
             values.push(Value::Null);
             continue;
         }
@@ -103,7 +114,7 @@ pub fn decode_record(
                 rec.len()
             )));
         }
-        if end == start {
+        if end == start || !want(a.id) {
             values.push(Value::Null);
             continue;
         }

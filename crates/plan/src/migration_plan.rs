@@ -18,6 +18,7 @@ use fastmig_catalog::classify::{ClassKind, classify};
 use fastmig_catalog::collation_check::check_collations;
 use fastmig_catalog::deferred_indexes::{deferred_indexes, report_name};
 use fastmig_catalog::output_sql::{deferred_indexes_sql, plcsql_routines, recompile_plcsql_sql};
+use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
 use fastmig_catalog::system_classes::SystemClassRole;
 use fastmig_catalog::{attr_default, template_store};
@@ -144,6 +145,23 @@ fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
+/// The refusals of a source the plan cannot lay out (its version has no codec line yet), as the error of
+/// [`build`]; the CLI reports them like a plan's refusals.
+#[derive(Debug)]
+pub struct Refused(pub Vec<String>);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the plan refuses the migration:\n  {}",
+            self.0.join("\n  ")
+        )
+    }
+}
+
+impl std::error::Error for Refused {}
+
 fn dir_size(dir: &Path) -> io::Result<DirSize> {
     let mut s = DirSize::default();
     if !dir.is_dir() {
@@ -203,13 +221,26 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                     i.log.db_compatibility, i.log.db_release
                 ))
             })?;
-    let line = crate::version_pair::source_line(version).map_err(invalid)?;
+    // names that stop being valid once owner-qualified (workspace#518): checked before the version gate, so a source
+    // whose version is not opened yet still shows every refusal in one plan
+    let mut refusals = owner_qualified_names::refusals(i.vols, version).unwrap_or_else(|e| {
+        vec![format!(
+            "source names unreadable for the owner-qualified name pre-check: {e} (workspace#518)"
+        )]
+    });
+    let line = match crate::version_pair::source_line(version) {
+        Ok(l) => l,
+        Err(e) => {
+            refusals.insert(0, e);
+            return Err(io::Error::other(Refused(refusals)));
+        }
+    };
     let pair = VersionPair {
         source: line,
         target: i.target_line,
     };
     let regenerates = pair.regenerates_catalog();
-    let mut refusals: Vec<String> = pair.refusal().into_iter().collect();
+    refusals.extend(pair.refusal());
     let mut warnings = Vec::new();
 
     // the log and the volumes: one cleanly shut down database

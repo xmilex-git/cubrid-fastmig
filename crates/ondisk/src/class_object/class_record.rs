@@ -1,4 +1,4 @@
-//! The top level of a class object record: non-MVCC header, 17 variable fields, 88 fixed bytes.
+//! The top level of a class object record: non-MVCC header, 17 variable fields, 88 fixed bytes (84 in 10.2).
 //!
 //! Input: the full bytes of one root-heap record other than the root class's own record, and the release line.
 //! Output: [`ClassObject`].
@@ -94,6 +94,52 @@ pub struct ClassObject {
 
 /// Decodes one class object record. `line` selects the per-line differences (partition fixed area).
 pub fn decode(record: &[u8], line: VersionLine) -> DecodeResult<ClassObject> {
+    decode_fixed(record, line, true)
+}
+
+/// Decodes one class object record written by 10.2: an 84 B fixed area that ends at `collation_id` (no
+/// `tde_algorithm`, read as 0 = NONE); everything else as 11.4. Strings of 255 B or more are LZO-compressed in 10.2
+/// and are not readable until workspace#520.
+/// Source: release/10.2 @416bb667c `transform_cl.c:3671-3695` (`put_class_attributes` fixed part ends with
+/// `or_put_int (buf, (int) class_->collation_id)`; 11.0 added `tde_algorithm`, 0cf60dd26); R8 § 2.9 (workspace#513).
+pub fn decode_10_2(record: &[u8]) -> DecodeResult<ClassObject> {
+    decode_fixed(record, VersionLine::V11_4, false)
+}
+
+/// The fields of a class object that name it: enough for a pre-check that must not decode the rest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassHead {
+    pub name: Vec<u8>,
+    pub flags: i32,
+    pub class_type: ClassType,
+    pub owner: Oid,
+    pub partitions: Vec<Partition>,
+}
+
+/// Decodes only the name, flags, class type, owner and partitions of a class object. Those fields precede
+/// `tde_algorithm`, so one reader serves 10.2 (84 B fixed area) and later; the other variable fields (view query
+/// specs, 10.2 LZO strings, workspace#520) are not read.
+pub fn decode_head(record: &[u8], line: VersionLine) -> DecodeResult<ClassHead> {
+    let s = Structure::new(&record[HEADER_SIZE..], NVARS)?;
+    let mut f = s.fixed();
+    f.skip(64)?; // att_ids .. class_attribute_count (offsets as in `decode_fixed`)
+    let flags = f.i32()?;
+    let class_type = ClassType::from_raw(f.i32()?);
+    let owner = read_oid(&mut f)?;
+    Ok(ClassHead {
+        name: within(opt_string(s.var(0)), "name")?.unwrap_or_default(),
+        flags,
+        class_type,
+        owner,
+        partitions: within(partition::list(s.var(16), line), "partition")?,
+    })
+}
+
+fn decode_fixed(
+    record: &[u8],
+    line: VersionLine,
+    has_tde_algorithm: bool,
+) -> DecodeResult<ClassObject> {
     let mut h = OrReader::new(record);
     let repid = (h.u32()? & REPID_MASK) as i32;
     let chn = h.i32()?;
@@ -129,7 +175,7 @@ pub fn decode(record: &[u8], line: VersionLine) -> DecodeResult<ClassObject> {
     let class_type = ClassType::from_raw(f.i32()?);
     let owner = read_oid(&mut f)?;
     let collation_id = f.i32()?;
-    let tde_algorithm = f.i32()?;
+    let tde_algorithm = if has_tde_algorithm { f.i32()? } else { 0 };
 
     let name = within(opt_string(s.var(0)), "name")?.unwrap_or_default();
     let ctx = |field: &str| format!("class {} {field}", String::from_utf8_lossy(&name));

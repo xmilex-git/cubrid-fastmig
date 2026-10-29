@@ -19,6 +19,7 @@ pub mod dry_run;
 pub mod free_old_files;
 pub mod lob_dir_heap;
 pub mod output_sql;
+pub mod owner_qualified_names;
 pub mod page_treatment;
 pub mod record_map;
 pub mod row_encode;

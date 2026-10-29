@@ -20,6 +20,10 @@ _Avoid_: 업그레이드 경로, 홉
 출발 DB를 쓴 엔진 릴리스(10.2, 11.0(11.1 포함), 11.2, 11.3, 11.4, develop). 출발 로그 헤더의 `db_compatibility`로 정하고, 11.2와 11.3처럼 값이 같으면 `db_release`로 가른다. 출발 버전은 헤더 레이아웃(11.4 미만은 볼륨 헤더 128 B·로그 헤더 376 B)과 그 페이지를 읽을 코덱 줄을 정한다. 코덱 줄이 아직 없는 출발 버전은 plan이 그 버전을 여는 티켓 번호와 함께 거부한다([workspace#522](https://github.com/xmilex-git/workspace/issues/522)).
 _Avoid_: 소스 버전, DB 버전
 
+**소유자 한정 이름 (owner-qualified name)**:
+11.2부터 클래스·serial·trigger(11.4부터 SP도)가 갖는 `lower(owner).name` 형식의 이름. 11.2 미만 출발 DB의 이름에는 소유자가 없어 도착에서 붙인다. 붙인 결과가 develop 한도(이름 222 B, SP 254 B)를 넘거나, `.`을 포함하거나, develop 시스템 이름과 겹치면 plan이 거부한다(P1~P6, [workspace#518](https://github.com/xmilex-git/workspace/issues/518), 근거 R10 [workspace#511](https://github.com/xmilex-git/workspace/issues/511)).
+_Avoid_: unique name(엔진 칼럼 이름으로만), 전체 이름
+
 **기준 DB (baseline database)**:
 실제로 쓰이는 기능만 담아 버전마다 엔진으로 만들어 둔 소형 DB. 온디스크 구조의 적합성 검사와 마이그레이션 합격 판정에 쓴다.
 _Avoid_: 테스트 DB, 샘플 DB

@@ -12,5 +12,5 @@ pub mod version_pair;
 
 pub use copy_method::CopyMethod;
 pub use lob_scan::{LobScan, ReferencedLobFile};
-pub use migration_plan::{HeapTreatment, PageTreatment, Plan, PlanInputs, build};
+pub use migration_plan::{HeapTreatment, PageTreatment, Plan, PlanInputs, Refused, build};
 pub use version_pair::VersionPair;

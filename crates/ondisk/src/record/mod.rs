@@ -21,4 +21,4 @@ pub use heap_hdr_stats::HeapHdrStats;
 pub use heap_scan::{HeapRecord, HeapScan, HomeKind, heap_records, resolve_record};
 pub use layout::{LayoutAttr, RecordLayout, schema_domain};
 pub use mvcc_header::RecordHeader;
-pub use record_codec::{DecodedRecord, decode_record, encode_record};
+pub use record_codec::{DecodedRecord, decode_record, decode_record_attrs, encode_record};

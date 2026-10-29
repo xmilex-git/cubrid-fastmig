@@ -4,7 +4,8 @@
 //! Input: the volume set (volume 0 header `boot_hfid` → that heap's header page). Output: [`BootDbParm`] and the
 //! OID of its record.
 //! Source: engine `src/transaction/boot_sr.c:122-142` (develop @5b1867174) = :113-132 (release/11.4 @46212adcd),
-//! stored as raw struct bytes by `boot_create_all_volumes` (:5074-5091) into the boot heap. Size 136 B. Offsets
+//! stored as raw struct bytes by `boot_create_all_volumes` (:5074-5091) into the boot heap. Size 136 B (124 B in 10.2,
+//! without `tde_keyinfo_hfid`). Offsets
 //! checked on T1 fm114_clean (slot 1 of heap header page 0|129, workspace#490).
 
 use std::io;
@@ -15,8 +16,10 @@ use crate::page::{db_area, db_area_mut};
 use crate::spage::{RecordType, SlottedPage, SpageEditor};
 use crate::volume_set::VolumeSet;
 
-/// `sizeof (BOOT_DB_PARM)`.
+/// `sizeof (BOOT_DB_PARM)` from 11.0 on.
 pub const BOOT_DB_PARM_SIZE: usize = 136;
+/// `sizeof (BOOT_DB_PARM)` in 10.2: no `tde_keyinfo_hfid` (release/10.2 @416bb667c `boot_sr.c:107-127`; R9 workspace#510).
+pub const BOOT_DB_PARM_SIZE_10_2: usize = 124;
 
 /// Engine `CTID`: catalog file, its extendible hash, its header page. Size 24 B: `vfid` @0, `xhid` @8, `hpgid` @20.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +82,12 @@ impl BootDbParm {
             vacuum_log_block_npages: get_i32(r, 104),
             vacuum_data_vfid: Vfid::read(r, 108),
             dropped_files_vfid: Vfid::read(r, 116),
-            tde_keyinfo_hfid: Hfid::read(r, 124),
+            // a 10.2 record ends before it
+            tde_keyinfo_hfid: if r.len() >= BOOT_DB_PARM_SIZE {
+                Hfid::read(r, 124)
+            } else {
+                Hfid::NULL
+            },
         }
     }
 
@@ -96,7 +104,7 @@ impl BootDbParm {
         })?;
         for slot in 1..sp.num_slots() {
             if let Some((RecordType::Home, rec)) = sp.record(slot)
-                && rec.len() == BOOT_DB_PARM_SIZE
+                && (rec.len() == BOOT_DB_PARM_SIZE || rec.len() == BOOT_DB_PARM_SIZE_10_2)
             {
                 let oid = Oid::new(hfid.vfid.volid, hfid.pageid, slot as i16);
                 return Ok((oid, Self::decode(rec)));
