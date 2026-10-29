@@ -19,6 +19,7 @@ comes from, without reading the rest of the tree.
 
 - **Decisions**: the map [xmilex-git/workspace#472](https://github.com/xmilex-git/workspace/issues/472)
   indexes them; each decision lives in one ticket, linked from the map's *Decisions so far*.
+- Vocabulary is in [GLOSSARY.md](GLOSSARY.md) and hard-to-reverse decisions in [docs/adr/](docs/adr/); a ticket that settles a term or such a decision adds it there in the same change.
 - **Engine format research** (R1–R6), one document per branch of the workspace repo:
 
   | Doc | Topic |
