@@ -10,4 +10,10 @@ fastmig-catalog = { path = "../catalog" }
 fastmig-copy = { path = "../copy" }
 fastmig-index = { path = "../index" }
 fastmig-ondisk = { path = "../ondisk" }
+fastmig-progress = { path = "../progress" }
 fastmig-verify = { path = "../verify" }
+
+[features]
+default = ["heap-counter"]
+# the counting global allocator; build without it (--no-default-features) to measure its cost
+heap-counter = []

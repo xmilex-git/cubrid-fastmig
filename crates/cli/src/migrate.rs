@@ -2,7 +2,7 @@
 //!
 //! Input: the source DB name (found in the source `databases.txt`), the target directory and options.
 //! Output: the target volumes, a new `_lgat`, `_vinf`, `_keys`, Java SP directories, referenced LOB files,
-//! `<dest>/fastmig/report.json`, and the target's `databases.txt` line. The source is only read; its active log is read-locked for the whole run.
+//! `<dest>/fastmig/report.json`, and the target's `databases.txt` line. Progress (the phases in `PHASES`) goes to stderr. The source is only read; its active log is read-locked for the whole run.
 //! Scope today: the same-version path only (source line = target line, pages as is). Page treatment, catalog
 //! regeneration, index rebuild and verify are added by the P1 integration (workspace#484) on this skeleton; another
 //! version pair is refused.
@@ -12,22 +12,26 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use fastmig_copy::out_of_volume_asset::{self, AssetOutcome};
 use fastmig_copy::volume_copy::IO_BUF_BYTES;
 use fastmig_copy::{
-    AsIs, IncompleteMarker, VolumeJob, VolumeOutcome, copy_volumes, durable, lob_manifest, new_log,
-    new_log_start, open_locked_log, open_source, register_db, volinfo, volume_paths,
+    AsIs, CopyMethod, IncompleteMarker, VolumeJob, VolumeOutcome, copy_volumes, durable,
+    lob_manifest, new_log, new_log_start, open_locked_log, open_source, register_db, volinfo,
+    volume_paths,
 };
 use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::databases_txt::{self, DatabaseEntry};
 use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
+use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
 
 use crate::args::{CliError, parse};
 use crate::limits::{self, Limits};
+use crate::{heap_counter, progress_args};
 
 const HELP: &str = "\
 cubrid-fastmig migrate <db> --dest <dir> [options]
@@ -56,6 +60,20 @@ const FLAGS: &[&str] = &[
     "--lob-dir",
     "--lob-manifest",
 ];
+/// The run's phases, one per `Report::lap` in `migrate`, in order.
+const PHASES: &[PhaseSpec] = &[
+    PhaseSpec::step("precheck"),
+    PhaseSpec::step("open-sources"),
+    PhaseSpec::work("volume-copy", Unit::Bytes, default_rates::COPY_BYTES),
+    PhaseSpec::step("volume-paths"),
+    PhaseSpec::step("out-of-volume-assets"),
+    PhaseSpec::step("new-log"),
+    PhaseSpec::work("durable-sync", Unit::Bytes, default_rates::FSYNC_BYTES),
+    PhaseSpec::step("register"),
+];
+const VOLUME_COPY: usize = 2;
+const DURABLE_SYNC: usize = 6;
+
 const SWITCHES: &[&str] = &["--no-clone", "--volumes-in-first-dir", "--help"];
 
 struct Options {
@@ -74,10 +92,10 @@ struct Options {
 }
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
-    let flags = [FLAGS, limits::FLAGS].concat();
+    let flags = [FLAGS, limits::FLAGS, progress_args::FLAGS].concat();
     let p = parse(argv, &flags, SWITCHES)?;
     if p.switch("--help") {
-        println!("{HELP}");
+        println!("{HELP}\n{}", progress_args::HELP);
         return Ok(());
     }
     let [db] = p.positional.as_slice() else {
@@ -142,7 +160,12 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             (o.worker_limit * IO_BUF_BYTES) >> 10
         )));
     }
-    migrate(&o).map_err(CliError::Failed)
+    let progress = Progress::new("migrate", PHASES, o.worker_limit);
+    let monitor = progress_args::start(&p, progress.clone(), Some(o.limits.memory_limit_bytes))?;
+    let report = migrate(&o, progress).map_err(CliError::Failed)?;
+    monitor.finish();
+    println!("{report}");
+    Ok(())
 }
 
 fn absolute(p: &str) -> Result<PathBuf, CliError> {
@@ -153,6 +176,7 @@ fn absolute(p: &str) -> Result<PathBuf, CliError> {
 struct Report {
     steps: Vec<(&'static str, f64)>,
     started: Instant,
+    progress: Arc<Progress>,
 }
 
 impl Report {
@@ -160,13 +184,16 @@ impl Report {
         self.steps
             .push((step, self.started.elapsed().as_secs_f64()));
         self.started = Instant::now();
+        self.progress.advance();
     }
 }
 
-fn migrate(o: &Options) -> io::Result<()> {
+/// Returns report.json.
+fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     let mut rep = Report {
         steps: Vec::new(),
         started: Instant::now(),
+        progress,
     };
 
     // Pre-check: source registered, cleanly shut down, one consistent volume set, a supported pair.
@@ -203,11 +230,31 @@ fn migrate(o: &Options) -> io::Result<()> {
             io_pagesize: vols.io_pagesize(),
         });
     }
+    let bytes = jobs
+        .iter()
+        .map(|j| j.source.metadata().map(|m| m.len()))
+        .sum::<io::Result<u64>>()?;
+    rep.progress.set_total(VOLUME_COPY, bytes);
+    // until the copy shows what was cloned, assume every byte is written and synced
+    rep.progress.set_total(DURABLE_SYNC, bytes);
     let marker = IncompleteMarker::prepare(&o.dest)?;
     marker.create_dir_all(&o.log_dir)?;
     rep.lap("open_sources");
 
-    let outcomes = copy_volumes(&jobs, o.worker_limit, &AsIs, o.allow_clone, &marker)?;
+    let outcomes = copy_volumes(
+        &jobs,
+        o.worker_limit,
+        &AsIs,
+        o.allow_clone,
+        &marker,
+        rep.progress.meter(VOLUME_COPY),
+    )?;
+    let copied = outcomes
+        .iter()
+        .filter(|v| v.method == CopyMethod::Copy)
+        .map(|v| v.bytes)
+        .sum();
+    rep.progress.set_total(DURABLE_SYNC, copied);
     rep.lap("volumes");
     let targets: Vec<PathBuf> = jobs.iter().map(|j| j.target.clone()).collect();
     volume_paths::rewrite(&targets, vols.io_pagesize())?;
@@ -245,7 +292,7 @@ fn migrate(o: &Options) -> io::Result<()> {
     marker.record(&volinfo::log_dir_file(&o.log_dir, &o.target_name, "_vinf"))?;
     volinfo::write(&o.log_dir, &o.target_name, &targets)?;
     rep.lap("new_log");
-    durable::sync_created(&marker, o.worker_limit)?;
+    durable::sync_created(&marker, o.worker_limit, rep.progress.meter(DURABLE_SYNC))?;
     rep.lap("fsync");
 
     register_db::register(
@@ -274,10 +321,9 @@ fn migrate(o: &Options) -> io::Result<()> {
     let report_path = fastmig_dir.join("report.json");
     marker.record(&report_path)?;
     fs::write(&report_path, &report)?;
-    println!("{report}");
     // FASTMIG_INCOMPLETE stays: verify (workspace#495) removes it once the target passes.
     drop(src_lgat);
-    Ok(())
+    Ok(report)
 }
 
 /// Reads the header through the locked handle `f`: opening and closing another descriptor would drop the lock.
@@ -391,7 +437,7 @@ fn report_json(
         )
     };
     format!(
-        "{{\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid}\n}}",
+        "{{\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"heap_peak_bytes\": {},\n  \"progress\": {}\n}}",
         o.worker_limit,
         o.limits.memory_limit_bytes,
         o.limits.spill_dir,
@@ -401,5 +447,7 @@ fn report_json(
         asset(java[1]),
         asset(lob),
         src_log.append_lsa,
+        heap_counter::now_and_peak().map_or("null".into(), |(_, peak)| peak.to_string()),
+        fastmig_progress::report::json(&rep.progress),
     )
 }

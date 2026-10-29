@@ -3,6 +3,7 @@
 //! the shared worker cap.
 //!
 //! Input: the incomplete marker and the worker cap. Output: all created files and directories flushed to disk.
+//! Progress: `meter` (the durable-sync phase) gets each synced file's length.
 //! Must run before the target is registered, so a crash never leaves a registered target with unwritten pages.
 //! Policy: this pass is the run's only fsync, and it covers exactly what the marker lists — the target's files.
 //! Spill and scratch files (`--spill-dir`, sort runs, verifier merge files) are never listed and never fsynced:
@@ -17,10 +18,16 @@ use std::fs::File;
 use std::io;
 use std::path::PathBuf;
 
+use fastmig_progress::Meter;
+
 use crate::incomplete_marker::IncompleteMarker;
 use crate::worker_pool;
 
-pub fn sync_created(marker: &IncompleteMarker, worker_limit: usize) -> io::Result<()> {
+pub fn sync_created(
+    marker: &IncompleteMarker,
+    worker_limit: usize,
+    meter: Meter,
+) -> io::Result<()> {
     // parents too: a directory the tool did not create (the target dir itself) still gained entries
     let mut set = BTreeSet::new();
     for p in marker.created()? {
@@ -29,7 +36,11 @@ pub fn sync_created(marker: &IncompleteMarker, worker_limit: usize) -> io::Resul
     }
     let paths: Vec<PathBuf> = set.into_iter().collect();
     worker_pool::run(paths.len(), worker_limit, |i| match File::open(&paths[i]) {
-        Ok(f) => f.sync_all(),
+        Ok(f) => {
+            f.sync_all()?;
+            meter.add(f.metadata()?.len());
+            Ok(())
+        }
         // a listed path the run did not get to create (create failed after recording) has nothing to flush
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(io::Error::new(

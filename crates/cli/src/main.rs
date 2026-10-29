@@ -5,9 +5,11 @@
 //! Source: decision G1 workspace#481 (commands plan, migrate, verify, finalize). `migrate` and `verify` exist so far.
 
 mod args;
+mod heap_counter;
 mod limits;
 mod migrate;
 mod partition_streams;
+mod progress_args;
 mod template_extract;
 mod verify;
 

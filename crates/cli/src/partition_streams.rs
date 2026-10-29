@@ -4,10 +4,12 @@
 //!
 //! Input: `<11.4 first volume> <develop first volume> --out <dir>`. Output: one line per partitioned class (stream
 //! sizes, whether the trees and the bytes match) and, in `<dir>`, each stream's bytes and canonical tree text.
-//! Exit status 1 when a tree differs or a stream cannot be read.
+//! Exit status 1 when a tree differs or a stream cannot be read. Progress goes to stderr; the table is printed once
+//! the run ends, so it never tears the terminal display.
 //! Source: ticket P1g workspace#497 (acceptance: byte-equal, or the differences explained with equal trees).
 
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::io;
 use std::path::Path;
 
@@ -16,8 +18,25 @@ use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::partition_stream::container::stream_of_pvalues;
 use fastmig_ondisk::partition_stream::{parse, serialize_with_mask, transcode_partition_stream};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
+use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
 
 use crate::args::{self, CliError};
+use crate::progress_args;
+
+const PHASES: &[PhaseSpec] = &[
+    PhaseSpec::step("read-source-classes"),
+    PhaseSpec::step("read-develop-classes"),
+    // a class stream is a few hundred bytes: the step default, per class
+    PhaseSpec::work(
+        "transcode",
+        Unit::Count("classes"),
+        default_rates::DefaultRate {
+            per_worker: 1.0 / default_rates::STEP.as_secs_f64(),
+            max_workers: 1,
+        },
+    ),
+];
+const TRANSCODE: usize = 2;
 
 /// Class name → the master partition's stream.
 fn streams(first: &str, line: VersionLine) -> Result<BTreeMap<String, Vec<u8>>, CliError> {
@@ -38,7 +57,8 @@ fn failed(e: impl std::fmt::Display) -> CliError {
 }
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
-    let p = args::parse(argv, &["--out"], &[])?;
+    let flags = [&["--out"], progress_args::FLAGS].concat();
+    let p = args::parse(argv, &flags, &[])?;
     let [src, dev] = p.positional.as_slice() else {
         return Err(CliError::Usage(
             "partition-streams needs <11.4 first volume> <develop first volume>".into(),
@@ -49,11 +69,20 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             .ok_or_else(|| CliError::Usage("partition-streams needs --out".into()))?,
     );
     std::fs::create_dir_all(out)?;
+    let progress = Progress::new("partition-streams", PHASES, 1);
+    let monitor = progress_args::start(&p, progress.clone(), None)?;
     let src = streams(src, VersionLine::V11_4)?;
+    progress.advance();
     let dev = streams(dev, VersionLine::Develop)?;
+    progress.set_total(TRANSCODE, src.len() as u64);
+    progress.advance();
+    let meter = progress.meter(TRANSCODE);
+    let mut table = String::new();
     let mut bad = 0;
-    println!("class\t11.4_B\ttranscoded_B\tdevelop_B\ttree\tbytes");
+    let _ = writeln!(table, "class\t11.4_B\ttranscoded_B\tdevelop_B\ttree\tbytes");
     for (name, s) in &src {
+        // counted as it starts: the arms below leave the iteration early
+        meter.add(1);
         let file = |ext: &str| out.join(format!("{name}.{ext}"));
         std::fs::write(file("114.bin"), s)?;
         std::fs::write(
@@ -63,7 +92,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         let t = match transcode_partition_stream(VersionLine::V11_4, VersionLine::Develop, s) {
             Ok(t) => t,
             Err(e) => {
-                println!("{name}\t{}\t-\t-\ttranscode failed: {e}\t-", s.len());
+                let _ = writeln!(table, "{name}\t{}\t-\t-\ttranscode failed: {e}\t-", s.len());
                 bad += 1;
                 continue;
             }
@@ -73,7 +102,12 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         std::fs::write(file("trans.bin"), &t)?;
         std::fs::write(file("trans.txt"), &t_tree)?;
         let Some(d) = dev.get(name) else {
-            println!("{name}\t{}\t{}\t-\tno develop stream\t-", s.len(), t.len());
+            let _ = writeln!(
+                table,
+                "{name}\t{}\t{}\t-\tno develop stream\t-",
+                s.len(),
+                t.len()
+            );
             bad += 1;
             continue;
         };
@@ -97,7 +131,8 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
                 (n, _) => format!("{n} written B differ"),
             }
         };
-        println!(
+        let _ = writeln!(
+            table,
             "{name}\t{}\t{}\t{}\t{}\t{bytes}",
             s.len(),
             t.len(),
@@ -109,8 +144,15 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         }
     }
     for name in dev.keys().filter(|n| !src.contains_key(*n)) {
-        println!("{name}\t-\t-\t{}\tno 11.4 stream\t-", dev[name].len());
+        let _ = writeln!(
+            table,
+            "{name}\t-\t-\t{}\tno 11.4 stream\t-",
+            dev[name].len()
+        );
     }
+    progress.advance();
+    monitor.finish();
+    print!("{table}");
     if bad > 0 {
         return Err(failed(format!("{bad} partition stream(s) differ")));
     }

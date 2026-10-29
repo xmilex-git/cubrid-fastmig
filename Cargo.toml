@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/ondisk",
     "crates/plan",
+    "crates/progress",
     "crates/copy",
     "crates/catalog",
     "crates/index",

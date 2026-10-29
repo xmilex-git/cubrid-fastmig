@@ -5,12 +5,15 @@
 //! clone is allowed. Output: per volume, the copy method used and the bytes moved. Target files are created new
 //! (an existing file is an error) and recorded in the incomplete marker before they are written; they are
 //! made durable later, with every other created file, by [`crate::durable`].
+//! Progress: `meter` (the volume-copy phase) gets the bytes of each clone and of each 8 MiB copy task.
 //! Source: decision G1 workspace#481 (clone whenever possible, copy otherwise; `--workers` slides over the work).
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
+
+use fastmig_progress::Meter;
 
 use crate::byte_copy::{CopyRange, PageTreatment, copy_range};
 use crate::clone_file::try_clone;
@@ -54,6 +57,7 @@ pub fn copy_volumes(
     treatment: &dyn PageTreatment,
     allow_clone: bool,
     marker: &IncompleteMarker,
+    meter: Meter,
 ) -> io::Result<Vec<VolumeOutcome>> {
     // Pass 1: create every target and try to clone it; a volume that cannot be cloned is split into copy chunks.
     let prepared: Vec<Mutex<Option<(File, CopyMethod, u64)>>> =
@@ -75,6 +79,9 @@ pub fn copy_volumes(
             dst.set_len(size)?;
             CopyMethod::Copy
         };
+        if method == CopyMethod::Clone {
+            meter.add(size);
+        }
         *prepared[i].lock().unwrap() = Some((dst, method, size));
         Ok(())
     })?;
@@ -113,7 +120,9 @@ pub fn copy_volumes(
             .iter()
             .find_map(|b| b.try_lock().ok())
             .expect("one buffer per worker");
-        copy_range(&range, &mut buf, treatment)
+        copy_range(&range, &mut buf, treatment)?;
+        meter.add(end - start);
+        Ok(())
     })?;
 
     Ok(jobs

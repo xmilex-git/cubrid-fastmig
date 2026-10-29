@@ -131,3 +131,21 @@ _Avoid_: 버퍼 크기, sort buffer
 **spill**:
 메모리 상한 안에 들지 않는 정렬된 run을 `--spill-dir` 아래 파일로 내리는 일. spill 파일은 그 인덱스 빌드가 끝나거나 실패하면 지운다.
 _Avoid_: 스왑, 임시 볼륨(엔진 용어와 섞인다)
+
+## 진행 표시
+
+**단계 (phase)**:
+한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, out-of-volume-assets, new-log, durable-sync, register(P1 통합이 page treatment, catalog-regeneration, index-build, verifier 단계를 더한다). `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
+_Avoid_: 스텝(짧은 고정 작업만 가리킬 때 외에는), 스테이지
+
+**진행 표시 (progress display)**:
+stderr에 내는 단계 진행 상황. 터미널이면 제자리 갱신 화면, 아니면 일정 간격과 단계 경계마다 한 줄. `--progress auto|tty|plain|none`으로 고른다. 작업 스레드는 자기 카운터에 더하기만 하고, 합산·시간 측정·출력은 표시 스레드 하나가 한다.
+_Avoid_: 로그(엔진 로그와 섞인다), 진행 로그
+
+**속도 계수 (speed factor)**:
+지금까지 2초 넘게 잰 단계들의 실제 시간 ÷ 기본 처리량으로 예측한 시간. 아직 안 끝난 단계의 예상 시간에 곱해, 기본 처리량보다 느리거나 빠른 호스트에 맞춘다. 예상 완료 시각은 실행 시작부터 늘 보이고 `~`로 근사임을 표시한다.
+_Avoid_: 보정값, 가중치
+
+**힙 최대치 (heap peak)**:
+실행 중 살아 있던 힙 바이트의 최대값. cli의 계수 할당기가 스레드마다 64 KiB 단위로 모아 세므로 스레드당 64 KiB 안쪽 오차가 있다. 메모리 상한과 나란히 보이고 report.json에 남는다.
+_Avoid_: RSS(커널이 세는 값과 다르다), 메모리 사용량

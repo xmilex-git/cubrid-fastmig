@@ -36,6 +36,7 @@ not reported as migration defects.
 |---|---|
 | `crates/ondisk` | On-disk structures: volume and page headers, heap records, file headers, log header |
 | `crates/plan` | Per-volume choice of clone, copy, patch or transform |
+| `crates/progress` | Phases of a run, their per-worker counters, ETA, and the progress display (screen or lines) |
 | `crates/copy` | Parallel copy, patch and transform passes |
 | `crates/catalog` | Catalog regeneration in the target format |
 | `crates/index` | Parallel index rebuild |

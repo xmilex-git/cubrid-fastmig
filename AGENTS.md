@@ -39,15 +39,16 @@ comes from, without reading the rest of the tree.
 
 ## Crate map
 
-Roles: [README § Layout](README.md#layout). Dependencies point toward `ondisk` and never form a cycle:
+Roles: [README § Layout](README.md#layout). Dependencies point toward `ondisk` (and the leaf `progress`) and never form a cycle:
 
 ```
-ondisk   ← every other crate; the only crate that knows byte layouts
+ondisk   ← every other crate but progress; the only crate that knows byte layouts
+progress   depends on nothing; run phases, their counters and the progress display
 plan     → ondisk
-copy     → ondisk, plan
-catalog  → ondisk
-index    → ondisk, catalog
-verify   → ondisk, catalog, index   (index: the heap-scan driver, sorted runs with spill and k-way merge)
+copy     → ondisk, plan, progress
+catalog  → ondisk, progress
+index    → ondisk, catalog, progress
+verify   → ondisk, catalog, index, progress   (index: the heap-scan driver, sorted runs with spill and k-way merge)
 cli      → all of the above; the only binary
 ```
 
