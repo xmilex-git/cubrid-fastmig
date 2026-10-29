@@ -1,0 +1,14 @@
+//! Heap records: page-chain iteration, the record header, and decoding/encoding a record under a representation.
+//!
+//! Input: heap pages from a [`crate::volume_set::VolumeSet`], or one record's bytes. Output: records with their
+//! OIDs, headers, and values.
+//! Source: engine `src/storage/heap_file.c`, `src/base/object_representation_sr.c` (release/11.4 @46212adcd,
+//! develop @5b1867174); R2 § 1.
+
+pub mod heap_chain;
+pub mod heap_scan;
+pub mod mvcc_header;
+
+pub use heap_chain::HeapChain;
+pub use heap_scan::{HeapRecord, HeapScan, HomeKind, heap_records};
+pub use mvcc_header::RecordHeader;
