@@ -8,7 +8,7 @@
 //! Source: R6 § 2 (engine no-logging parallel load); workspace#503 (two-step API: BTIDs exist before the keys, so
 //! class objects and catalog rows can name them first, workspace#504), G1 workspace#481 (`--workers`, `--mem`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use fastmig_ondisk::file_alloc::{FilePages, SpaceManager};
 use fastmig_ondisk::file_table::FileTable;
@@ -69,11 +69,16 @@ pub fn fill_btrees(
     let batches = match lim.temp_disk {
         None => vec![(0..defs.len()).collect()],
         Some(limit) => {
-            let bytes: Vec<u64> =
-                pair_bytes(space.volumes(), &all, lim.workers.limit(), &|_| None)?
-                    .iter()
-                    .map(|by_class| by_class.values().sum())
-                    .collect();
+            let bytes: Vec<u64> = pair_bytes(
+                space.volumes(),
+                &all,
+                lim.workers.limit(),
+                &|_| None,
+                &HashSet::new(),
+            )?
+            .iter()
+            .map(|by_class| by_class.values().sum())
+            .collect();
             index_batches(&bytes, limit).map_err(|min| {
                 BuildError::TempDisk(format!(
                     "{limit} B is below {min} B, the pair bytes of the largest index"

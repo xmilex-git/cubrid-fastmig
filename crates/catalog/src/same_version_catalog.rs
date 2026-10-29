@@ -22,6 +22,7 @@ use fastmig_ondisk::heap_rewrite::{
     HeapJob, HeapReport, HeapWriter, PageStats, VacuumHorizon, rewrite_heap,
 };
 use fastmig_ondisk::value::{DecodeResult, Value};
+use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Btid, Oid, VersionLine, file_tracker};
 use fastmig_progress::Meter;
 
@@ -137,21 +138,15 @@ fn text(v: Option<&Value>) -> Option<&[u8]> {
     }
 }
 
-/// Removes the deferred indexes' `_db_index` and `_db_index_key` rows and their entries in `_db_class.indexes`.
-/// Returns the rows deleted.
-pub fn remove_deferred_rows(space: &SpaceManager, cat: &DevelopCatalog) -> io::Result<usize> {
+/// The deferred indexes' rows: (`_db_index` rows, `_db_index_key` rows). [`remove_deferred_rows`] deletes them;
+/// the plan's pair count leaves them out (workspace#526).
+pub fn deferred_rows(vs: &VolumeSet, cat: &DevelopCatalog) -> io::Result<(Vec<Oid>, Vec<Oid>)> {
     if cat.deferred.is_empty() {
-        return Ok(0);
+        return Ok((Vec::new(), Vec::new()));
     }
-    let vs = space.volumes();
-    let (ct_class, ct_index, ct_key) = (
-        cat.class(SystemTable::DbClass.name())?,
-        cat.class(SystemTable::DbIndex.name())?,
-        cat.class(SystemTable::DbIndexKey.name())?,
-    );
-    let class_rows = read_rows(vs, LINE, ct_class)?;
-    let index_rows = read_rows(vs, LINE, ct_index)?;
-    let key_rows = read_rows(vs, LINE, ct_key)?;
+    let class_rows = read_rows(vs, LINE, cat.class(SystemTable::DbClass.name())?)?;
+    let index_rows = read_rows(vs, LINE, cat.class(SystemTable::DbIndex.name())?)?;
+    let key_rows = read_rows(vs, LINE, cat.class(SystemTable::DbIndexKey.name())?)?;
     // _db_class row by class object
     let row_of: HashMap<Oid, &Row> = class_rows
         .iter()
@@ -181,7 +176,23 @@ pub fn remove_deferred_rows(space: &SpaceManager, cat: &DevelopCatalog) -> io::R
         .filter(|k| object(k.values.get("index_of")).is_some_and(|i| dropped.contains(&i)))
         .map(|k| k.oid)
         .collect();
+    Ok((dropped, keys))
+}
 
+/// Removes the deferred indexes' `_db_index` and `_db_index_key` rows and their entries in `_db_class.indexes`.
+/// Returns the rows deleted.
+pub fn remove_deferred_rows(space: &SpaceManager, cat: &DevelopCatalog) -> io::Result<usize> {
+    if cat.deferred.is_empty() {
+        return Ok(0);
+    }
+    let vs = space.volumes();
+    let (ct_class, ct_index, ct_key) = (
+        cat.class(SystemTable::DbClass.name())?,
+        cat.class(SystemTable::DbIndex.name())?,
+        cat.class(SystemTable::DbIndexKey.name())?,
+    );
+    let (dropped, keys) = deferred_rows(vs, cat)?;
+    let class_rows = read_rows(vs, LINE, ct_class)?;
     let mut deleted = 0;
     for (c, oids) in [(ct_key, &keys), (ct_index, &dropped)] {
         let mut w = HeapWriter::open(space, c.class.heap)?;

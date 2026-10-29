@@ -91,7 +91,7 @@ pub fn choose(
             if verify {
                 "--verify spills every index at once: temp max"
             } else {
-                "the largest index's spill bound"
+                "the largest index's pair bytes"
             }
         )));
     }

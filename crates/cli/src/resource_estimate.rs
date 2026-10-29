@@ -13,14 +13,14 @@
 //! Temp disk the verifier needs comes after the build's spill is gone: a run needs max(build, verify), not the sum.
 //! Source: workspace#526 (user requests: the sizes before the start, no disk full in the middle).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Instant;
 
 use fastmig_catalog::catalog_layout::generated_rows;
 use fastmig_catalog::classify::ClassKind;
 use fastmig_catalog::row_encode::encode_row;
-use fastmig_catalog::same_version_catalog::DevelopCatalog;
+use fastmig_catalog::same_version_catalog::{DevelopCatalog, deferred_rows};
 use fastmig_catalog::source_catalog::SourceCatalog;
 use fastmig_catalog::target_classes::{Origin, TargetClass as CatalogClass};
 use fastmig_catalog::template_store::builtin;
@@ -83,7 +83,10 @@ pub fn estimate(
                     hfid: c.class.heap,
                 })
                 .collect();
-            count(vols, &classes, Rows::Heaps(&HashMap::new()), workers)?
+            // the run deletes the deferred indexes' catalog rows before the build
+            let (index_rows, key_rows) = deferred_rows(vols, &cat)?;
+            let skip: HashSet<Oid> = index_rows.into_iter().chain(key_rows).collect();
+            count(vols, &classes, Rows::Heaps(&HashMap::new(), &skip), workers)?
         }
         VersionLine::V11_4 => {
             let src = SourceCatalog::read(vols, source)?;
@@ -128,7 +131,12 @@ pub fn estimate(
                     })
                     .collect()
             };
-            let mut e = count(vols, &tables(true), Rows::Heaps(&re_encoders), workers)?;
+            let mut e = count(
+                vols,
+                &tables(true),
+                Rows::Heaps(&re_encoders, &HashSet::new()),
+                workers,
+            )?;
             let s = count(vols, &tables(false), Rows::Records(&records), workers)?;
             e.indexes.extend(s.indexes);
             e.per_def.extend(s.per_def);
@@ -143,8 +151,9 @@ pub fn estimate(
 
 /// Where the records of the counted classes are.
 enum Rows<'r> {
-    /// In the classes' heaps, each class's records through its re-encoder if it has one.
-    Heaps(&'r HashMap<Oid, ClassReEncoder>),
+    /// In the classes' heaps, each class's records through its re-encoder if it has one, without the rows the
+    /// run deletes before the build (a develop source's deferred indexes' catalog rows).
+    Heaps(&'r HashMap<Oid, ClassReEncoder>, &'r HashSet<Oid>),
     /// Not on any page yet (the catalog rows an 11.4 source's run generates): develop records by class OID.
     Records(&'r HashMap<Oid, Vec<(Oid, Vec<u8>)>>),
 }
@@ -162,9 +171,13 @@ fn count(
         plain_index_defs(classes, &cons, vols.io_pagesize(), charset).map_err(invalid)?;
     let refs: Vec<&IndexDef> = defs.iter().collect();
     let counted = match rows {
-        Rows::Heaps(re_encoders) => pair_bytes(vols, &refs, workers, &|oid| {
-            re_encoders.get(&oid).map(|r| r as &dyn ReEncode)
-        }),
+        Rows::Heaps(re_encoders, skip) => pair_bytes(
+            vols,
+            &refs,
+            workers,
+            &|oid| re_encoders.get(&oid).map(|r| r as &dyn ReEncode),
+            skip,
+        ),
         Rows::Records(records) => record_pair_bytes(&refs, &|oid| {
             records.get(&oid).map_or(&[], |r| r.as_slice())
         }),

@@ -10,7 +10,7 @@
 //! 11.4 source's run generates) go through the same extractor (`record_pair_bytes`).
 //! Source: workspace#526.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use fastmig_ondisk::Oid;
 use fastmig_ondisk::file_table::FileTable;
@@ -88,6 +88,7 @@ pub fn pair_bytes<'c>(
     defs: &[&'c IndexDef<'c>],
     workers: usize,
     re_encode: &dyn Fn(Oid) -> Option<&'c dyn ReEncode>,
+    skip: &HashSet<Oid>,
 ) -> Result<Vec<PairBytes>, BuildError> {
     let mut classes = owner_classes(defs)?;
     let mut units = Vec::new();
@@ -110,11 +111,19 @@ pub fn pair_bytes<'c>(
         let mut buf = vec![0u8; io_pagesize];
         let mut bytes = vec![0u64; classes[c].keys.indexes_len()];
         for vpid in pages {
-            page_keys(vols, &classes[c].keys, &mut buf, vpid, &mut |ix, _, key| {
-                if let RowKey::Key(k) = key {
-                    bytes[ix] += spill_record_bytes(k.len() as u64);
-                }
-            })?;
+            page_keys(
+                vols,
+                &classes[c].keys,
+                &mut buf,
+                vpid,
+                &mut |ix, oid, key| {
+                    if let RowKey::Key(k) = key
+                        && !skip.contains(&oid)
+                    {
+                        bytes[ix] += spill_record_bytes(k.len() as u64);
+                    }
+                },
+            )?;
         }
         Ok::<_, BuildError>((c, bytes))
     });

@@ -26,8 +26,13 @@ An 11.4 source is counted as the target will hold it, from the catalog regenerat
 (`catalog_layout::generated_rows`, nothing written; placeholder OIDs have the length of real ones): each user class
 through the class object the run writes and, for a re-encoded class, each row through its re-encoder first; each
 system catalog index from the rows the run generates, encoded as the run encodes them (`encode_row`) and read by
-the same key extractor (`pair_count::record_pair_bytes`). T1 11.4 clean and dirty: all 75 indexes (44 user, 31
-system) equal to the count on the migrated target, byte for byte.
+the same key extractor (`pair_count::record_pair_bytes`). A develop source is counted in its own heaps without the
+deferred indexes' `_db_index` and `_db_index_key` rows, which the run deletes before the build
+(`same_version_catalog::deferred_rows`).
+
+Measured (`plan --json` on the source against `plan --json` on the migrated target, per index): T1 11.4 and develop,
+clean and dirty, and the big 11.4 and develop DBs: all 75 indexes (11.4: 44 user, 31 system) equal byte for byte
+(big: 1,530,676,624 B 11.4, 1,530,676,648 B develop).
 
 A pair is spilled at most once (a run is written once; the build after the scan spills nothing more) and an
 arena extent takes exactly the run's bytes, so one scan over a set of indexes spills at most `T = Σ T_i` over the
