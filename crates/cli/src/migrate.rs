@@ -206,7 +206,12 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         &o.plan.target_dir,
     )?;
     let progress = Progress::new("migrate", PHASES, o.worker_limit);
-    let monitor = progress_args::start(&p, progress.clone(), Some(o.limits.memory_limit_bytes))?;
+    let monitor = progress_args::start(
+        &p,
+        progress.clone(),
+        Some(o.limits.memory_limit_bytes),
+        temp_limit,
+    )?;
     let report = migrate(
         &o,
         Begun {

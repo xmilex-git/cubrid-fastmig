@@ -76,6 +76,9 @@ single free range holds a run, merged back on free. The space is never given bac
 ends, so another process filling the disk cannot stop the run halfway. The arena is a scratch line of the marker:
 a rerun after a kill removes it, and the end-of-run fsync skips it.
 
+The progress line shows `temp <now>/max <peak> of --temp-disk <limit>` next to the heap reading (Relaxed
+counters, `TEMP_DISK`).
+
 `report.json` records `temp_disk.limit_bytes`, whether it batched, and `peak_bytes`, the most spill bytes on disk
 at any moment of the run (the build and, with `--verify`, the verifier).
 

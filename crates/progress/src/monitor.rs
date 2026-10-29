@@ -50,6 +50,8 @@ impl Mode {
 
 /// Current and maximum heap bytes, `None` when the binary does not count them.
 pub type HeapProbe = fn() -> Option<(u64, u64)>;
+/// Temp disk bytes now and at most (workspace's spill accounting), shown next to the heap when a limit is set.
+pub type TempProbe = fn() -> (u64, u64);
 
 pub struct Monitor {
     stop: Arc<AtomicBool>,
@@ -63,6 +65,7 @@ impl Monitor {
         plain_interval: Duration,
         heap: HeapProbe,
         memory_limit: Option<u64>,
+        temp: Option<(TempProbe, u64)>,
     ) -> Monitor {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = (mode != Mode::None).then(|| {
@@ -75,7 +78,7 @@ impl Monitor {
             *p.warnings.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
             std::thread::spawn(move || {
                 let _ = p.waker.set(std::thread::current());
-                watch(&p, mode, tick, heap, memory_limit, &stop)
+                watch(&p, mode, tick, heap, memory_limit, temp, &stop)
             })
         });
         Monitor { stop, thread }
@@ -107,6 +110,7 @@ fn watch(
     tick: Duration,
     probe: HeapProbe,
     memory_limit: Option<u64>,
+    temp: Option<(TempProbe, u64)>,
     stop: &AtomicBool,
 ) {
     let mut est = Estimator::default();
@@ -121,6 +125,10 @@ fn watch(
         let heap = Heap {
             now_max: probe(),
             memory_limit,
+            temp: temp.map(|(t, limit)| {
+                let (now, max) = t();
+                (now, max, limit)
+            }),
         };
         let warnings = p.take_warnings(stopping);
         match mode {

@@ -23,6 +23,7 @@ pub fn start(
     p: &Parsed,
     progress: Arc<Progress>,
     memory_limit: Option<u64>,
+    temp_disk: Option<u64>,
 ) -> Result<Monitor, CliError> {
     let mode_arg = p.value("--progress").unwrap_or("auto");
     let mode = Mode::parse(mode_arg)
@@ -41,5 +42,11 @@ pub fn start(
         Duration::from_secs_f64(interval),
         heap_counter::now_and_peak,
         memory_limit,
+        temp_disk.map(|l| (temp_now_and_peak as fastmig_progress::TempProbe, l)),
     ))
+}
+
+/// The spill bytes on disk now and at most (`fastmig_index::temp_disk::TEMP_DISK`).
+fn temp_now_and_peak() -> (u64, u64) {
+    fastmig_index::temp_disk::TEMP_DISK.now_and_peak()
 }

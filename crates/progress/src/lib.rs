@@ -17,5 +17,5 @@ pub mod unit;
 
 pub use default_rates::DefaultRate;
 pub use meter::{Meter, PhaseSpec, Progress};
-pub use monitor::{HeapProbe, Mode, Monitor};
+pub use monitor::{HeapProbe, Mode, Monitor, TempProbe};
 pub use unit::Unit;

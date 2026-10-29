@@ -19,6 +19,8 @@ use crate::unit::{self, Unit};
 pub struct Heap {
     pub now_max: Option<(u64, u64)>,
     pub memory_limit: Option<u64>,
+    /// Temp disk bytes now, at most, and the limit (`--temp-disk`), when a limit is set.
+    pub temp: Option<(u64, u64, u64)>,
 }
 
 impl Heap {
@@ -33,6 +35,14 @@ impl Heap {
         };
         if let Some(c) = self.memory_limit {
             s += &format!(" of --mem {}", unit::bytes(c as f64));
+        }
+        if let Some((now, max, limit)) = self.temp {
+            s += &format!(
+                " temp {}/max {} of --temp-disk {}",
+                unit::bytes(now as f64),
+                unit::bytes(max as f64),
+                unit::bytes(limit as f64)
+            );
         }
         s
     }

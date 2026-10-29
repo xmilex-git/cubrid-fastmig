@@ -70,7 +70,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     );
     std::fs::create_dir_all(out)?;
     let progress = Progress::new("partition-streams", PHASES, 1);
-    let monitor = progress_args::start(&p, progress.clone(), None)?;
+    let monitor = progress_args::start(&p, progress.clone(), None, None)?;
     let src = streams(src, VersionLine::V11_4)?;
     progress.advance();
     let dev = streams(dev, VersionLine::Develop)?;
