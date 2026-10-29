@@ -12,6 +12,7 @@ use crate::btree_page::BtreePage;
 use crate::build_error::BuildError;
 use crate::index_shape::IndexShape;
 use crate::key_order::KeyOrder;
+use crate::kway_merge::KeyStream;
 use crate::ovf_key_file::OvfKeyFile;
 use crate::ovf_oid_chain::write_overflow_oids;
 use crate::page_sink::PageSink;
@@ -166,12 +167,12 @@ impl Builder<'_> {
 }
 
 /// Builds one shard. `stream` yields (key, OID) in key then OID order.
-pub fn build_shard<'k>(
+pub fn build_shard(
     shape: &IndexShape,
     order: &dyn KeyOrder,
     sink: &dyn PageSink,
     ovf_keys: &OvfKeyFile,
-    stream: impl Iterator<Item = (&'k [u8], Oid)>,
+    stream: &mut dyn KeyStream,
 ) -> Result<ShardLeaves, BuildError> {
     let mut b = Builder {
         shape,
@@ -194,7 +195,7 @@ pub fn build_shard<'k>(
     let mut prev_key: Option<Vec<u8>> = None;
     let mut key: Vec<u8> = Vec::new();
     let mut oids: Vec<Oid> = Vec::new();
-    for (k, oid) in stream {
+    while let Some((k, oid)) = stream.next_pair()? {
         if !oids.is_empty() {
             match order.compare(k, &key) {
                 Ordering::Equal => {

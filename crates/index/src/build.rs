@@ -1,8 +1,9 @@
 //! Builds one index from its rows' (key, OID) runs: sort runs, split into shards, build the shards' leaves at
 //! the same time, join them at the seams, build the non-leaf levels and the root.
 //!
-//! Input: one run per producer (filled by the heap scan), the NULL-key row count, the index shape and key
-//! order, the B-tree file's sink (its first page is the root) and the shared worker budget.
+//! Input: the index's runs (in memory and spilled, from the heap scan's `RunWriter`s), the NULL-key row count,
+//! the index shape and key order, the B-tree file's sink (its first page is the root), and the shared worker and
+//! memory budgets.
 //! Output: the root VPID, the root header written, the overflow key file if any, and `BtStats`.
 //! Source: R6 § 2 steps 5–11 (engine no-logging parallel load, `btsort_px_*`, `bt_load_patch_seam`
 //! btree_load.c:5481-5555, develop 5b1867174); workspace#481 G1 (one `--workers` limit for everything).
@@ -11,12 +12,15 @@ use crate::bt_stats::BtStats;
 use crate::build_error::BuildError;
 use crate::index_shape::IndexShape;
 use crate::key_order::KeyOrder;
-use crate::kway_merge::KwayMerge;
+use crate::kway_merge::{Cursor, KwayMerge};
 use crate::leaf_builder::{ShardLeaves, build_shard};
+use crate::memory_budget::MemoryBudget;
 use crate::nonleaf_builder::{build_nonleaf_levels, write_empty_root};
 use crate::ovf_key_file::{MakeSink, OvfKeyFile};
 use crate::page_sink::PageSink;
+use crate::run_writer::IndexRuns;
 use crate::sort_run::Run;
+use crate::spill_run::SpillCursor;
 use crate::splitter::{select_splitters, slice_runs};
 use crate::worker_budget::WorkerBudget;
 use fastmig_ondisk::btree::node_header::NodeHeader;
@@ -29,6 +33,9 @@ use std::time::{Duration, Instant};
 
 /// Entries per extra shard: below this, splitting the leaves costs more than it saves.
 const MIN_ENTRIES_PER_SHARD: usize = 4096;
+
+/// Read buffer of one spill file in one shard's merge.
+const MERGE_BUFFER: usize = 64 << 10;
 
 pub struct BuiltIndex {
     pub root: Vpid,
@@ -74,24 +81,40 @@ fn parallel_for<E: Send>(
     first_err.into_inner().unwrap().map_or(Ok(()), Err)
 }
 
+/// One index to build: its shape, key order, runs, NULL-key rows, and where its pages go.
+pub struct IndexJob<'a, 'm> {
+    pub shape: IndexShape,
+    pub order: &'a dyn KeyOrder,
+    pub runs: IndexRuns<'m>,
+    pub nulls: u64,
+    pub sink: &'a dyn PageSink,
+    pub make_ovf_key_sink: &'a MakeSink<'a>,
+}
+
 pub fn build_index(
-    shape: &IndexShape,
-    order: &dyn KeyOrder,
-    mut runs: Vec<Run>,
-    nulls: u64,
-    sink: &dyn PageSink,
-    make_ovf_key_sink: &MakeSink,
+    job: IndexJob,
     budget: &WorkerBudget,
+    memory: &MemoryBudget,
 ) -> Result<BuiltIndex, BuildError> {
+    let IndexJob {
+        shape,
+        order,
+        mut runs,
+        nulls,
+        sink,
+        make_ovf_key_sink,
+    } = job;
+    let shape = &shape;
     let _own = budget.acquire(1);
     let root = sink.alloc_page()?;
     let ovf_keys = OvfKeyFile::new(make_ovf_key_sink);
 
     let t0 = Instant::now();
-    let extra = budget.try_acquire(runs.len().saturating_sub(1));
+    // spilled runs are sorted already; the in-memory ones sort inside the grant they were collected under
+    let extra = budget.try_acquire(runs.mem.len().saturating_sub(1));
     let workers = 1 + extra.count;
     {
-        let slots: Vec<Mutex<&mut Run>> = runs.iter_mut().map(Mutex::new).collect();
+        let slots: Vec<Mutex<&mut Run>> = runs.mem.iter_mut().map(Mutex::new).collect();
         parallel_for::<()>(workers, slots.len(), |i| {
             slots[i].lock().unwrap().sort(order);
             Ok(())
@@ -102,15 +125,38 @@ pub fn build_index(
     let t_sort = t0.elapsed();
 
     let t1 = Instant::now();
-    let entries: usize = runs.iter().map(Run::len).sum();
-    let extra = budget.try_acquire((entries / MIN_ENTRIES_PER_SHARD).saturating_sub(1));
+    let extra = budget.try_acquire((runs.entries() / MIN_ENTRIES_PER_SHARD).saturating_sub(1));
     let shard_count = 1 + extra.count;
     let splitters = select_splitters(&runs, shard_count, order);
-    let slices = slice_runs(&runs, &splitters, order);
-    let shards: Vec<Mutex<Option<ShardLeaves>>> = slices.iter().map(|_| Mutex::new(None)).collect();
-    parallel_for(shard_count, slices.len(), |s| {
-        let stream = KwayMerge::new(&runs, &slices[s], order);
-        let built = build_shard(shape, order, sink, &ovf_keys, stream)?;
+    let bounds = slice_runs(&runs, &splitters, order)?;
+    let shard_total = splitters.len() + 1;
+    // read buffers of the spill files every shard merges
+    let open_files = shard_total * runs.spilled.len();
+    let merge_grant = memory.try_acquire(open_files * MERGE_BUFFER);
+    // shortcut: with the budget spent, a spill file still gets a 4 KiB buffer outside it; a multi-pass merge
+    // would bound the open files when spill files outnumber budget / 4 KiB
+    let buf_bytes = (merge_grant.bytes / open_files.max(1)).clamp(4096, MERGE_BUFFER);
+    let shards: Vec<Mutex<Option<ShardLeaves>>> =
+        (0..shard_total).map(|_| Mutex::new(None)).collect();
+    parallel_for(shard_count, shard_total, |s| {
+        let mut cursors = Vec::with_capacity(runs.mem.len() + runs.spilled.len());
+        for (run, b) in runs.mem.iter().zip(&bounds.mem) {
+            cursors.push(Cursor::Mem {
+                run,
+                at: b[s],
+                end: b[s + 1],
+            });
+        }
+        for (run, b) in runs.spilled.iter().zip(&bounds.spilled) {
+            cursors.push(Cursor::File(SpillCursor::open(
+                run,
+                b[s],
+                b[s + 1].index,
+                buf_bytes,
+            )?));
+        }
+        let mut stream = KwayMerge::new(cursors, order);
+        let built = build_shard(shape, order, sink, &ovf_keys, &mut stream)?;
         *shards[s].lock().unwrap() = Some(built);
         Ok::<(), BuildError>(())
     })?;
@@ -163,6 +209,9 @@ pub fn build_index(
     for p in held {
         p.write(sink)?;
     }
+    // the keys are in the leaves now: give back their memory and remove the spill files
+    drop(merge_grant);
+    drop(runs);
     let t_leaves = t1.elapsed();
 
     let t2 = Instant::now();

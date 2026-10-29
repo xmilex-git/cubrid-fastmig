@@ -113,3 +113,17 @@ _Avoid_: 외부 파일(LOB 파일만 가리키는 것으로 읽힌다), 부속 �
 **고아 LOB 파일 (orphan LOB file)**:
 lob-base-path 아래에 있지만 어느 레코드의 로케이터도 가리키지 않는 파일. 11.4는 DROP TABLE 때 LOB 파일을 지우지 않으므로 정상적으로도 쌓인다. 같은 lob-base-path를 쓰는 다른 DB의 파일도 이것과 구별할 수 없다. 옮기지도 지우지도 않고 보고만 한다.
 _Avoid_: 쓰레기 파일, 누수 파일
+
+## 실행 자원
+
+**워커 상한 (worker limit)**:
+`--workers`로 정하는, 도구가 한꺼번에 쓰는 스레드 수의 상한. 볼륨 처리·카탈로그 재생성·인덱스 빌드·검증기가 나눠 쓴다.
+_Avoid_: 병렬도, 스레드 수
+
+**메모리 상한 (memory limit)**:
+`--mem`으로 정하는, 도구가 키·정렬·merge 버퍼 등에 쓰는 메모리의 상한. 모든 단계가 하나를 나눠 쓴다([ADR 0012](docs/adr/0012-one-memory-limit-with-spill.md)).
+_Avoid_: 버퍼 크기, sort buffer
+
+**spill**:
+메모리 상한 안에 들지 않는 정렬된 run을 `--spill-dir` 아래 파일로 내리는 일. spill 파일은 그 인덱스 빌드가 끝나거나 실패하면 지운다.
+_Avoid_: 스왑, 임시 볼륨(엔진 용어와 섞인다)

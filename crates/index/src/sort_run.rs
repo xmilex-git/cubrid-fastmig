@@ -1,6 +1,6 @@
 //! One worker's run: the (key, OID) pairs it extracted, sorted by key then OID.
 //!
-//! Input: pairs pushed by one heap-scan worker (or any producer). Output: the run in index order.
+//! Input: pairs pushed by one producer (`RunWriter`) with their radix words. Output: the run in index order.
 //! Source: R6 § 2 steps 4–6 and § 4.2 R-SORT-1/2/4; the sort is the MSD radix of PR CUBRID/cubrid#8209
 //! (`btree_sort_radix.cpp`: a byte digit at a time over the key's radix words, a compare sort below 64
 //! entries or where the words run out), tie-broken by OID as `compare_driver` (btree_load.c, develop 5b1867174).
@@ -30,15 +30,48 @@ pub struct Run {
 }
 
 impl Run {
-    pub fn push(&mut self, key: &[u8], oid: Oid) {
+    /// Appends a pair with its radix words (`KeyOrder::radix_words` of `key`).
+    pub fn push(&mut self, key: &[u8], oid: Oid, words: &[u64]) {
         self.entries.push(Entry {
             key_off: self.keys.len(),
             key_len: key.len() as u32,
-            words_off: 0,
-            words_len: 0,
+            words_off: self.words.len() as u32,
+            words_len: words.len() as u32,
             oid,
         });
         self.keys.extend_from_slice(key);
+        self.words.extend_from_slice(words);
+    }
+
+    /// Memory the run holds, counting allocated capacity and the spare entry array its sort takes.
+    pub fn bytes(&self) -> usize {
+        Self::footprint(
+            self.keys.capacity(),
+            self.words.capacity(),
+            self.entries.capacity(),
+            self.entries.len(),
+        )
+    }
+
+    /// `bytes()` once a pair with `key_len` key bytes and `nwords` words is pushed (vectors grow by doubling).
+    pub fn bytes_after_push(&self, key_len: usize, nwords: usize) -> usize {
+        let grow = |len: usize, cap: usize, add: usize| {
+            if len + add > cap {
+                (cap * 2).max(len + add)
+            } else {
+                cap
+            }
+        };
+        Self::footprint(
+            grow(self.keys.len(), self.keys.capacity(), key_len),
+            grow(self.words.len(), self.words.capacity(), nwords),
+            grow(self.entries.len(), self.entries.capacity(), 1),
+            self.entries.len() + 1,
+        )
+    }
+
+    fn footprint(keys: usize, words: usize, entries_cap: usize, entries: usize) -> usize {
+        keys + words * 8 + (entries_cap + entries) * std::mem::size_of::<Entry>()
     }
 
     pub fn len(&self) -> usize {
@@ -58,25 +91,20 @@ impl Run {
         self.entries[i].oid
     }
 
-    /// Sorts by key (`order`), then OID ascending (R-SORT-2).
+    /// Sorts by key (`order`), then OID ascending (R-SORT-2); drops the radix words afterwards.
     pub fn sort(&mut self, order: &dyn KeyOrder) {
-        let mut buf = Vec::new();
-        self.words.clear();
-        for e in &mut self.entries {
-            buf.clear();
-            order.radix_words(
-                &self.keys[e.key_off..e.key_off + e.key_len as usize],
-                &mut buf,
-            );
-            e.words_off = self.words.len() as u32;
-            e.words_len = buf.len() as u32;
-            self.words.extend_from_slice(&buf);
-        }
         let mut entries = std::mem::take(&mut self.entries);
         let mut spare = entries.clone();
         self.msd(&mut entries, &mut spare, 0, order);
         self.entries = entries;
         self.words = Vec::new();
+    }
+
+    /// Empties the run, keeping its allocations for the next pairs.
+    pub fn clear(&mut self) {
+        self.keys.clear();
+        self.entries.clear();
+        self.words.clear();
     }
 
     fn full_cmp(&self, a: &Entry, b: &Entry, order: &dyn KeyOrder) -> Ordering {

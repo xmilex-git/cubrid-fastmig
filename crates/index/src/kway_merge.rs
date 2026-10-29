@@ -1,27 +1,64 @@
-//! Merges slices of sorted runs into one stream in index order.
+//! Merges slices of sorted runs, in memory or spilled, into one stream in index order.
 //!
-//! Input: one range of each sorted run. Output: (key, OID) pairs, key then OID ascending.
+//! Input: one range of each in-memory run and of each spill file. Output: (key, OID) pairs, key then OID ascending.
 //! Source: engine `btsort_put_result_index_leaf` k-way merge (btree_sort.c, develop 5b1867174); R6 § 2 step 8.
 
 use crate::key_order::KeyOrder;
 use crate::sort_run::Run;
+use crate::spill_run::SpillCursor;
 use fastmig_ondisk::Oid;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::ops::Range;
+use std::io;
+
+pub enum Cursor<'a> {
+    Mem { run: &'a Run, at: usize, end: usize },
+    File(SpillCursor),
+}
+
+impl Cursor<'_> {
+    fn key(&self) -> &[u8] {
+        match self {
+            Cursor::Mem { run, at, .. } => run.key(*at),
+            Cursor::File(c) => c.key(),
+        }
+    }
+
+    fn oid(&self) -> Oid {
+        match self {
+            Cursor::Mem { run, at, .. } => run.oid(*at),
+            Cursor::File(c) => c.oid(),
+        }
+    }
+
+    fn valid(&self) -> bool {
+        match self {
+            Cursor::Mem { at, end, .. } => at < end,
+            Cursor::File(c) => c.valid(),
+        }
+    }
+
+    fn advance(&mut self) -> io::Result<()> {
+        match self {
+            Cursor::Mem { at, .. } => {
+                *at += 1;
+                Ok(())
+            }
+            Cursor::File(c) => c.advance(),
+        }
+    }
+}
 
 struct Head<'a> {
-    run: &'a Run,
-    at: usize,
-    end: usize,
+    cur: Cursor<'a>,
     order: &'a dyn KeyOrder,
 }
 
 impl Head<'_> {
     fn cmp_entry(&self, other: &Self) -> Ordering {
         self.order
-            .compare(self.run.key(self.at), other.run.key(other.at))
-            .then(self.run.oid(self.at).cmp(&other.run.oid(other.at)))
+            .compare(self.cur.key(), other.cur.key())
+            .then(self.cur.oid().cmp(&other.cur.oid()))
     }
 }
 
@@ -43,37 +80,42 @@ impl Ord for Head<'_> {
     }
 }
 
+/// A stream of (key, OID) pairs whose key borrows the stream until the next call.
+pub trait KeyStream {
+    fn next_pair(&mut self) -> io::Result<Option<(&[u8], Oid)>>;
+}
+
 pub struct KwayMerge<'a> {
     heap: BinaryHeap<Head<'a>>,
+    key: Vec<u8>,
 }
 
 impl<'a> KwayMerge<'a> {
-    pub fn new(runs: &'a [Run], ranges: &[Range<usize>], order: &'a dyn KeyOrder) -> Self {
-        let heap = runs
-            .iter()
-            .zip(ranges)
-            .filter(|(_, r)| !r.is_empty())
-            .map(|(run, r)| Head {
-                run,
-                at: r.start,
-                end: r.end,
-                order,
-            })
+    pub fn new(cursors: Vec<Cursor<'a>>, order: &'a dyn KeyOrder) -> Self {
+        let heap = cursors
+            .into_iter()
+            .filter(Cursor::valid)
+            .map(|cur| Head { cur, order })
             .collect();
-        Self { heap }
+        Self {
+            heap,
+            key: Vec::new(),
+        }
     }
 }
 
-impl<'a> Iterator for KwayMerge<'a> {
-    type Item = (&'a [u8], Oid);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut top = self.heap.peek_mut()?;
-        let item = (top.run.key(top.at), top.run.oid(top.at));
-        top.at += 1;
-        if top.at == top.end {
+impl KeyStream for KwayMerge<'_> {
+    fn next_pair(&mut self) -> io::Result<Option<(&[u8], Oid)>> {
+        let Some(mut top) = self.heap.peek_mut() else {
+            return Ok(None);
+        };
+        self.key.clear();
+        self.key.extend_from_slice(top.cur.key());
+        let oid = top.cur.oid();
+        top.cur.advance()?;
+        if !top.cur.valid() {
             std::collections::binary_heap::PeekMut::pop(top);
         }
-        Some(item)
+        Ok(Some((&self.key, oid)))
     }
 }
