@@ -40,6 +40,8 @@ pub enum Rewrite {
     /// [<name>]` with its `call [change_serial_owner] ('<name>', '<OWNER>')` becomes `CREATE SERIAL [<owner>].[<name>]`,
     /// and the `call [find_user]` lines develop does not print are emptied.
     Serial11_2,
+    /// Drop ` WITH DEDUPLICATE=<level>`, any level.
+    DeduplicateLevel,
 }
 
 pub struct Rule {
@@ -80,12 +82,13 @@ const PRE_11_4_TO_DEVELOP: &[Rule] = &[
 ];
 
 const V11_4_TO_DEVELOP: &[Rule] = &[
-    // CBRD-27324 (develop 5de66400a, CUBRID/cubrid#8104) removed the DEDUPLICATE index feature; 11.4 prints level 0
+    // CBRD-27324 (develop 5de66400a, CUBRID/cubrid#8104) removed the DEDUPLICATE index feature; 11.4 prints level 0,
+    // or the index's level, which develop rebuilds as a plain index (R16 workspace#532, workspace#537)
     Rule {
-        name: "with-deduplicate-0",
+        name: "with-deduplicate",
         files: &["schema", "indexes"],
         side: Side::Source,
-        rewrite: Rewrite::Replace(b" WITH DEDUPLICATE=0", b""),
+        rewrite: Rewrite::DeduplicateLevel,
     },
     // CBRD-24156 (develop bb8f3cbda, CUBRID/cubrid#6420): NCHAR/VARNCHAR are CHAR/VARCHAR aliases in develop
     Rule {
@@ -156,6 +159,10 @@ pub fn normalize(
                 Rewrite::LobClassDir => entries.iter_mut().filter_map(drop_lob_class_dir).count(),
                 Rewrite::SpOwnerAuthid => sp_owner_authid(entries),
                 Rewrite::Serial11_2 => serial_11_2(entries),
+                Rewrite::DeduplicateLevel => entries
+                    .iter_mut()
+                    .filter_map(drop_deduplicate_level)
+                    .count(),
             }
         })
         .collect()
@@ -404,4 +411,29 @@ fn serial_11_2(entries: &mut [Vec<u8>]) -> usize {
         changed += 1;
     }
     changed
+}
+
+/// Drops every ` WITH DEDUPLICATE=<digits>` of one entry.
+fn drop_deduplicate_level(e: &mut Vec<u8>) -> Option<()> {
+    const HEAD: &[u8] = b" WITH DEDUPLICATE=";
+    let mut cuts = Vec::new();
+    let mut i = 0;
+    while let Some(at) = e[i..].windows(HEAD.len()).position(|w| w == HEAD) {
+        let start = i + at;
+        let digits = e[start + HEAD.len()..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digits > 0 {
+            cuts.push((start, start + HEAD.len() + digits));
+        }
+        i = start + HEAD.len();
+    }
+    if cuts.is_empty() {
+        return None;
+    }
+    for (from, to) in cuts.into_iter().rev() {
+        e.drain(from..to);
+    }
+    Some(())
 }
