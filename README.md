@@ -42,14 +42,20 @@ not reported as migration defects.
 | `crates/verify` | Heap, index and catalog verifier |
 | `crates/cli` | The `cubrid-fastmig` command |
 
-## Toolchain
+## Build
 
-The Rust toolchain is pinned through nix:
+The repository is driven by [just](https://just.systems). The Rust toolchain is pinned through
+nix (`toolchain.nix`); every recipe runs cargo from `.toolchain/bin`, not the host's.
 
 ```sh
-nix-build toolchain.nix -o .toolchain
-PATH="$PWD/.toolchain/bin:$PATH" cargo build
+just toolchain          # build or refresh the pinned toolchain (.toolchain GC root)
+just build              # debug build; `just release` for an optimized one
+just check              # rustfmt --check and clippy -D warnings
+just fmt                # format in place
+just run --help         # run cubrid-fastmig with its arguments
 ```
+
+`just` alone lists the recipes.
 
 ## License
 
