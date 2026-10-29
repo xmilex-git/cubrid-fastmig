@@ -301,28 +301,31 @@ fn scan_page(
             );
         }
         // the target starts with no vacuum residue (G3 Q5 (v)): patch targets were reset, the other pages kept
-        // their chain and must look vacuumed with every MVCCID before the new log's (workspace#499, #501)
+        // their chain and must look vacuumed with every MVCCID before the new log's (workspace#499, #501); a ONCE
+        // page below the source's horizon was vacuumed (`page_needs_patch`, workspace#484), and without `--source`
+        // ONCE stays a defect: the horizon that would clear it is unknown
         if db.role == Role::Target {
             let status = chain.flags & FLAG_VACUUM_STATUS_MASK;
-            let residue = status == FLAG_VACUUM_ONCE
-                || chain.max_mvccid >= db.mvcc_next_id
-                || db
-                    .source_horizon
-                    .is_some_and(|h| h.pending && h.page_needs_patch(&chain));
+            let residue = chain.max_mvccid >= db.mvcc_next_id
+                || match db.source_horizon {
+                    None => status == FLAG_VACUUM_ONCE,
+                    Some(h) => h.pending && h.page_needs_patch(&chain),
+                };
             if residue {
                 o.defects.push(
                     d(t, "page-vacuum-residue", vpid)
                         .object(VpidText(vpid))
                         .expected(format!(
-                            "vacuum status not ONCE, max_mvccid < {}{}",
+                            "max_mvccid < {}{}",
                             db.mvcc_next_id,
-                            db.source_horizon.filter(|h| h.pending).map_or(
-                                String::new(),
-                                |h| format!(
-                                    ", UNKNOWN only below the source's oldest unvacuumed {}",
+                            match db.source_horizon {
+                                None => ", vacuum status not ONCE".into(),
+                                Some(h) if h.pending => format!(
+                                    ", ONCE or UNKNOWN only below the source's oldest unvacuumed {}",
                                     h.oldest_unvacuumed
-                                )
-                            )
+                                ),
+                                Some(_) => String::new(),
+                            }
                         ))
                         .actual(format!(
                             "max_mvccid {} flags {:#x}",

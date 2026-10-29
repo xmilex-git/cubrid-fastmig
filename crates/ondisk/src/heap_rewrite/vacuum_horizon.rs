@@ -16,7 +16,7 @@ use crate::file_header::{FileDescriptor, FileHeader};
 use crate::le_field::{get_i16, get_u64};
 use crate::log_header::LogHeader;
 use crate::page::db_area;
-use crate::record::heap_chain::{FLAG_VACUUM_ONCE, FLAG_VACUUM_STATUS_MASK, HeapChain};
+use crate::record::heap_chain::{FLAG_VACUUM_STATUS_MASK, HeapChain};
 use crate::volume_set::VolumeSet;
 use crate::{Vfid, Vpid};
 
@@ -65,13 +65,12 @@ impl VacuumHorizon {
         })
     }
 
-    /// Whether a data page's records must be cleaned: vacuum status ONCE, or UNKNOWN with `max_mvccid` not below
-    /// OU. NONE pages and older UNKNOWN pages are vacuumed as far as the engine is concerned (R2 § 3 R2.2).
+    /// Whether a data page's records must be cleaned: vacuum status ONCE or UNKNOWN with `max_mvccid` not below OU.
+    /// NONE pages are vacuumed; so is a ONCE or UNKNOWN page whose every MVCC operation (all ≤ `max_mvccid`) is below
+    /// OU (`vacuum_is_mvccid_vacuumed`) — a ONCE page keeps that status after its vacuum when the vacuum job had been
+    /// interrupted by a shutdown and re-ran (engine `vacuum_heap_page`, develop @5b1867174 vacuum.c:1813-1816), so a
+    /// source with no pending vacuum work can still hold ONCE pages (R2 § 3 R2.2; workspace#484, V1 cbrd_24871).
     pub fn page_needs_patch(&self, chain: &HeapChain) -> bool {
-        match chain.flags & FLAG_VACUUM_STATUS_MASK {
-            0 => false,
-            FLAG_VACUUM_ONCE => true,
-            _ => chain.max_mvccid >= self.oldest_unvacuumed,
-        }
+        chain.flags & FLAG_VACUUM_STATUS_MASK != 0 && chain.max_mvccid >= self.oldest_unvacuumed
     }
 }
