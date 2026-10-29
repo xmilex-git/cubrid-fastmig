@@ -20,6 +20,10 @@ _Avoid_: 업그레이드 경로, 홉
 실제로 쓰이는 기능만 담아 버전마다 엔진으로 만들어 둔 소형 DB. 온디스크 구조의 적합성 검사와 마이그레이션 합격 판정에 쓴다.
 _Avoid_: 테스트 DB, 샘플 DB
 
+**행 배수 (rows multiplier)**:
+기준 DB의 대량 테이블(customer, orders, order_item, event_log) 행을 몇 배로 만들지 정하는 기준 DB 생성 옵션. 1이면 T1 그대로이다. 1보다 크면 T1 행은 그대로 두고 id를 이어 행을 더한다. 속도 비교 기준선의 큰 입력을 만들 때 쓴다.
+_Avoid_: 스케일 팩터, 크기 배수
+
 ## 볼륨과 페이지 처리
 
 **배치 보존 (placement preservation)**:

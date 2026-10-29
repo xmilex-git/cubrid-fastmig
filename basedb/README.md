@@ -36,10 +36,14 @@ BASEDB_INSTALL=<install> BASEDB_PORT=<port> just basedb <label> <variant>
   | `BASEDB_ROOT` | `/home/cubrid/fastmig-basedb` | output root and size check |
   | `TOOLING` | `/home/cubrid/dev/workspace` | the `cubrid-server-control` wrapper |
   | `BASEDB_JAVA_HOME` | `/usr/lib/jvm/java-1.8.0-openjdk` | `javac`/`loadjava` for the Java SP |
+  | `BASEDB_ROWS_MULTIPLIER` | `1` | rows multiplier k (GLOSSARY 행 배수); k > 1 runs `25_rows_multiplier.sql` and sets `log_max_archives=0` |
+  | `BASEDB_CAP_MB` | `5120` | the size cap below; raise it with k |
 
 - The script refuses to run when any output directory already exists; remove it by literal path first.
 - Size cap: `du -sm $BASEDB_ROOT` must stay ≤ 5120 MB (du counts the reflinked pristine copy
   twice). One variant takes about 513 MB registered, 465–473 MB pristine, 17–23 MB unload.
+- A multiplied DB (k > 1) is not a T1 DB: build it under its own `BASEDB_ROOT`, never into the T1 root.
+  It is the large input of the speed-comparison baseline (workspace#484).
 
 ## Output
 
@@ -69,6 +73,7 @@ Run in this order by `build.sh` (user, mode in parentheses):
 | `00_users.sql` (dba) | users `app_owner`, `app_group`, `app_reader` (group member), user comments | T1 |
 | `10_schema.sql` (app_owner) | tables of every common type, collations, PK/FK/UNIQUE/composite/DESC indexes, AUTO_INCREMENT, RANGE/HASH/LIST partitions, overflow table `doc_big`; function and filter indexes on `g5_expr`, `g5_fx`, `region_list` (`i_f1`, `i_f2`, `i_f4`, `i_f5`) | T1; G5 (workspace#486) |
 | `20_data.sql` (app_owner) | rows, all functions of `seq_n.n` so both versions load the same data; LOBs on 20 `product` rows | T1 |
+| `25_rows_multiplier.sql` (app_owner, k > 1 only) | (k − 1) × the T1 rows of `customer`, `orders`, `order_item`, `event_log`, ids from 1000001; runs before the triggers exist | speed-comparison baseline (workspace#484) |
 | `30_objects.sql` (app_owner) | serial, views (one WITH CHECK OPTION), triggers, synonym, PL/CSQL function and procedure, GRANTs | T1 |
 | `31_dba_objects.sql` (dba) | dba tables (one `utf8_ko_cs`), synonym, Java SP `fm_hello` | T1; G6 (workspace#488) for `java/` |
 | `40_post.sql` (app_owner) | record relocations, AUTO_INCREMENT/trigger/serial/SP use | T1 |

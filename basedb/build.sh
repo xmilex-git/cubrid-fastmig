@@ -4,6 +4,8 @@
 # Host paths come from the environment (defaults are the dev host's):
 #   BASEDB_ROOT (/home/cubrid/fastmig-basedb), TOOLING (/home/cubrid/dev/workspace),
 #   BASEDB_JAVA_HOME (/usr/lib/jvm/java-1.8.0-openjdk)
+# Rows multiplier (GLOSSARY): BASEDB_ROWS_MULTIPLIER (1 = T1 as is; k > 1 runs 25_rows_multiplier.sql),
+#   with BASEDB_CAP_MB (5120) raised to fit the bigger DB
 # Layout under BASE=$BASEDB_ROOT/<label>/:
 #   databases.txt, <variant>/ (registered db), pristine/<variant>/ (copy taken right after the
 #   final shutdown), unload/<variant>/ (unloaddb output), evidence/<variant>/ (logs, counts, hashes)
@@ -17,7 +19,11 @@ base=$root/$label
 case "$label" in 11.4) tag=114 ;; develop) tag=dev ;; *) echo "bad label" >&2; exit 2 ;; esac
 db="fm${tag}_${variant}"
 dbdir=$base/$variant; pristine=$base/pristine/$variant; unload=$base/unload/$variant; ev=$base/evidence/$variant
-cap_mb=5120   # du counts the reflinked pristine copy a second time
+cap_mb="${BASEDB_CAP_MB:-5120}"   # du counts the reflinked pristine copy a second time
+rows_multiplier="${BASEDB_ROWS_MULTIPLIER:-1}"
+[[ "$rows_multiplier" =~ ^[1-9][0-9]*$ ]] || { echo "BASEDB_ROWS_MULTIPLIER must be a positive integer" >&2; exit 2; }
+conf_extra=""   # a multiplied load writes GBs of log; archives it no longer needs are not kept
+[ "$rows_multiplier" -eq 1 ] || conf_extra="log_max_archives=0"
 
 export CUBRID="$inst" CUBRID_DATABASES="$base" PATH="$inst/bin:$PATH" LD_LIBRARY_PATH="$inst/lib"
 export JAVA_HOME="${BASEDB_JAVA_HOME:-/usr/lib/jvm/java-1.8.0-openjdk}"
@@ -46,7 +52,7 @@ size_check() {
   [ "$mb" -le "$cap_mb" ] || { echo "size cap exceeded" >&2; exit 1; }
 }
 
-write_conf ""
+write_conf "$conf_extra"
 ( cd "$dbdir" && cubrid createdb --db-volume-size=20M --log-volume-size=64M \
     --file-path="$dbdir" --log-path="$dbdir" "$db" en_US.utf8 ) > "$ev/createdb.out" 2>&1
 cubrid addvoldb -S --db-volume-size=64M "$db" > "$ev/addvoldb.out" 2>&1
@@ -58,6 +64,10 @@ bash "$ctl" start "$db" | tee "$ev/start.out" | grep 'RESULT: OK'
 csql_as dba "$scripts/00_users.sql" -C
 csql_as app_owner "$scripts/10_schema.sql" -C
 csql_as app_owner "$scripts/20_data.sql" -C
+if [ "$rows_multiplier" -gt 1 ]; then
+  sed "s/@ROWS_MULTIPLIER@/$rows_multiplier/g" "$scripts/25_rows_multiplier.sql" > "$ev/25_rows_multiplier.sql"
+  csql_as app_owner "$ev/25_rows_multiplier.sql" -C
+fi
 csql_as app_owner "$scripts/30_objects.sql" -C
 csql_as dba "$scripts/31_dba_objects.sql" -C
 csql_as app_owner "$scripts/40_post.sql" -C
@@ -74,7 +84,7 @@ if [ "$variant" = dirty ]; then
   cubrid paramdump -C "$db" > "$ev/paramdump.out" 2>&1 || true
   csql_as app_owner "$scripts/50_dirty.sql" -C
   bash "$ctl" stop "$db" | tee "$ev/stop2.out" | grep 'RESULT: OK'
-  write_conf ""
+  write_conf "$conf_extra"
 fi
 
 # pristine copy: the state P1/#485 start from; every SA tool below may write the log or volumes
