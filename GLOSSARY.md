@@ -110,6 +110,10 @@ _Avoid_: checkdb, 체커
 출발 DB와 도착 DB의 엔진 unloaddb 결과가 순서와 무관하게 같은 행·스키마를 담는지 보는 최종 합격 판정. 검증기와 독립된 값 정확성의 오라클이다.
 _Avoid_: diff 비교, 정합성 체크
 
+**의도된 차이 (intended difference)**:
+엔진 공식 상향 경로(출발 unloaddb → 도착 loaddb)와 결과가 다르지만 지도에서 결정해 남기는 도착 DB의 상태. 엔진이 스스로 만들 수 있는 상태이고 정보를 잃지 않는 쪽을 고른 것이다. 목록과 결정 티켓은 [docs/intended-differences.md](docs/intended-differences.md)에 있다. 집합 비교에 보이면 정규화 규칙으로 지우지 않고 이 목록으로 보고한다.
+_Avoid_: 허용 오차, 알려진 차이
+
 **live row map**:
 검증기가 힙 패스에서 모은 live 행의 지도. 힙 페이지마다 그 페이지를 가진 클래스와 live 슬롯 비트를 담고, OBJECT 값·카탈로그 참조·지연 인덱스 OID가 live 행인지 답한다. 메모리 상한 안에서 힙 패스 전에 예약한다(workspace#509, `docs/verify.md`).
 _Avoid_: live OID 집합(행마다 OID를 들던 옛 형태)
