@@ -13,3 +13,4 @@
 
 - 빌더는 비리프 구분 키로 오른쪽 리프의 첫 키 전체를 쓴다. 구분 키와 채움 정도가 엔진이 만든 B-tree와 바이트 단위로 같지 않으므로, 검증기는 B-tree를 구조 불변식으로만 검사한다([G3](https://github.com/xmilex-git/workspace/issues/483)).
 - 함수·필터 인덱스는 이 빌더로 만들 수 없다([ADR 0006](0006-defer-function-and-filter-indexes.md)).
+- 동시 빌드는 공간 관리 mutex 하나 아래에서 도착 순서대로 섹터·페이지를 받으므로, 같은 입력이라도 `--workers` 2 이상이면 인덱스끼리 페이지 배치가 실행마다 다를 수 있다(원인: file_alloc 공간 mutex 아래 동시 빌드의 섹터 확장 순서. 재현 빈도 약 1~2%: 11.2 T1, w4, 60회. 두 B-tree가 섹터를 바꿔 가짐). (key, OID) 내용·리프 수·검증 결과는 같고, 힙·카탈로그 배치는 [ADR 0002](0002-placement-preservation-and-catalog-regeneration.md)대로 바이트 동일하다. 두 실행의 볼륨 바이트를 비교할 때는 `--workers 1`로 돌리거나 B-tree 파일 페이지를 제외한다.
