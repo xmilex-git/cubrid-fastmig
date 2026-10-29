@@ -26,6 +26,8 @@ pub enum Role {
 
 pub struct Database {
     pub vols: VolumeSet,
+    /// The release that wrote the database (its header layouts, workspace#529).
+    pub version: SourceVersion,
     pub line: VersionLine,
     pub role: Role,
     pub boot: BootDbParm,
@@ -48,6 +50,19 @@ fn read_log(log: &Path) -> io::Result<LogHeader> {
         .map_err(|e| io::Error::other(format!("{}: {} at {}", log.display(), e.what, e.at)))
 }
 
+/// The release that wrote the database and the codec line its pages are read with.
+fn version_of(lh: &LogHeader) -> io::Result<(SourceVersion, VersionLine)> {
+    SourceVersion::identify(lh.db_compatibility, &lh.db_release)
+        .and_then(|v| Some((v, v.line()?)))
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "no reader for this database: db_compatibility {} db_release {:?} (`cubrid-fastmig plan` names the \
+                 ticket that opens it)",
+                lh.db_compatibility, lh.db_release
+            ))
+        })
+}
+
 /// The vacuum horizon of the database with this first volume and active log.
 pub fn vacuum_horizon(
     first_volume: &Path,
@@ -64,7 +79,13 @@ pub fn vacuum_horizon_with_log(
     locate: Locate,
     lh: &LogHeader,
 ) -> io::Result<VacuumHorizon> {
-    let vols = VolumeSet::open(first_volume, locate, Access::ReadOnly)?;
+    let (version, _) = version_of(lh)?;
+    let vols = VolumeSet::open(
+        first_volume,
+        locate,
+        Access::ReadOnly,
+        version.header_layout(),
+    )?;
     let (_, boot) = BootDbParm::read(&vols)?;
     VacuumHorizon::read(&vols, lh, boot.vacuum_data_vfid)
 }
@@ -88,15 +109,13 @@ impl Database {
         role: Role,
         lob_base: Option<PathBuf>,
     ) -> io::Result<Database> {
-        let version = SourceVersion::identify(lh.db_compatibility, &lh.db_release);
-        let line = version.and_then(SourceVersion::line).ok_or_else(|| {
-            io::Error::other(format!(
-                "no reader for this database: db_compatibility {} db_release {:?} (`cubrid-fastmig plan` names the \
-                 ticket that opens it)",
-                lh.db_compatibility, lh.db_release
-            ))
-        })?;
-        let vols = VolumeSet::open(first_volume, locate, Access::ReadOnly)?;
+        let (version, line) = version_of(lh)?;
+        let vols = VolumeSet::open(
+            first_volume,
+            locate,
+            Access::ReadOnly,
+            version.header_layout(),
+        )?;
         let (_, boot) = BootDbParm::read(&vols)?;
         let classes = read_classes(&vols, line)?;
         let by_oid = classes
@@ -106,6 +125,7 @@ impl Database {
             .collect();
         Ok(Database {
             vols,
+            version,
             line,
             role,
             boot,

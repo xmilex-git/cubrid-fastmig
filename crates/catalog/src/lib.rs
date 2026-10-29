@@ -23,6 +23,7 @@ pub mod owner_qualified_names;
 pub mod page_treatment;
 pub mod record_map;
 pub mod row_encode;
+pub mod rows_before_11_4;
 pub mod same_slot_rows;
 pub mod same_version_catalog;
 pub mod serial_name;

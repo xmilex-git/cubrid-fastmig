@@ -237,9 +237,8 @@ fn check_btid(db: &Database, files: &Files, b: Btid, class: Oid) -> Result<(), S
     let root = db.vols.read_page(b.vpid()).map_err(|e| e.to_string())?;
     let rec = SlottedPage::new(page::db_area(&root))
         .and_then(|s| s.record(0).map(|r| r.1.to_vec()))
-        .filter(|r| r.len() > RootHeader::FIXED_SIZE)
         .ok_or("no root header")?;
-    let rh = RootHeader::read(&rec);
+    let rh = RootHeader::read_layout(&rec, db.version.header_layout()).map_err(|e| e.what)?;
     let desc_class = match ft.header.descriptor() {
         FileDescriptor::ClassAttr { class_oid, .. } => class_oid,
         other => return Err(format!("descriptor {other:?}")),

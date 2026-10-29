@@ -38,7 +38,7 @@ use crate::row_encode::encode_row;
 use crate::same_slot_rows::{SameSlotInputs, same_slot_rows, template_rows};
 use crate::source_catalog::SourceCatalog;
 use crate::static_rows::static_rows;
-use crate::system_classes::{SAME_SLOT, SystemClassRole};
+use crate::system_classes::{SystemClassRole, same_slot};
 use crate::target_classes::{Placement, TargetClass, target_classes};
 use crate::template::CatalogTemplate;
 
@@ -220,6 +220,7 @@ fn generate(
         let t = target_classes(
             &source.classes,
             &source.plans,
+            source.version,
             template,
             &mut Placement {
                 new_slot: &mut new_slot,
@@ -498,7 +499,7 @@ pub fn plan_catalog(
             .map_err(|e| invalid(format!("{t} {:?}: {e}", r.oid)))
     };
     let mut writers: HashMap<Vec<u8>, HeapWriter> = HashMap::new();
-    for (src_name, dev) in SAME_SLOT {
+    for &(src_name, dev) in same_slot(source.version) {
         let sc = source
             .classes
             .iter()

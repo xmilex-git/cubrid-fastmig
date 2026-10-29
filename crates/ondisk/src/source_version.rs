@@ -31,12 +31,14 @@ pub enum SourceVersion {
     Develop,
 }
 
-/// The volume and log header layout a source version wrote.
+/// The volume, log, B-tree and MIDXKEY header layout a source version wrote (all changed together at 11.4, R8 § 2.3,
+/// § 2.13, § 2.14; MIDXKEY offset table CBRD-24988 b89ccabe5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeaderLayout {
-    /// 10.2..11.3: volume header 128 B and log header 376 B, no `vol_creation`.
+    /// 10.2..11.3: volume header 128 B and log header 376 B, no `vol_creation`; B-tree node header 28 B, root header
+    /// fixed part 80 B with 32-bit counts; MIDXKEY key images without an offset table.
     Before11_4,
-    /// 11.4 and develop: volume header 136 B and log header 384 B.
+    /// 11.4 and develop: volume header 136 B, log header 384 B, B-tree node header 32 B, root header 88 B.
     Since11_4,
 }
 
@@ -108,16 +110,17 @@ impl SourceVersion {
         }
     }
 
-    /// The codec line the source's pages are read with; `None` until that version is opened (11.3 and 11.2 by
-    /// workspace#529, 10.2 by workspace#520; 11.0 is not in scope, workspace#514).
+    /// The codec line the source's pages are read with; `None` until that version is opened (10.2 by
+    /// workspace#520; 11.0 is not in scope, workspace#514). 11.2 and 11.3 read with the 11.4 codecs: values, records,
+    /// class objects, heap headers, file headers and partition streams are byte-identical to 11.4 (R8 § 2.6-2.9,
+    /// § 2.12); what differs is decided on the version itself (headers, system tables; workspace#529).
     pub fn line(self) -> Option<VersionLine> {
         match self {
-            SourceVersion::V11_4 => Some(VersionLine::V11_4),
+            SourceVersion::V11_2 | SourceVersion::V11_3 | SourceVersion::V11_4 => {
+                Some(VersionLine::V11_4)
+            }
             SourceVersion::Develop => Some(VersionLine::Develop),
-            SourceVersion::V10_2
-            | SourceVersion::V11_0
-            | SourceVersion::V11_2
-            | SourceVersion::V11_3 => None,
+            SourceVersion::V10_2 | SourceVersion::V11_0 => None,
         }
     }
 

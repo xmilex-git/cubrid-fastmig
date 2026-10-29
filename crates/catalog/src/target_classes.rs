@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use fastmig_ondisk::class_object::{ClassObject, ClassType, decode};
 use fastmig_ondisk::value::{DecodeError, DecodeResult};
-use fastmig_ondisk::{Btid, Hfid, Oid, VersionLine};
+use fastmig_ondisk::{Btid, Hfid, Oid, SourceVersion, VersionLine};
 
 use crate::class_rewrite::{RewriteInputs, rewrite_user_class};
 use crate::classify::{ClassKind, ClassPlan};
@@ -59,6 +59,7 @@ fn err(what: String) -> DecodeError {
 pub fn target_classes(
     source: &[SourceClass],
     plans: &[ClassPlan],
+    version: SourceVersion,
     template: &CatalogTemplate,
     p: &mut Placement,
 ) -> DecodeResult<Vec<TargetClass>> {
@@ -99,7 +100,7 @@ pub fn target_classes(
         let name = String::from_utf8_lossy(&t.name).into_owned();
         let target = match in_place.get(&t.name) {
             Some((c, r)) => (c.oid, Origin::TemplateInPlace(*r)),
-            None => match target_role(&name, t.class_type == ClassType::Vclass) {
+            None => match target_role(&name, t.class_type == ClassType::Vclass, version) {
                 Some(r @ (SystemClassRole::New | SystemClassRole::View)) => {
                     ((p.new_slot)(&t.name), Origin::TemplateNewSlot(r))
                 }

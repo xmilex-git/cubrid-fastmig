@@ -43,16 +43,13 @@ impl VersionPair {
 /// The codec line of a source version, or why the tool does not migrate that version yet. Each refusal names the
 /// ticket that opens the version (map supervisor 2026-10-30, workspace#522); the order is G7 workspace#514.
 pub fn source_line(v: SourceVersion) -> Result<VersionLine, String> {
-    v.line().ok_or_else(|| {
-        let opened_by = match v {
-            SourceVersion::V11_3 | SourceVersion::V11_2 => "workspace#529",
-            SourceVersion::V10_2 => "workspace#520",
-            SourceVersion::V11_0 => {
-                return format!("source {}: not in scope (workspace#514)", v.name());
-            }
-            SourceVersion::V11_4 | SourceVersion::Develop => unreachable!("a line of its own"),
-        };
-        format!("source {} not supported yet ({opened_by})", v.name())
+    v.line().ok_or_else(|| match v {
+        SourceVersion::V10_2 => format!("source {} not supported yet (workspace#520)", v.name()),
+        SourceVersion::V11_0 => format!("source {}: not in scope (workspace#514)", v.name()),
+        SourceVersion::V11_2
+        | SourceVersion::V11_3
+        | SourceVersion::V11_4
+        | SourceVersion::Develop => unreachable!("a line of its own"),
     })
 }
 

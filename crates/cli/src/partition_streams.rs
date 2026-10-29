@@ -17,6 +17,7 @@ use fastmig_catalog::source_classes::read_classes;
 use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::partition_stream::container::stream_of_pvalues;
 use fastmig_ondisk::partition_stream::{parse, serialize_with_mask, transcode_partition_stream};
+use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
 
@@ -40,7 +41,12 @@ const TRANSCODE: usize = 2;
 
 /// Class name → the master partition's stream.
 fn streams(first: &str, line: VersionLine) -> Result<BTreeMap<String, Vec<u8>>, CliError> {
-    let vs = VolumeSet::open(Path::new(first), Locate::FirstVolumeDir, Access::ReadOnly)?;
+    let vs = VolumeSet::open(
+        Path::new(first),
+        Locate::FirstVolumeDir,
+        Access::ReadOnly,
+        HeaderLayout::Since11_4,
+    )?;
     let mut out = BTreeMap::new();
     for c in read_classes(&vs, line)? {
         for p in c.class.partitions.iter().filter(|p| p.pname.is_none()) {

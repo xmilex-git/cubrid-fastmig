@@ -67,7 +67,7 @@ pub fn json(p: &Plan, resources: &str) -> String {
         .collect();
     format!(
         "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
-        line_name(p.version_pair.source),
+        p.source_version.name(),
         line_name(p.version_pair.target),
         strings(p.refusals.iter().map(String::as_str)),
         strings(p.warnings.iter().map(String::as_str)),
@@ -96,7 +96,7 @@ pub fn json(p: &Plan, resources: &str) -> String {
 pub fn table(p: &Plan) -> String {
     let mut s = format!(
         "version pair: {} -> {}\n",
-        line_name(p.version_pair.source),
+        p.source_version.name(),
         line_name(p.version_pair.target)
     );
     s.push_str("volumes:\n");

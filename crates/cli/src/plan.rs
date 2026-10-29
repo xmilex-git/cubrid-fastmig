@@ -16,7 +16,7 @@ use fastmig_ondisk::databases_txt::{self, DatabaseEntry};
 use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_ondisk::{SourceVersion, VersionLine};
-use fastmig_plan::version_pair::{parse_line, source_line};
+use fastmig_plan::version_pair::parse_line;
 use fastmig_plan::{Plan, PlanInputs};
 
 use crate::args::{CliError, Parsed, parse};
@@ -113,6 +113,8 @@ pub struct OpenSource {
     /// Held only for its read lock.
     _locked_log: fs::File,
     pub lgat_path: PathBuf,
+    /// The release that wrote the source (from the log header, workspace#522).
+    pub version: SourceVersion,
     pub log: LogHeader,
     pub vols: VolumeSet,
 }
@@ -123,13 +125,13 @@ impl OpenSource {
         let lgat_path = entry.log_path.join(format!("{}_lgat", o.db));
         let lgat = open_locked_log(&lgat_path)?;
         let (version, log) = read_log_header(&lgat, &lgat_path)?;
-        // refused before the volumes are opened: a version not yet opened has no volume reader (workspace#522)
-        source_line(version).map_err(io::Error::other)?;
-        let vols = VolumeSet::open_entry(&entry, o.locate, Access::ReadOnly)?;
+        let vols =
+            VolumeSet::open_entry(&entry, o.locate, Access::ReadOnly, version.header_layout())?;
         Ok(OpenSource {
             entry,
             _locked_log: lgat,
             lgat_path,
+            version,
             log,
             vols,
         })

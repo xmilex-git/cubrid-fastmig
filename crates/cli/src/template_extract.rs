@@ -9,6 +9,7 @@ use std::path::Path;
 
 use fastmig_catalog::template_extract::extract;
 use fastmig_ondisk::VersionLine;
+use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 
 use crate::args::{self, CliError};
@@ -25,7 +26,12 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             .ok_or_else(|| CliError::Usage(format!("template-extract needs {f}")))
     };
     let out = need("--out")?;
-    let vs = VolumeSet::open(Path::new(first), Locate::FirstVolumeDir, Access::ReadOnly)?;
+    let vs = VolumeSet::open(
+        Path::new(first),
+        Locate::FirstVolumeDir,
+        Access::ReadOnly,
+        HeaderLayout::Since11_4,
+    )?;
     // templates exist for the develop target only (workspace#482)
     let meta = vec![
         ("line".into(), "develop".into()),

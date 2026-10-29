@@ -137,6 +137,7 @@ fn targets_with(
     target_classes(
         &source.classes,
         &source.plans,
+        source.version,
         template,
         &mut Placement {
             new_slot: &mut new_slot,

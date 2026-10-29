@@ -13,7 +13,7 @@ use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::class_object::ClassType;
 use fastmig_ondisk::file_header::{FileDescriptor, FileHeader, FileType};
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Oid, VersionLine, file_tracker};
+use fastmig_ondisk::{Oid, SourceVersion, VersionLine, file_tracker};
 
 use fastmig_ondisk::class_object::{class_properties, encode_develop, format_btid};
 use fastmig_ondisk::value::Value;
@@ -290,7 +290,12 @@ pub fn dry_run(
     }
     for t in &tclasses {
         let name = String::from_utf8_lossy(&t.class.name).into_owned();
-        let role = target_role(&name, t.class.class_type == ClassType::Vclass);
+        // the dry run reads an 11.4 source (its line argument)
+        let role = target_role(
+            &name,
+            t.class.class_type == ClassType::Vclass,
+            SourceVersion::V11_4,
+        );
         if matches!(role, Some(SystemClassRole::New | SystemClassRole::View)) {
             targets += 1;
             target_atts += t.class.attributes.len();

@@ -5,9 +5,12 @@
 
 use crate::ids::Vpid;
 use crate::le_field::{get_f32, get_i16, get_i32, put_f32, put_i16, put_i32};
+use crate::source_version::HeaderLayout;
+use crate::value::{DecodeError, DecodeResult};
 
 /// Engine `BTREE_NODE_HEADER` (src/storage/btree_load.h), host order. Size: 32 B in 11.4 and develop
-/// (release/11.4 46212adcd, develop 5b1867174); checked on T1 pages (header record length 32 on every leaf).
+/// (release/11.4 46212adcd, develop 5b1867174); checked on T1 pages (header record length 32 on every leaf). 28 B in
+/// 10.2..11.3, which have no `common_prefix` ([`NodeHeader::read_layout`], workspace#529).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NodeHeader {
     /// @0 `split_info.pivot` f32; 0 when built.
@@ -39,6 +42,32 @@ impl NodeHeader {
             max_key_len: 0,
             common_prefix: 0,
         }
+    }
+
+    /// Size in a layout: 28 B before 11.4 (no `common_prefix`, `ptype /o` of release 11.2.9 and 11.3.6), 32 B since.
+    pub fn size(layout: HeaderLayout) -> usize {
+        match layout {
+            HeaderLayout::Before11_4 => 28,
+            HeaderLayout::Since11_4 => Self::SIZE,
+        }
+    }
+
+    /// Decodes a header record from a volume written in `layout`; an error when the record is too short.
+    pub fn read_layout(b: &[u8], layout: HeaderLayout) -> DecodeResult<Self> {
+        if b.len() < Self::size(layout) {
+            return Err(DecodeError {
+                at: b.len(),
+                what: format!("B-tree node header of {} B", b.len()),
+            });
+        }
+        Ok(match layout {
+            HeaderLayout::Since11_4 => Self::read(b),
+            HeaderLayout::Before11_4 => {
+                let mut wide = [0u8; Self::SIZE];
+                wide[..28].copy_from_slice(&b[..28]);
+                Self::read(&wide)
+            }
+        })
     }
 
     pub fn read(b: &[u8]) -> Self {

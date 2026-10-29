@@ -16,6 +16,7 @@ pub mod register_db;
 pub mod source_lock;
 pub mod volinfo;
 pub mod volume_copy;
+pub mod volume_header_transform;
 pub mod volume_paths;
 pub mod worker_pool;
 

@@ -28,7 +28,8 @@ use fastmig_copy::volume_copy::IO_BUF_BYTES;
 use fastmig_copy::volume_copy::preallocate_targets;
 use fastmig_copy::{
     AsIs, CopyMethod, IncompleteMarker, VolumeJob, VolumeOutcome, copy_volumes, durable,
-    lob_manifest, new_log, new_log_start, open_source, register_db, volinfo, volume_paths,
+    lob_manifest, new_log, new_log_start, open_source, register_db, volinfo,
+    volume_header_transform, volume_paths,
 };
 use fastmig_ondisk::Oid;
 use fastmig_ondisk::boot_parm::BootDbParm;
@@ -36,6 +37,7 @@ use fastmig_ondisk::databases_txt::DatabaseEntry;
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::sector_reserve::{VolumeGrowth, sectors_of_bytes};
+use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::volume_addition::VolumePlace;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_plan::Plan;
@@ -363,13 +365,23 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     rep.progress.set_total(DURABLE_SYNC, copied);
     rep.lap("volumes");
     let mut targets: Vec<PathBuf> = jobs.iter().map(|j| j.target.clone()).collect();
+    if src.version.header_layout() == HeaderLayout::Before11_4 {
+        // the 128 B volume header grows to 136 B before anything opens the target (workspace#529)
+        let vol_creation = src.log.db_creation;
+        volume_header_transform::transform(&targets, src.vols.io_pagesize(), vol_creation)?;
+    }
     volume_paths::rewrite(&targets, src.vols.io_pagesize())?;
     rep.lap("volume_paths");
 
     // Heap patch and re-encoding (workspace#503, #504) fill this set with the classes whose heap header statistics
     // they measured (`HeapReport.measured`); verify compares those.
     let mut measured: BTreeSet<Oid> = BTreeSet::new();
-    let vols = VolumeSet::open(&targets[0], Locate::Recorded, Access::ReadWrite)?;
+    let vols = VolumeSet::open(
+        &targets[0],
+        Locate::Recorded,
+        Access::ReadWrite,
+        HeaderLayout::Since11_4,
+    )?;
     let trk = BootDbParm::read(&vols)?.1.trk_vfid;
     // a target out of space grows like the engine would: volumes added next to volume 0 (ADR 0013, workspace#508)
     let growth = VolumeGrowth {
@@ -388,6 +400,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         if pair.regenerates_catalog() {
             let prepared = catalog_regeneration::prepare(
                 &space,
+                src.version,
                 &src.log,
                 src_lob_base.as_deref(),
                 o.worker_limit,
@@ -663,7 +676,7 @@ fn report_json(
     };
     format!(
         "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"added_volumes\": {added_volumes},\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"catalog\": {catalog},\n  \"heap_peak_bytes\": {},\n  \"temp_disk\": {temp_disk},\n  \"progress\": {}\n}}",
-        line_name(plan.version_pair.source),
+        plan.source_version.name(),
         line_name(plan.version_pair.target),
         o.worker_limit,
         o.limits.memory_limit_bytes,

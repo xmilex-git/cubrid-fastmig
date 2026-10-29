@@ -10,16 +10,20 @@
 use std::collections::HashMap;
 use std::io;
 
-use fastmig_ondisk::VersionLine;
+use fastmig_ondisk::value::DecodeResult;
 use fastmig_ondisk::volume_set::VolumeSet;
+use fastmig_ondisk::{SourceVersion, VersionLine};
 
 use crate::class_rows::{Row, read_rows};
 use crate::classify::{ClassPlan, classify};
+use crate::rows_before_11_4::to_11_4_shape;
 use crate::source_classes::{SourceClass, read_classes};
 use crate::static_rows::FROM_SOURCE;
-use crate::system_classes::SAME_SLOT;
+use crate::system_classes::same_slot;
 
 pub struct SourceCatalog {
+    /// The release that wrote the source (which same-slot tables it has, workspace#529).
+    pub version: SourceVersion,
     pub line: VersionLine,
     pub classes: Vec<SourceClass>,
     /// One per class, same order.
@@ -40,7 +44,10 @@ fn missing(name: &str) -> io::Error {
 }
 
 impl SourceCatalog {
-    pub fn read(vs: &VolumeSet, line: VersionLine) -> io::Result<Self> {
+    pub fn read(vs: &VolumeSet, version: SourceVersion) -> io::Result<Self> {
+        let line = version.line().ok_or_else(|| {
+            io::Error::other(format!("source {} has no codec line", version.name()))
+        })?;
         let classes = read_classes(vs, line)?;
         let plans = classify(&classes);
         let rows = |name: &str| -> io::Result<Vec<Row>> {
@@ -50,15 +57,22 @@ impl SourceCatalog {
                 .ok_or_else(|| missing(name))?;
             read_rows(vs, line, c)
         };
-        let same_slot = SAME_SLOT
-            .iter()
-            .map(|(src, dev)| Ok((*dev, rows(src)?)))
+        let same_slot = same_slot(version)
+            .map(|(src, dev)| {
+                let shaped = rows(src)?
+                    .into_iter()
+                    .map(|r| to_11_4_shape(version, src, r))
+                    .collect::<DecodeResult<_>>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.what))?;
+                Ok((*dev, shaped))
+            })
             .collect::<io::Result<_>>()?;
         let static_source = FROM_SOURCE
             .iter()
             .map(|t| Ok((*t, rows(t)?)))
             .collect::<io::Result<_>>()?;
         Ok(SourceCatalog {
+            version,
             line,
             plans,
             same_slot,

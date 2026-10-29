@@ -30,7 +30,7 @@ use fastmig_ondisk::heap_rewrite::VacuumHorizon;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::value::{Collation, DbType, Value};
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Hfid, Oid, VersionLine, file_tracker};
+use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, file_tracker};
 
 use crate::copy_method::{self, CopyMethod};
 use crate::free_space;
@@ -100,6 +100,8 @@ pub struct DirSize {
 }
 
 pub struct Plan {
+    /// The release that wrote the source; `version_pair.source` is the codec line it is read with (workspace#529).
+    pub source_version: SourceVersion,
     pub version_pair: VersionPair,
     pub volumes: Vec<VolumePlan>,
     pub classes: Vec<ClassTreatment>,
@@ -214,13 +216,12 @@ pub fn lob_base_dir(source: &DatabaseEntry) -> Result<Option<PathBuf>, String> {
 
 pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     let version =
-        fastmig_ondisk::SourceVersion::identify(i.log.db_compatibility, &i.log.db_release)
-            .ok_or_else(|| {
-                invalid(format!(
-                    "unknown source: db_compatibility {} db_release {:?}",
-                    i.log.db_compatibility, i.log.db_release
-                ))
-            })?;
+        SourceVersion::identify(i.log.db_compatibility, &i.log.db_release).ok_or_else(|| {
+            invalid(format!(
+                "unknown source: db_compatibility {} db_release {:?}",
+                i.log.db_compatibility, i.log.db_release
+            ))
+        })?;
     // names that stop being valid once owner-qualified (workspace#518): checked before the version gate, so a source
     // whose version is not opened yet still shows every refusal in one plan
     let mut refusals = owner_qualified_names::refusals(i.vols, version).unwrap_or_else(|e| {
@@ -296,6 +297,16 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
 
     // classes: roles and re-encoding only differ across lines (workspace#482)
     let classes = read_classes(i.vols, line)?;
+    if matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3)
+        && !rows_of(i.vols, line, &classes, b"_db_stored_procedure")?.is_empty()
+    {
+        // the pre-11.4 stored procedure rows wait for their develop mapping (R12)
+        refusals.push(format!(
+            "source {} has stored procedures: their catalog rows are not transformed yet (workspace#529, \
+             R12 workspace#521)",
+            version.name()
+        ));
+    }
     let class_plans = regenerates.then(|| classify(&classes));
     let mut treatments = Vec::new();
     for (n, c) in classes.iter().enumerate() {
@@ -599,6 +610,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
 
     refusals.dedup();
     Ok(Plan {
+        source_version: version,
         version_pair: pair,
         volumes,
         classes: treatments,

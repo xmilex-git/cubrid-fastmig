@@ -19,6 +19,7 @@ use crate::ids::Vpid;
 use crate::le_field::{put_i16, put_i32};
 use crate::lsa::Lsa;
 use crate::page::{self, IO_TRAILER_SIZE};
+use crate::source_version::HeaderLayout;
 use crate::volume_header::VolumeHeader;
 
 /// How to find volume n+1 from volume n's header.
@@ -53,6 +54,8 @@ pub struct Volume {
 pub struct VolumeSet {
     io_pagesize: usize,
     access: Access,
+    /// The header layout of every volume in the set (a 10.2..11.3 source is opened read-only in its own).
+    layout: HeaderLayout,
     volumes: RwLock<Vec<Arc<Volume>>>,
 }
 
@@ -62,19 +65,30 @@ fn invalid(msg: String) -> io::Error {
 
 impl VolumeSet {
     /// Opens the database registered as `entry` (first volume `<vol_path>/<name>`).
-    pub fn open_entry(entry: &DatabaseEntry, locate: Locate, access: Access) -> io::Result<Self> {
-        Self::open(&entry.first_volume(), locate, access)
+    pub fn open_entry(
+        entry: &DatabaseEntry,
+        locate: Locate,
+        access: Access,
+        layout: HeaderLayout,
+    ) -> io::Result<Self> {
+        Self::open(&entry.first_volume(), locate, access, layout)
     }
 
     /// Opens volume 0 at `first` and follows the header chain. Checks every volume's magic, its volid against its
-    /// place in the chain, and its page size against volume 0's.
-    pub fn open(first: &Path, locate: Locate, access: Access) -> io::Result<Self> {
+    /// place in the chain, and its page size against volume 0's. Headers are read in `layout`: the source version's
+    /// ([`crate::SourceVersion::header_layout`]); a target is always [`HeaderLayout::Since11_4`].
+    pub fn open(
+        first: &Path,
+        locate: Locate,
+        access: Access,
+        layout: HeaderLayout,
+    ) -> io::Result<Self> {
         let dir = first.parent().unwrap_or(Path::new(".")).to_path_buf();
         let mut volumes: Vec<Arc<Volume>> = Vec::new();
         let mut path = first.to_path_buf();
         let mut io_pagesize = 0usize;
         loop {
-            let (file, header) = open_volume(&path, access)?;
+            let (file, header) = open_volume(&path, access, layout)?;
             let size = header.iopagesize as usize;
             if volumes.is_empty() {
                 io_pagesize = size;
@@ -117,6 +131,7 @@ impl VolumeSet {
         Ok(VolumeSet {
             io_pagesize,
             access,
+            layout,
             volumes: RwLock::new(volumes),
         })
     }
@@ -213,7 +228,7 @@ impl VolumeSet {
         let mut p0 = vec![0u8; self.io_pagesize];
         let v = self.volume(volid)?;
         v.file.read_exact_at(&mut p0, 0)?;
-        let header = VolumeHeader::read(&p0)?;
+        let header = VolumeHeader::read_layout(&p0, self.layout)?;
         let fresh = Arc::new(Volume {
             volid,
             path: v.path.clone(),
@@ -226,7 +241,7 @@ impl VolumeSet {
 
     /// Opens the volume just formatted at `path` and appends it; its volid must be the next one.
     pub(crate) fn attach(&self, path: &Path) -> io::Result<i16> {
-        let (file, header) = open_volume(path, self.access)?;
+        let (file, header) = open_volume(path, self.access, self.layout)?;
         let mut vols = self.volumes.write().unwrap();
         if header.volid as usize != vols.len() || header.iopagesize as usize != self.io_pagesize {
             return Err(invalid(format!(
@@ -247,7 +262,11 @@ impl VolumeSet {
 }
 
 /// Opens one volume file and reads its header at the page size the header names.
-fn open_volume(path: &Path, access: Access) -> io::Result<(File, VolumeHeader)> {
+fn open_volume(
+    path: &Path,
+    access: Access,
+    layout: HeaderLayout,
+) -> io::Result<(File, VolumeHeader)> {
     let file = OpenOptions::new()
         .read(true)
         .write(access == Access::ReadWrite)
@@ -256,13 +275,13 @@ fn open_volume(path: &Path, access: Access) -> io::Result<(File, VolumeHeader)> 
     // the volume header fits in the smallest page size (4 KiB); read that much, then the real size
     let mut head = vec![0u8; 4096];
     file.read_exact_at(&mut head, 0)?;
-    let size = VolumeHeader::read(&head)?.iopagesize as usize;
+    let size = VolumeHeader::read_layout(&head, layout)?.iopagesize as usize;
     if !(4096..=65536).contains(&size) || !size.is_power_of_two() {
         return Err(invalid(format!("{}: iopagesize {size}", path.display())));
     }
     let mut p0 = vec![0u8; size];
     file.read_exact_at(&mut p0, 0)?;
-    Ok((file, VolumeHeader::read(&p0)?))
+    Ok((file, VolumeHeader::read_layout(&p0, layout)?))
 }
 
 /// Engine `fileio_initialize_res`: the bytes of a volume page formatted but never written — zero, NULL LSA in the

@@ -151,6 +151,38 @@ impl VolumeHeader {
     }
 }
 
+/// Transforms page 0 of a volume from the 10.2..11.3 layout (128 B) to the 136 B one in place: every field from
+/// `chkpt_lsa` on and `var_fields` move 8 B up, and `vol_creation` fills the gap. The var offsets are relative to
+/// `var_fields` and keep their values. Refuses a page whose last 8 DB bytes are not zero (the strings would not fit)
+/// and checks that the result decodes to the same header. The page LSA is not touched (R8 § 2.3).
+pub fn transform_from_before_11_4(page: &mut [u8], vol_creation: i64) -> io::Result<()> {
+    let before = VolumeHeader::read_layout(page, HeaderLayout::Before11_4)?;
+    let db_end = page.len() - IO_TRAILER_SIZE;
+    let gap = IO_RESERVED_SIZE + off::VOL_CREATION;
+    if page[db_end - 8..db_end].iter().any(|&b| b != 0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "volume header var_fields reach the end of the page",
+        ));
+    }
+    page.copy_within(gap..db_end - 8, gap + 8);
+    put_i64(
+        &mut page[IO_RESERVED_SIZE..],
+        off::VOL_CREATION,
+        vol_creation,
+    );
+    let after = VolumeHeader::read(page)?;
+    if after
+        != (VolumeHeader {
+            vol_creation: Some(vol_creation),
+            ..before
+        })
+    {
+        return Err(io::Error::other("volume header transform changed a field"));
+    }
+    Ok(())
+}
+
 /// What a new permanent data volume's header holds (engine `disk_format`, workspace#500).
 #[derive(Clone, Debug)]
 pub struct NewVolume<'a> {

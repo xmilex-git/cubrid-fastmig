@@ -73,10 +73,11 @@ impl<'a> IndexTree<'a> {
             .map_err(|e| Box::new(d("root-unreadable").actual(e)))?;
         let rec = slotted(&page)
             .and_then(|s| s.record(0).map(|r| r.1.to_vec()))
-            .filter(|r| r.len() > RootHeader::FIXED_SIZE)
             .ok_or_else(|| Box::new(d("root-header").expected("a B-tree root header record")))?;
-        let root = RootHeader::read(&rec);
+        let root = RootHeader::read_layout(&rec, db.version.header_layout())
+            .map_err(|e| Box::new(d("root-header").actual(e.what)))?;
         let kd = KeyDomain::from_packed(db.line, &root.packed_key_domain)
+            .map(|k| k.in_layout(db.version.header_layout()))
             .map_err(|e| Box::new(d("key-domain").actual(e)))?;
         let mut t = IndexTree {
             db,
@@ -171,7 +172,10 @@ impl<'a> IndexTree<'a> {
                     self.defects.push(self.d("node-no-header", *v));
                     continue;
                 };
-                let h = NodeHeader::read(hrec);
+                let Ok(h) = NodeHeader::read_layout(hrec, self.db.version.header_layout()) else {
+                    self.defects.push(self.d("node-no-header", *v));
+                    continue;
+                };
                 if h.node_level != lvl {
                     let d = self.d("node-level", *v).expected(lvl).actual(h.node_level);
                     self.defects.push(d);
@@ -365,8 +369,11 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                 self.push(self.t.d("leaf-unreadable", v));
                 continue;
             };
-            let Some(h) = slotted(&p).and_then(|s| s.record(0).map(|r| NodeHeader::read(r.1)))
-            else {
+            let Some(h) = slotted(&p).and_then(|s| {
+                s.record(0).and_then(|r| {
+                    NodeHeader::read_layout(r.1, self.t.db.version.header_layout()).ok()
+                })
+            }) else {
                 self.push(self.t.d("leaf-no-header", v));
                 continue;
             };

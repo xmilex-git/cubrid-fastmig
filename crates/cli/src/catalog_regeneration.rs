@@ -32,7 +32,7 @@ use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::{HeapReport, VacuumHorizon};
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::value::Value;
-use fastmig_ondisk::{Btid, Oid, VersionLine};
+use fastmig_ondisk::{Btid, Oid, SourceVersion, VersionLine};
 use fastmig_progress::Meter;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -111,6 +111,7 @@ impl Prepared {
 /// Frees the old catalog files, treats the user heaps (page-treatment phase), places the catalog and writes its rows.
 pub fn prepare(
     space: &SpaceManager,
+    src_version: SourceVersion,
     src_log: &LogHeader,
     src_lob_base: Option<&Path>,
     worker_limit: usize,
@@ -119,7 +120,7 @@ pub fn prepare(
     let vols = space.volumes();
     let (_, boot) = BootDbParm::read(vols)?;
     // everything the regeneration reads from the source catalog, before the first write
-    let source = SourceCatalog::read(vols, VersionLine::V11_4)?;
+    let source = SourceCatalog::read(vols, src_version)?;
     let template = builtin(VersionLine::Develop, source.charset).ok_or_else(|| {
         io::Error::other(format!(
             "no catalog template for charset {}",

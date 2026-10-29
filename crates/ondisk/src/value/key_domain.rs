@@ -6,7 +6,8 @@
 //! [`crate::btree::key_image::KeyImage`] answers.
 //! MIDXKEY image: a null bitmap of `ceil(n / 8)` bytes (bit `i % 8` of byte `i / 8` set = column `i` present), an
 //! offset table of `n + 1` bytes (offset of column `i` from the image start, 255 = not recorded; entry `n` = image
-//! size), then the present columns' images back to back. A prefix-compressed leaf key has its first `k` columns
+//! size), then the present columns' images back to back. Before 11.4 there is no offset table (CBRD-24988).
+//! A prefix-compressed leaf key has its first `k` columns
 //! marked NULL with their bytes removed. Order: columns in turn, NULL before non-NULL; the first differing column
 //! decides, reversed when that column is DESC.
 //! Source: engine `src/base/object_representation.h` `or_multi_*` (:2653-2830, same in release/11.4 @46212adcd
@@ -18,6 +19,7 @@ use std::cmp::Ordering;
 
 use crate::VersionLine;
 use crate::btree::key_image::KeyImage;
+use crate::source_version::HeaderLayout;
 use crate::value::db_type::DbType;
 use crate::value::db_value::Value;
 use crate::value::domain::Domain;
@@ -42,6 +44,9 @@ pub struct KeyDomain {
     pub version: VersionLine,
     /// True for a MIDXKEY (multi-column) key, false for a single-column key image.
     pub midxkey: bool,
+    /// False for a MIDXKEY image written before 11.4: bound bits then the columns, no offset table (CBRD-24988
+    /// b89ccabe5 #4684 added the table in 11.4; workspace#529). Set by [`KeyDomain::in_layout`].
+    pub offset_table: bool,
     pub columns: Vec<KeyColumn>,
 }
 
@@ -84,6 +89,7 @@ impl KeyDomain {
         Ok(KeyDomain {
             version,
             midxkey,
+            offset_table: true,
             columns,
         })
     }
@@ -101,9 +107,17 @@ impl KeyDomain {
         self.columns.len()
     }
 
+    /// The key domain of images written in `layout` (a source B-tree; a built one is always [`HeaderLayout::Since11_4`]).
+    pub fn in_layout(self, layout: HeaderLayout) -> KeyDomain {
+        KeyDomain {
+            offset_table: layout == HeaderLayout::Since11_4,
+            ..self
+        }
+    }
+
     fn header_size(&self) -> usize {
         let n = self.columns.len();
-        n.div_ceil(8) + n + 1
+        n.div_ceil(8) + if self.offset_table { n + 1 } else { 0 }
     }
 
     /// The column images of `img` (`None` = NULL column) and the image's total length.
@@ -149,13 +163,17 @@ impl KeyDomain {
         let table = n.div_ceil(8);
         for (i, c) in cols.iter().enumerate() {
             let pos = out.len();
-            out[table + i] = pos.min(MAX_OFFSET) as u8;
+            if self.offset_table {
+                out[table + i] = pos.min(MAX_OFFSET) as u8;
+            }
             if let Some(b) = c {
                 out[i / 8] |= 1 << (i % 8);
                 out.extend_from_slice(b);
             }
         }
-        out[table + n] = out.len().min(MAX_OFFSET) as u8;
+        if self.offset_table {
+            out[table + n] = out.len().min(MAX_OFFSET) as u8;
+        }
         out
     }
 
