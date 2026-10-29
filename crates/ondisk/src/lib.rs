@@ -2,6 +2,7 @@
 
 pub mod boot_parm;
 pub mod btree;
+pub mod class_object;
 pub mod crc32;
 pub mod databases_txt;
 pub mod ids;
