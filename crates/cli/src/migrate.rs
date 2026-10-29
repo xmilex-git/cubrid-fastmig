@@ -257,11 +257,11 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     // Heap patch and re-encoding (workspace#503, #504) fill this set with the classes whose heap header statistics
     // they measured (`HeapReport.measured`); verify compares those.
     let mut measured: BTreeSet<Oid> = BTreeSet::new();
-    let mut catalog = None;
-    if pair.regenerates_catalog() {
-        let vols = VolumeSet::open(&targets[0], Locate::Recorded, Access::ReadWrite)?;
-        let trk = BootDbParm::read(&vols)?.1.trk_vfid;
-        let space = SpaceManager::new(&vols, pair.target, trk);
+    let vols = VolumeSet::open(&targets[0], Locate::Recorded, Access::ReadWrite)?;
+    let trk = BootDbParm::read(&vols)?.1.trk_vfid;
+    let space = SpaceManager::new(&vols, pair.target, trk);
+    marker.create_dir_all(&o.limits.spill_dir)?;
+    let catalog = if pair.regenerates_catalog() {
         let prepared = catalog_regeneration::prepare(
             &space,
             &src.log,
@@ -270,19 +270,32 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         )?;
         measured.extend(prepared.measured());
         rep.lap("page_treatment");
-        marker.create_dir_all(&o.limits.spill_dir)?;
-        catalog = Some(catalog_regeneration::finish(
+        let c = catalog_regeneration::finish(
             &space,
             prepared,
             &o.limits,
             o.worker_limit,
             rep.progress.meter(INDEX_BUILD),
-        )?);
+        )?;
         rep.lap("index_build");
+        c
     } else {
+        // the same-version path: patch, deferred indexes out, every index rebuilt (workspace#501, #503, #504)
+        let (c, m) = catalog_regeneration::same_version(
+            &space,
+            &src.log,
+            &o.limits,
+            o.worker_limit,
+            rep.progress.meter(PAGE_TREATMENT),
+            rep.progress.meter(INDEX_BUILD),
+        )?;
+        measured.extend(m);
         rep.lap("page_treatment");
         rep.lap("index_build");
-    }
+        c
+    };
+    drop(space);
+    drop(vols);
     rep.lap("catalog_regeneration");
 
     let java = out_of_volume_asset::copy_dir_tree(
@@ -390,7 +403,7 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
         keys.is_some(),
         &lob,
         &summary,
-        &catalog.map_or("null".into(), |c| c.json()),
+        &catalog.json(),
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;
     if !passed {

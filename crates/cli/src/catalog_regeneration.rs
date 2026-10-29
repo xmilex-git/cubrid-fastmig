@@ -12,6 +12,9 @@ use fastmig_catalog::catalog_layout::{CatalogLayout, plan_catalog};
 use fastmig_catalog::catalog_write::{index_build_classes, write_bt_stats, write_catalog};
 use fastmig_catalog::free_old_files::free_old_files;
 use fastmig_catalog::page_treatment::treat_user_heaps;
+use fastmig_catalog::same_version_catalog::{
+    DevelopCatalog, free_catalog_file, patch_heaps, remove_deferred_rows, write_classes_and_catalog,
+};
 use fastmig_catalog::source_catalog::SourceCatalog;
 use fastmig_catalog::template::CatalogTemplate;
 use fastmig_catalog::template_store::builtin;
@@ -216,4 +219,85 @@ fn bt_stats(btid: Btid, s: &fastmig_index::bt_stats::BtStats) -> BtStats {
         keys: s.keys as i64,
         pkeys,
     }
+}
+
+/// The same-version (develop → develop) catalog writes: heaps patched (page-treatment phase), the deferred
+/// indexes' catalog rows removed, every index rebuilt (index-build phase), class objects and catalog file written
+/// with the new BTIDs, then the B-tree statistics. Returns the outcome and the classes whose heap statistics were
+/// measured.
+pub fn same_version(
+    space: &SpaceManager,
+    src_log: &LogHeader,
+    limits: &Limits,
+    worker_limit: usize,
+    treatment_meter: Meter,
+    index_meter: Meter,
+) -> io::Result<(CatalogOutcome, Vec<Oid>)> {
+    let vols = space.volumes();
+    let (_, boot) = BootDbParm::read(vols)?;
+    let cat = DevelopCatalog::read(vols)?;
+    let horizon = VacuumHorizon::read(vols, src_log, boot.vacuum_data_vfid)?;
+    // every old file goes before the first new allocation (workspace#482 10.2)
+    let freed_files = free_catalog_file(space)? + free_btree_files(space)?;
+    let reports = patch_heaps(space, &cat, &horizon, treatment_meter)?;
+    let deleted_rows = remove_deferred_rows(space, &cat)?;
+    let owners: Vec<IndexClass> = cat
+        .classes
+        .iter()
+        .filter(|c| !c.class.heap.is_null())
+        .map(|c| IndexClass {
+            oid: c.oid,
+            class: &c.class,
+            hfid: c.class.heap,
+        })
+        .collect();
+    let workers = WorkerLimit::new(worker_limit);
+    let memory = MemoryLimit::new(usize::try_from(limits.memory_limit_bytes).unwrap_or(usize::MAX));
+    let spill = SpillDir::create(&limits.spill_dir)?;
+    let rebuilt = rebuild_indexes(
+        space,
+        &owners,
+        &fastmig_index::Limits {
+            workers: &workers,
+            memory: &memory,
+            spill: &spill,
+        },
+        Some(index_meter),
+    )
+    .map_err(|e| io::Error::other(format!("index rebuild: {e}")))?;
+    // after the patch every heap's header holds its statistics: measured, or the source's kept as is
+    let heap_stats: HashMap<_, _> = reports.iter().map(|r| (r.hfid, r.stats)).collect();
+    let mut layout = write_classes_and_catalog(
+        space,
+        &cat,
+        &|b| rebuilt.by_old_btid.get(&b).copied(),
+        &heap_stats,
+    )?;
+    let stats: HashMap<Btid, BtStats> = rebuilt
+        .filled
+        .iter()
+        .map(|f| (f.btid, bt_stats(f.btid, &f.stats)))
+        .collect();
+    write_bt_stats(space, &mut layout, &|b| stats.get(&b).cloned())?;
+    let mut rows_written = BTreeMap::new();
+    rows_written.insert("deleted deferred-index rows", deleted_rows);
+    let measured = reports
+        .iter()
+        .filter(|r| r.measured && !r.class_oid.is_null())
+        .map(|r| r.class_oid)
+        .collect();
+    Ok((
+        CatalogOutcome {
+            freed_files,
+            user_heaps: reports.len(),
+            measured_heaps: reports.iter().filter(|r| r.measured).count(),
+            rows_written,
+            new_slots: 0,
+            new_heaps: 0,
+            deleted_classes: 0,
+            catalog_pages: layout.catalog_pages.len(),
+            indexes_built: rebuilt.filled.len(),
+        },
+        measured,
+    ))
 }
