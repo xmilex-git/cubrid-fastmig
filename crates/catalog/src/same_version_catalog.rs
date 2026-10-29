@@ -30,6 +30,7 @@ use crate::class_rows::{Row, read_rows};
 use crate::develop_class_rewrite::rewrite_develop_class;
 use crate::row_encode::encode_row;
 use crate::source_classes::{SourceClass, read_classes};
+use crate::system_table::SystemTable;
 use crate::target_classes::{Origin, TargetClass};
 
 const LINE: VersionLine = VersionLine::Develop;
@@ -144,9 +145,9 @@ pub fn remove_deferred_rows(space: &SpaceManager, cat: &DevelopCatalog) -> io::R
     }
     let vs = space.volumes();
     let (ct_class, ct_index, ct_key) = (
-        cat.class("_db_class")?,
-        cat.class("_db_index")?,
-        cat.class("_db_index_key")?,
+        cat.class(SystemTable::DbClass.name())?,
+        cat.class(SystemTable::DbIndex.name())?,
+        cat.class(SystemTable::DbIndexKey.name())?,
     );
     let class_rows = read_rows(vs, LINE, ct_class)?;
     let index_rows = read_rows(vs, LINE, ct_index)?;

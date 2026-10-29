@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use fastmig_catalog::system_table::SystemTable;
 use fastmig_ondisk::btree::root_header::RootHeader;
 use fastmig_ondisk::catalog_dir::ReprDir;
 use fastmig_ondisk::class_object::{ClassType, Constraint};
@@ -48,10 +49,8 @@ fn vfid_text(v: Vfid) -> String {
 pub fn check_catalog(c: &CatalogInput) -> Vec<Defect> {
     let db = c.db;
     let mut out = Vec::new();
-    let user = db.class_named(&["_db_user", "db_user"]).map(|s| s.oid);
-    let trigger = db
-        .class_named(&["_db_trigger", "db_trigger"])
-        .map(|s| s.oid);
+    let user = db.system_table(SystemTable::DbUser).map(|s| s.oid);
+    let trigger = db.system_table(SystemTable::DbTrigger).map(|s| s.oid);
     // heaps of no class: the root heap, the boot parameter heap and the TDE key heap (BOOT_DB_PARM)
     let mut heaps: HashSet<Vfid> = [
         db.boot.rootclass_hfid,
@@ -257,7 +256,7 @@ fn check_btid(db: &Database, files: &Files, b: Btid, class: Oid) -> Result<(), S
 /// `_db_class.class_of` values = the class OIDs, both ways.
 fn check_db_class(c: &CatalogInput, out: &mut Vec<Defect>) {
     let db = c.db;
-    let Some(dbc) = db.class_named(&["_db_class"]) else {
+    let Some(dbc) = db.system_table(SystemTable::DbClass) else {
         out.push(Defect::new(Check::Catalog, "db-class-row").expected("a _db_class class"));
         return;
     };

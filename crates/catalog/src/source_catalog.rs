@@ -19,6 +19,7 @@ use crate::rows_before_11_4::to_11_4_shape;
 use crate::source_classes::{SourceClass, read_classes};
 use crate::static_rows::FROM_SOURCE;
 use crate::system_classes::same_slot;
+use crate::system_table::SystemTable;
 
 pub struct SourceCatalog {
     /// The release that wrote the source (which same-slot tables it has, workspace#529).
@@ -28,9 +29,9 @@ pub struct SourceCatalog {
     /// One per class, same order.
     pub plans: Vec<ClassPlan>,
     /// Rows of the same-slot tables, by develop table name.
-    pub same_slot: HashMap<&'static str, Vec<Row>>,
+    pub same_slot: HashMap<SystemTable, Vec<Row>>,
     /// Rows of `_db_charset` and `_db_collation`.
-    pub static_source: HashMap<&'static str, Vec<Row>>,
+    pub static_source: HashMap<SystemTable, Vec<Row>>,
     /// Volume 0 header `db_charset`.
     pub charset: u8,
 }
@@ -57,13 +58,13 @@ impl SourceCatalog {
             read_rows(vs, line, c)
         };
         let mut same_slot = same_slot(version)
-            .map(|(src, dev)| Ok((*dev, rows(src)?)))
+            .map(|t| Ok((t, rows(t.source_name().unwrap_or_default())?)))
             .collect::<io::Result<_>>()?;
         to_11_4_shape(version, &mut same_slot, &classes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.what))?;
         let static_source = FROM_SOURCE
             .iter()
-            .map(|t| Ok((*t, rows(t)?)))
+            .map(|t| Ok((*t, rows(t.name())?)))
             .collect::<io::Result<_>>()?;
         Ok(SourceCatalog {
             version,

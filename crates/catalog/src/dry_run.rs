@@ -26,6 +26,7 @@ use crate::output_sql::plcsql_routines;
 use crate::serial_name::{name_11_4, name_develop};
 use crate::source_classes::{SourceClass, read_classes};
 use crate::system_classes::{SystemClassRole, target_role};
+use crate::system_table::SystemTable;
 use crate::template::CatalogTemplate;
 
 #[derive(Clone, Debug, Default)]
@@ -178,8 +179,11 @@ pub fn dry_run(
         );
         if kept && !c.class.heap.is_null() {
             let how = match &p.kind {
-                ClassKind::System(SystemClassRole::SameSlot { develop_name }) => {
-                    format!("rows rewritten in the develop layout of {develop_name} in their slots")
+                ClassKind::System(SystemClassRole::SameSlot { table }) => {
+                    format!(
+                        "rows rewritten in the develop layout of {} in their slots",
+                        table.name()
+                    )
                 }
                 _ if p.re_encoded => format!("records re-encoded to repid {}", c.class.repid),
                 _ => "records kept (patch)".into(),
@@ -319,8 +323,8 @@ pub fn dry_run(
         format!("_db_attribute: {target_atts} rows"),
         format!(
             "_db_data_type: {} rows, dual: {} row (template)",
-            template.rows_of("_db_data_type").count(),
-            template.rows_of("dual").count()
+            template.rows_of(SystemTable::DbDataType.name()).count(),
+            template.rows_of(SystemTable::Dual.name()).count()
         ),
         "_db_collation, _db_charset: source rows re-encoded (workspace#482 3)".into(),
         "_db_auth: from the source grants plus the template's system grants".into(),
@@ -328,7 +332,9 @@ pub fn dry_run(
     d.sections.push(("5 catalog table rows".into(), lines));
 
     // 6. files written next to the target
-    let serial = classes.iter().find(|c| c.class.name == b"db_serial");
+    let serial = classes.iter().find(|c| {
+        Some(c.class.name.as_slice()) == SystemTable::DbSerial.source_name().map(str::as_bytes)
+    });
     let mut renames = Vec::new();
     if let Some(sc) = serial {
         let cs = vs.volume(0)?.header.db_charset as u8;
@@ -354,7 +360,7 @@ pub fn dry_run(
     }
     let plcsql = match classes
         .iter()
-        .find(|c| c.class.name == b"_db_stored_procedure")
+        .find(|c| c.class.name == SystemTable::DbStoredProcedure.name().as_bytes())
     {
         Some(c) => plcsql_routines(&read_rows(vs, line, c)?),
         None => Vec::new(),
@@ -381,7 +387,7 @@ pub fn dry_run(
 
 fn develop_name_or_same(kind: &ClassKind, name: &str) -> String {
     match kind {
-        ClassKind::System(SystemClassRole::SameSlot { develop_name }) => develop_name.to_string(),
+        ClassKind::System(SystemClassRole::SameSlot { table }) => table.name().to_string(),
         _ => name.to_string(),
     }
 }

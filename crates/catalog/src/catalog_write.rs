@@ -27,6 +27,7 @@ use crate::classify::ClassKind;
 use crate::same_slot_rows::template_rows;
 use crate::source_catalog::SourceCatalog;
 use crate::system_classes::SystemClassRole;
+use crate::system_table::SystemTable;
 use crate::target_classes::{Placement, TargetClass, target_classes};
 use crate::template::CatalogTemplate;
 
@@ -55,8 +56,8 @@ fn btid_maps(
                     }
                 }
             }
-            ClassKind::System(SystemClassRole::SameSlot { develop_name }) => {
-                target_of.insert(develop_name.as_bytes().to_vec(), c.oid);
+            ClassKind::System(SystemClassRole::SameSlot { table }) => {
+                target_of.insert(table.name().as_bytes().to_vec(), c.oid);
             }
             ClassKind::System(SystemClassRole::Reallocated) => {
                 target_of.insert(c.class.name.clone(), c.oid);
@@ -123,9 +124,9 @@ fn targets_with(
     template_btid: &dyn Fn(Btid) -> Option<Btid>,
 ) -> DecodeResult<Vec<TargetClass>> {
     let mut users: HashMap<Oid, Oid> = layout.users.clone();
-    for t in template_rows(template, "_db_user")? {
+    for t in template_rows(template, SystemTable::DbUser)? {
         let name = t.values.get("name");
-        if let Some(u) = source.same_slot["_db_user"]
+        if let Some(u) = source.same_slot[&SystemTable::DbUser]
             .iter()
             .find(|u| u.values.get("name") == name)
         {

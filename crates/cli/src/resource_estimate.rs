@@ -111,7 +111,7 @@ pub fn estimate(
             let mut records: HashMap<Oid, Vec<(Oid, Vec<u8>)>> = HashMap::new();
             for (table, row) in &g.rows {
                 let t = by_name
-                    .get(table.as_bytes())
+                    .get(table.name().as_bytes())
                     .ok_or_else(|| invalid(format!("no target class {table}")))?;
                 let rec =
                     encode_row(&t.class, row).map_err(|e| invalid(format!("{table}: {e}")))?;

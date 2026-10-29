@@ -80,8 +80,8 @@ pub fn target_classes(
                 )?,
                 origin: Origin::User,
             }),
-            ClassKind::System(r @ SystemClassRole::SameSlot { develop_name }) => {
-                in_place.insert(develop_name.as_bytes().to_vec(), (c, r));
+            ClassKind::System(r @ SystemClassRole::SameSlot { table }) => {
+                in_place.insert(table.name().as_bytes().to_vec(), (c, r));
             }
             ClassKind::System(r @ SystemClassRole::Reallocated) => {
                 in_place.insert(c.class.name.clone(), (c, r));

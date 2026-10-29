@@ -40,6 +40,7 @@ use crate::same_slot_rows::{SameSlotInputs, same_slot_rows, template_rows};
 use crate::source_catalog::SourceCatalog;
 use crate::static_rows::static_rows;
 use crate::system_classes::{SystemClassRole, same_slot};
+use crate::system_table::SystemTable;
 use crate::target_classes::{Placement, TargetClass, target_classes};
 use crate::template::CatalogTemplate;
 
@@ -55,10 +56,10 @@ pub const PLACEHOLDER_BTID: Btid = FileAndPage {
 };
 
 /// Develop tables whose records carry no MVCC header (`mvcc.c` `mvcc_is_mvcc_disabled_class`).
-pub fn mvcc_table(name: &[u8]) -> bool {
+pub fn mvcc_table(table: SystemTable) -> bool {
     !matches!(
-        name,
-        b"_db_serial" | b"_db_collation" | b"_db_ha_apply_info"
+        table,
+        SystemTable::DbSerial | SystemTable::DbCollation | SystemTable::DbHaApplyInfo
     )
 }
 
@@ -130,7 +131,7 @@ struct Places<'a> {
     /// First pass: (class OID as given, class name) of each new heap asked for.
     heap_names: Vec<(Oid, Vec<u8>)>,
     /// First pass: tables in the order rows were allocated; second pass: the real OIDs to hand out in that order.
-    allocs: Vec<(&'static str, Oid)>,
+    allocs: Vec<(SystemTable, Oid)>,
     next_alloc: usize,
     placeholders: i32,
     /// First pass: placeholder user row → the template user row it stands for (INFORMATION_SCHEMA).
@@ -160,7 +161,7 @@ impl<'a> Places<'a> {
         Oid::new(PLACEHOLDER_VOLID, self.placeholders, 0)
     }
 
-    fn alloc(&mut self, table: &'static str) -> Oid {
+    fn alloc(&mut self, table: SystemTable) -> Oid {
         if self.first_pass {
             let o = self.placeholder();
             self.allocs.push((table, o));
@@ -179,7 +180,7 @@ impl<'a> Places<'a> {
 /// Target classes and rows of one pass.
 pub struct Generated {
     pub targets: Vec<TargetClass>,
-    pub rows: Vec<(&'static str, Row)>,
+    pub rows: Vec<(SystemTable, Row)>,
 }
 
 /// The first pass alone, writing nothing: every target class and catalog row with placeholder OIDs and HFIDs, each
@@ -204,14 +205,14 @@ fn generate(
     now: &Value,
     places: &mut Places,
 ) -> DecodeResult<Generated> {
-    let tusers = template_rows(template, "_db_user")?;
+    let tusers = template_rows(template, SystemTable::DbUser)?;
     let first = places.first_pass;
     let distinct_btids = places.distinct_btids;
     // template users: the source user of the same name, else a new row
     let mut user_map: HashMap<Oid, Oid> = HashMap::new();
     for t in &tusers {
         let name = t.values.get("name");
-        let to = source.same_slot["_db_user"]
+        let to = source.same_slot[&SystemTable::DbUser]
             .iter()
             .find(|u| u.values.get("name") == name)
             .map(|u| u.oid);
@@ -278,7 +279,7 @@ fn generate(
         }
         t
     };
-    let mut alloc = |t: &'static str| places.alloc(t);
+    let mut alloc = |t: SystemTable| places.alloc(t);
     let mut rows = ct_rows(&targets, now, &mut alloc)?;
     let same = same_slot_rows(
         &SameSlotInputs {
@@ -293,16 +294,16 @@ fn generate(
     )?;
     let auths: Vec<&Row> = same
         .iter()
-        .filter(|(t, _)| *t == "_db_authorization")
+        .filter(|(t, _)| *t == SystemTable::DbAuthorization)
         .map(|(_, r)| r)
         .collect();
     let auth = auth_rows(&auths, now, &mut alloc)?;
     rows.extend(same);
     rows.extend(auth);
-    let src = |t: &str| {
+    let src = |t: SystemTable| {
         source
             .static_source
-            .get(t)
+            .get(&t)
             .map(|rs| {
                 rs.iter()
                     .map(|r| Row {
@@ -527,12 +528,13 @@ pub fn plan_catalog(
     layout.catalog_items = sizing;
 
     // row heaps: the same-slot tables in develop format first (first-pass rows at their final lengths)
-    let encode = |targets: &[TargetClass], t: &str, r: &Row| -> io::Result<Vec<u8>> {
-        encode_row(&table_class(targets, t)?.class, r)
+    let encode = |targets: &[TargetClass], t: &SystemTable, r: &Row| -> io::Result<Vec<u8>> {
+        encode_row(&table_class(targets, t.name())?.class, r)
             .map_err(|e| invalid(format!("{t} {:?}: {e}", r.oid)))
     };
     let mut writers: HashMap<Vec<u8>, HeapWriter> = HashMap::new();
-    for &(src_name, dev) in same_slot(source.version) {
+    for dev in same_slot(source.version) {
+        let src_name = dev.source_name().unwrap_or_default();
         let sc = source
             .classes
             .iter()
@@ -555,7 +557,7 @@ pub fn plan_catalog(
                 source_line: source.line,
                 re_encode: Some(&RecordMap {
                     records,
-                    mvcc: mvcc_table(dev.as_bytes()),
+                    mvcc: mvcc_table(dev),
                     unmapped: Unmapped::Refuse,
                 }),
                 root: false,
@@ -564,7 +566,7 @@ pub fn plan_catalog(
         )
         .map_err(|e| invalid(format!("{dev} heap: {e}")))?;
         writers.insert(
-            dev.as_bytes().to_vec(),
+            dev.name().as_bytes().to_vec(),
             HeapWriter::open(space, sc.class.heap)?,
         );
     }
@@ -577,7 +579,7 @@ pub fn plan_catalog(
     for (t, r) in &g1.rows {
         if is_placeholder(r.oid) {
             let bytes = encode(&g1.targets, t, r)?;
-            let oid = writer(&mut writers, t)?.insert(&bytes, mvcc_table(t.as_bytes()))?;
+            let oid = writer(&mut writers, t)?.insert(&bytes, mvcc_table(*t))?;
             real_row.insert(r.oid, oid);
         }
     }
@@ -613,12 +615,8 @@ pub fn plan_catalog(
     let g2 = generate(source, template, now, &mut p2).map_err(decode_err("catalog second pass"))?;
     let mut written: BTreeMap<&'static str, usize> = BTreeMap::new();
     for (t, r) in &g2.rows {
-        writer(&mut writers, t)?.place(
-            r.oid,
-            &encode(&g2.targets, t, r)?,
-            mvcc_table(t.as_bytes()),
-        )?;
-        *written.entry(t).or_default() += 1;
+        writer(&mut writers, t)?.place(r.oid, &encode(&g2.targets, t, r)?, mvcc_table(*t))?;
+        *written.entry(t.name()).or_default() += 1;
     }
     for (_, w) in writers {
         let hfid = w.hfid();
@@ -632,9 +630,9 @@ pub fn plan_catalog(
 /// The open heap of table `t`'s rows.
 fn writer<'m, 's, 'v>(
     writers: &'m mut HashMap<Vec<u8>, HeapWriter<'s, 'v>>,
-    t: &str,
+    t: &SystemTable,
 ) -> io::Result<&'m mut HeapWriter<'s, 'v>> {
     writers
-        .get_mut(t.as_bytes())
+        .get_mut(t.name().as_bytes())
         .ok_or_else(|| invalid(format!("no heap for rows of {t}")))
 }

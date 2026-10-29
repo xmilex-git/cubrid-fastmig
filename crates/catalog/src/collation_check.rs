@@ -11,6 +11,7 @@ use fastmig_ondisk::value::{DecodeResult, Value};
 
 use crate::class_rows::Row;
 use crate::same_slot_rows::template_rows;
+use crate::system_table::SystemTable;
 use crate::template::CatalogTemplate;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -35,7 +36,7 @@ pub fn check_collations(
     source: &[Row],
     template: &CatalogTemplate,
 ) -> DecodeResult<CollationCheck> {
-    let target: Vec<(Option<i32>, String)> = template_rows(template, "_db_collation")?
+    let target: Vec<(Option<i32>, String)> = template_rows(template, SystemTable::DbCollation)?
         .iter()
         .map(id_name)
         .collect();

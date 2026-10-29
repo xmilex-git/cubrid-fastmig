@@ -22,6 +22,8 @@ use fastmig_ondisk::value::Value;
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 
+use crate::system_table::SystemTable;
+
 /// develop's longest class, serial or trigger name without its owner (P1, P2).
 const NAME_MAX: usize = 222;
 /// develop `_db_stored_procedure.unique_name varchar(255)` (P6).
@@ -57,13 +59,14 @@ fn show(s: &[u8]) -> String {
     String::from_utf8_lossy(s).into_owned()
 }
 
-/// The live rows of system class `name`, with only the attributes in `attrs` decoded, by attribute name.
+/// The live rows of system table `table`, with only the attributes in `attrs` decoded, by attribute name.
 fn rows(
     vs: &VolumeSet,
     classes: &[(Oid, ClassObject)],
-    name: &str,
+    table: SystemTable,
     attrs: &[&str],
 ) -> io::Result<Vec<(Oid, HashMap<String, Value>)>> {
+    let name = table.source_name().unwrap_or_default();
     let (_, c) = classes
         .iter()
         .find(|(_, c)| c.name == name.as_bytes())
@@ -136,9 +139,14 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
         }
         let head = class_object::decode_head(&r.bytes, LINE)
             .map_err(|e| invalid(format!("class object {:?}: {e}", r.oid)))?;
-        if ["db_user", "db_serial", "db_trigger", "_db_stored_procedure"]
-            .iter()
-            .any(|n| n.as_bytes() == head.name.as_slice())
+        if [
+            SystemTable::DbUser,
+            SystemTable::DbSerial,
+            SystemTable::DbTrigger,
+            SystemTable::DbStoredProcedure,
+        ]
+        .iter()
+        .any(|t| t.source_name().map(str::as_bytes) == Some(head.name.as_slice()))
         {
             // 11.0 has the 11.4 class object layout (R8 § 2.9)
             let full = match version {
@@ -150,7 +158,7 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
         }
         heads.push(head);
     }
-    let users = rows(vs, &system, "db_user", &["name"])?;
+    let users = rows(vs, &system, SystemTable::DbUser, &["name"])?;
     let user_name: HashMap<Oid, Vec<u8>> = users
         .iter()
         .map(|(o, v)| (*o, text(v.get("name"))))
@@ -181,10 +189,10 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
     for c in user_classes() {
         name_rules("class", &c.name);
     }
-    for (_, s) in rows(vs, &system, "db_serial", &["name"])? {
+    for (_, s) in rows(vs, &system, SystemTable::DbSerial, &["name"])? {
         name_rules("serial", &text(s.get("name")));
     }
-    for (_, t) in rows(vs, &system, "db_trigger", &["name"])? {
+    for (_, t) in rows(vs, &system, SystemTable::DbTrigger, &["name"])? {
         name_rules("trigger", &text(t.get("name")));
     }
     for (_, u) in &users {
@@ -219,7 +227,12 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
             ));
         }
     }
-    for (_, p) in rows(vs, &system, "_db_stored_procedure", &["sp_name", "owner"])? {
+    for (_, p) in rows(
+        vs,
+        &system,
+        SystemTable::DbStoredProcedure,
+        &["sp_name", "owner"],
+    )? {
         let name = text(p.get("sp_name"));
         let owner = owner_of(oid(p.get("owner")));
         if owner.len() + 1 + name.len() > SP_UNIQUE_NAME_MAX {

@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
+use fastmig_catalog::system_table::SystemTable;
 use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::heap_rewrite::VacuumHorizon;
 use fastmig_ondisk::log_header::{self, LogHeader};
@@ -145,10 +146,11 @@ impl Database {
         }
     }
 
-    /// The class whose unique name is one of `names` (11.4 and develop spell some system classes differently).
-    pub fn class_named(&self, names: &[&str]) -> Option<&SourceClass> {
+    /// The class of a system table, by its develop or its source name.
+    pub fn system_table(&self, table: SystemTable) -> Option<&SourceClass> {
+        let names = [table.develop_name(), table.source_name()];
         self.classes
             .iter()
-            .find(|c| names.iter().any(|n| c.class.name == n.as_bytes()))
+            .find(|c| names.iter().flatten().any(|n| c.class.name == n.as_bytes()))
     }
 }

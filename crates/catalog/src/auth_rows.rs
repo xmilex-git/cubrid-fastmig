@@ -1,7 +1,7 @@
 //! Derives the `_db_auth` rows from the target's `_db_authorization` rows: one row per granted privilege bit.
 //!
 //! Input: the target `_db_authorization` rows (`owner` = grantee, `grants` = flat `{type, object, grantor, cache}`
-//! entries), the migrate start time, the row allocator. Output: `("_db_auth", Row)`s.
+//! entries), the migrate start time, the row allocator. Output: `(SystemTable::DbAuth, Row)`s.
 //! Source: engine develop @682b080b2 `authenticate_grant.cpp:au_force_write_new_auth` (walk every entry),
 //! `authenticate_access_auth.cpp` `au_auth_accessor::insert_auth` (bits from EXECUTE down to SELECT, one row each),
 //! `set_new_auth` (`auth_type` = `AU_TYPE_SET` name, `object_of` = the class OID or the `_db_stored_procedure` row),
@@ -17,6 +17,7 @@ use fastmig_ondisk::value::{DecodeError, DecodeResult, Value};
 
 use crate::class_rows::Row;
 use crate::ct_rows::{Sink, int, text};
+use crate::system_table::SystemTable;
 
 /// Engine `AU_TYPE_SET`, by bit position (`DB_AUTH_SELECT` = 1 .. `DB_AUTH_EXECUTE` = 64).
 const AUTH_NAMES: [&[u8]; 7] = [
@@ -33,8 +34,8 @@ fn err(what: String) -> DecodeError {
 pub fn auth_rows(
     authorizations: &[&Row],
     now: &Value,
-    alloc: &mut dyn FnMut(&'static str) -> Oid,
-) -> DecodeResult<Vec<(&'static str, Row)>> {
+    alloc: &mut dyn FnMut(SystemTable) -> Oid,
+) -> DecodeResult<Vec<(SystemTable, Row)>> {
     let mut s = Sink {
         rows: Vec::new(),
         alloc,
@@ -64,9 +65,9 @@ pub fn auth_rows(
                 if cache & (1 << bit) == 0 {
                     continue;
                 }
-                let me = (s.alloc)("_db_auth");
+                let me = (s.alloc)(SystemTable::DbAuth);
                 s.emit(
-                    "_db_auth",
+                    SystemTable::DbAuth,
                     me,
                     vec![
                         ("grantor", g[2].clone()),

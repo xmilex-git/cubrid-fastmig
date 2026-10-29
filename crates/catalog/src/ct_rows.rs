@@ -27,6 +27,7 @@ use fastmig_ondisk::value::{
 use crate::attr_default::default_value;
 use crate::class_rows::Row;
 use crate::ct_index_rows::index_rows;
+use crate::system_table::SystemTable;
 use crate::target_classes::TargetClass;
 
 const LINE: VersionLine = VersionLine::Develop;
@@ -43,12 +44,12 @@ const SHARED: i32 = 2;
 
 /// Where generated rows go: the allocator and the rows so far.
 pub(crate) struct Sink<'a> {
-    pub rows: Vec<(&'static str, Row)>,
-    pub alloc: &'a mut dyn FnMut(&'static str) -> Oid,
+    pub rows: Vec<(SystemTable, Row)>,
+    pub alloc: &'a mut dyn FnMut(SystemTable) -> Oid,
 }
 
 impl Sink<'_> {
-    pub fn emit(&mut self, table: &'static str, oid: Oid, values: Vec<(&str, Value)>) {
+    pub fn emit(&mut self, table: SystemTable, oid: Oid, values: Vec<(&str, Value)>) {
         let values = values
             .into_iter()
             .map(|(n, v)| (n.to_string(), v))
@@ -136,7 +137,7 @@ impl Tree<'_> {
     fn domains(&self, s: &mut Sink, parent: Oid, ds: &[SchemaDomain]) -> DecodeResult<Value> {
         let mut oids = Vec::with_capacity(ds.len());
         for d in ds {
-            let me = (s.alloc)("_db_domain");
+            let me = (s.alloc)(SystemTable::DbDomain);
             oids.push(me);
             // a class missing from the catalog (self reference while being created, or deleted) is the root
             let class_of = if d.class_oid.is_null() {
@@ -155,7 +156,7 @@ impl Tree<'_> {
             );
             let set_domains = self.domains(s, me, &d.set_domain)?;
             s.emit(
-                "_db_domain",
+                SystemTable::DbDomain,
                 me,
                 vec![
                     ("object_of", Value::Object(parent)),
@@ -183,7 +184,7 @@ impl Tree<'_> {
     ) -> DecodeResult<Value> {
         let mut oids = Vec::with_capacity(atts.len());
         for a in atts {
-            let me = (s.alloc)("_db_attribute");
+            let me = (s.alloc)(SystemTable::DbAttribute);
             oids.push(me);
             let ctx = |e: DecodeError| {
                 err(format!(
@@ -198,7 +199,7 @@ impl Tree<'_> {
                 | ((a.flags & ATTFLAG_INVISIBLE_COLUMN != 0) as i32) << 1
                 | ((a.flags & ATTFLAG_PARTITION_KEY != 0) as i32) << 2;
             s.emit(
-                "_db_attribute",
+                SystemTable::DbAttribute,
                 me,
                 vec![
                     ("class_of", Value::Object(self.root)),
@@ -225,11 +226,11 @@ impl Tree<'_> {
     fn method_args(&self, s: &mut Sink, sig: Oid, args: &[MethodArg]) -> DecodeResult<Value> {
         let mut oids = Vec::with_capacity(args.len());
         for a in args {
-            let me = (s.alloc)("_db_meth_arg");
+            let me = (s.alloc)(SystemTable::DbMethArg);
             oids.push(me);
             let domains = self.domains(s, me, &a.domain)?;
             s.emit(
-                "_db_meth_arg",
+                SystemTable::DbMethArg,
                 me,
                 vec![
                     ("meth_sig_of", Value::Object(sig)),
@@ -245,12 +246,12 @@ impl Tree<'_> {
     fn signatures(&self, s: &mut Sink, meth: Oid, sigs: &[MethodSig]) -> DecodeResult<Value> {
         let mut oids = Vec::with_capacity(sigs.len());
         for g in sigs {
-            let me = (s.alloc)("_db_meth_sig");
+            let me = (s.alloc)(SystemTable::DbMethSig);
             oids.push(me);
             let return_value = self.method_args(s, me, &g.return_value)?;
             let arguments = self.method_args(s, me, &g.arguments)?;
             s.emit(
-                "_db_meth_sig",
+                SystemTable::DbMethSig,
                 me,
                 vec![
                     ("meth_of", Value::Object(meth)),
@@ -273,11 +274,11 @@ impl Tree<'_> {
     ) -> DecodeResult<Value> {
         let mut oids = Vec::with_capacity(ms.len());
         for m in ms {
-            let me = (s.alloc)("_db_method");
+            let me = (s.alloc)(SystemTable::DbMethod);
             oids.push(me);
             let signatures = self.signatures(s, me, &m.signatures)?;
             s.emit(
-                "_db_method",
+                SystemTable::DbMethod,
                 me,
                 vec![
                     ("class_of", Value::Object(self.root)),
@@ -319,10 +320,10 @@ impl Tree<'_> {
         let class_meths = self.methods(s, c, &c.class_methods, CLASS)?;
         let mut files = Vec::new();
         for f in &c.method_files {
-            let me = (s.alloc)("_db_meth_file");
+            let me = (s.alloc)(SystemTable::DbMethFile);
             files.push(me);
             s.emit(
-                "_db_meth_file",
+                SystemTable::DbMethFile,
                 me,
                 vec![
                     ("class_of", Value::Object(self.root)),
@@ -333,10 +334,10 @@ impl Tree<'_> {
         }
         let mut specs = Vec::new();
         for q in &c.query_specs {
-            let me = (s.alloc)("_db_query_spec");
+            let me = (s.alloc)(SystemTable::DbQuerySpec);
             specs.push(me);
             s.emit(
-                "_db_query_spec",
+                SystemTable::DbQuerySpec,
                 me,
                 vec![("class_of", Value::Object(self.root)), ("spec", text(q))],
             );
@@ -344,7 +345,7 @@ impl Tree<'_> {
         let indexes = index_rows(s, self.root, c, now)?;
         let mut parts = Vec::new();
         for p in &c.partitions {
-            let me = (s.alloc)("_db_partition");
+            let me = (s.alloc)(SystemTable::DbPartition);
             parts.push(me);
             let pvalues = if p.pvalues.is_empty() {
                 Value::Null
@@ -352,7 +353,7 @@ impl Tree<'_> {
                 decode_tagged(LINE, &mut OrReader::new(&p.pvalues), Some(p.pvalues.len()))?.1
             };
             s.emit(
-                "_db_partition",
+                SystemTable::DbPartition,
                 me,
                 vec![
                     ("class_of", Value::Object(self.root)),
@@ -369,7 +370,7 @@ impl Tree<'_> {
             );
         }
         s.emit(
-            "_db_class",
+            SystemTable::DbClass,
             self.root,
             vec![
                 ("class_of", Value::Object(oid)),
@@ -421,8 +422,8 @@ fn resolved_name(c: &ClassObject, name: &[u8], kind: i32) -> Value {
 pub fn ct_rows(
     classes: &[TargetClass],
     now: &Value,
-    alloc: &mut dyn FnMut(&'static str) -> Oid,
-) -> DecodeResult<Vec<(&'static str, Row)>> {
+    alloc: &mut dyn FnMut(SystemTable) -> Oid,
+) -> DecodeResult<Vec<(SystemTable, Row)>> {
     let mut s = Sink {
         rows: Vec::new(),
         alloc,
@@ -430,7 +431,7 @@ pub fn ct_rows(
     // every _db_class row first: a class's rows name other classes by their _db_class row
     let class_row: HashMap<Oid, Oid> = classes
         .iter()
-        .map(|t| (t.oid, (s.alloc)("_db_class")))
+        .map(|t| (t.oid, (s.alloc)(SystemTable::DbClass)))
         .collect();
     for t in classes {
         let tree = Tree {

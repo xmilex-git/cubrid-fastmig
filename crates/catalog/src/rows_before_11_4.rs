@@ -25,6 +25,7 @@ use fastmig_ondisk::{Oid, SourceVersion};
 use crate::class_rows::Row;
 use crate::source_classes::SourceClass;
 use crate::sp_target_signature::split_target_signature;
+use crate::system_table::SystemTable;
 
 /// `DB_OBJECT_CLASS`.
 const OBJECT_CLASS: i32 = 0;
@@ -96,29 +97,41 @@ impl Users {
 
 pub fn to_11_4_shape(
     version: SourceVersion,
-    rows: &mut HashMap<&'static str, Vec<Row>>,
+    rows: &mut HashMap<SystemTable, Vec<Row>>,
     classes: &[SourceClass],
 ) -> DecodeResult<()> {
     if !matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
         return Ok(());
     }
-    let users = Users::of(rows.get("_db_user").map(Vec::as_slice).unwrap_or_default());
+    let users = Users::of(
+        rows.get(&SystemTable::DbUser)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    );
     let owner_of: HashMap<Oid, Oid> = classes.iter().map(|c| (c.oid, c.class.owner)).collect();
     let mut sp_of: HashMap<Oid, Oid> = HashMap::new();
-    for r in rows.get_mut("_db_stored_procedure").into_iter().flatten() {
+    for r in rows
+        .get_mut(&SystemTable::DbStoredProcedure)
+        .into_iter()
+        .flatten()
+    {
         procedure(r, &users, &mut sp_of)?;
     }
     for r in rows
-        .get_mut("_db_stored_procedure_args")
+        .get_mut(&SystemTable::DbStoredProcedureArgs)
         .into_iter()
         .flatten()
     {
         argument(r, &sp_of)?;
     }
-    for r in rows.get_mut("_db_authorization").into_iter().flatten() {
+    for r in rows
+        .get_mut(&SystemTable::DbAuthorization)
+        .into_iter()
+        .flatten()
+    {
         grants(r, &users, &owner_of)?;
     }
-    for r in rows.get_mut("_db_serial").into_iter().flatten() {
+    for r in rows.get_mut(&SystemTable::DbSerial).into_iter().flatten() {
         if let Some(v) = r.values.remove("att_name") {
             r.values.insert("attr_name".into(), v);
         }

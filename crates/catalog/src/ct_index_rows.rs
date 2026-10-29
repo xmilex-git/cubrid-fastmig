@@ -16,6 +16,7 @@ use fastmig_ondisk::class_object::{ClassObject, ConstraintKind, class_properties
 use fastmig_ondisk::value::{DecodeError, DecodeResult, SetElement, SetValue, Value};
 
 use crate::ct_rows::{Sink, int, obj, oid_seq, opt_text, text};
+use crate::system_table::SystemTable;
 
 const LINE: VersionLine = VersionLine::Develop;
 
@@ -97,7 +98,7 @@ pub(crate) fn index_rows(
     let mut oids = Vec::new();
     for (kind, is_unique, is_reverse, is_pk, is_fk) in FAMILIES {
         for k in props.constraints.iter().filter(|k| k.kind == kind) {
-            let me = (s.alloc)("_db_index");
+            let me = (s.alloc)(SystemTable::DbIndex);
             oids.push(me);
             // catcls requires the optional element on every index that is neither a PK nor an FK
             let prefix = if is_pk == 0 && is_fk == 0 {
@@ -113,14 +114,14 @@ pub(crate) fn index_rows(
             };
             let mut key_oids = Vec::with_capacity(k.keys.len());
             for (order, (id, asc_desc)) in k.keys.iter().enumerate() {
-                let ko = (s.alloc)("_db_index_key");
+                let ko = (s.alloc)(SystemTable::DbIndexKey);
                 key_oids.push(ko);
                 let prefix = prefix
                     .as_ref()
                     .and_then(|p| p.get(order).cloned())
                     .unwrap_or(int(-1));
                 s.emit(
-                    "_db_index_key",
+                    SystemTable::DbIndexKey,
                     ko,
                     vec![
                         ("index_of", Value::Object(me)),
@@ -133,7 +134,7 @@ pub(crate) fn index_rows(
             }
             let fk = k.foreign_key.as_ref();
             s.emit(
-                "_db_index",
+                SystemTable::DbIndex,
                 me,
                 vec![
                     ("class_of", Value::Object(class_row)),

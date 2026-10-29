@@ -12,13 +12,14 @@ use fastmig_ondisk::value::{DecodeError, DecodeResult, Value};
 
 use crate::class_rows::Row;
 use crate::same_slot_rows::{rewrite, template_rows};
+use crate::system_table::SystemTable;
 use crate::target_classes::TargetClass;
 use crate::template::CatalogTemplate;
 
 /// Tables whose rows come from the template.
-const FROM_TEMPLATE: [&str; 2] = ["_db_data_type", "dual"];
+const FROM_TEMPLATE: [SystemTable; 2] = [SystemTable::DbDataType, SystemTable::Dual];
 /// Tables whose rows come from the source, by name in both lines.
-pub const FROM_SOURCE: [&str; 2] = ["_db_charset", "_db_collation"];
+pub const FROM_SOURCE: [SystemTable; 2] = [SystemTable::DbCharset, SystemTable::DbCollation];
 
 fn err(what: String) -> DecodeError {
     DecodeError { at: 0, what }
@@ -26,12 +27,12 @@ fn err(what: String) -> DecodeError {
 
 /// `source(table)` gives the source rows of a [`FROM_SOURCE`] table.
 pub fn static_rows(
-    source: &dyn Fn(&str) -> Vec<Row>,
+    source: &dyn Fn(SystemTable) -> Vec<Row>,
     targets: &[TargetClass],
     template: &CatalogTemplate,
     now: &Value,
-    alloc: &mut dyn FnMut(&'static str) -> Oid,
-) -> DecodeResult<Vec<(&'static str, Row)>> {
+    alloc: &mut dyn FnMut(SystemTable) -> Oid,
+) -> DecodeResult<Vec<(SystemTable, Row)>> {
     let mut out = Vec::new();
     for table in FROM_TEMPLATE {
         for r in template_rows(template, table)? {
@@ -47,11 +48,11 @@ pub fn static_rows(
     for table in FROM_SOURCE {
         let t = &targets
             .iter()
-            .find(|t| t.class.name == table.as_bytes())
+            .find(|t| t.class.name == table.name().as_bytes())
             .ok_or_else(|| err(format!("no target class {table}")))?
             .class;
         for r in source(table) {
-            let mut row = rewrite(table, table, t, &r, now)?;
+            let mut row = rewrite(table, t, &r, now)?;
             row.oid = alloc(table);
             out.push((table, row));
         }

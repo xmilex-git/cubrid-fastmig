@@ -12,6 +12,7 @@ use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::volume_set::VolumeSet;
 
 use crate::source_classes::{read_classes, read_rows};
+use crate::system_table::SystemTable;
 use crate::template::{CatalogTemplate, TemplateRecord};
 
 /// System classes whose rows the template carries: the static rows (`_db_data_type`, `dual`), the users,
@@ -19,18 +20,18 @@ use crate::template::{CatalogTemplate, TemplateRecord};
 /// system classes), `db_root` for its one row, and the built-in charsets and collations the source's rows are
 /// checked against (workspace#482 decision 3), and the built-in procedures with their arguments a pre-11.4 source
 /// lacks (`public.dbms_output.*`, R12 § 4.6, workspace#529).
-pub const ROW_CLASSES: [&str; 11] = [
-    "_db_data_type",
-    "dual",
-    "_db_user",
-    "_db_password",
-    "_db_authorization",
-    "_db_auth",
-    "db_root",
-    "_db_charset",
-    "_db_collation",
-    "_db_stored_procedure",
-    "_db_stored_procedure_args",
+pub const ROW_CLASSES: [SystemTable; 11] = [
+    SystemTable::DbDataType,
+    SystemTable::Dual,
+    SystemTable::DbUser,
+    SystemTable::DbPassword,
+    SystemTable::DbAuthorization,
+    SystemTable::DbAuth,
+    SystemTable::DbRoot,
+    SystemTable::DbCharset,
+    SystemTable::DbCollation,
+    SystemTable::DbStoredProcedure,
+    SystemTable::DbStoredProcedureArgs,
 ];
 
 pub fn extract(
@@ -43,7 +44,8 @@ pub fn extract(
         meta,
         ..Default::default()
     };
-    for name in ROW_CLASSES {
+    for table in ROW_CLASSES {
+        let name = table.name();
         let c = classes
             .iter()
             .find(|c| c.class.name == name.as_bytes())

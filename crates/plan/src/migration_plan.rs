@@ -22,6 +22,7 @@ use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
 use fastmig_catalog::sp_target_signature::{TARGET_CLASS_LEN, split_target_signature};
 use fastmig_catalog::system_classes::SystemClassRole;
+use fastmig_catalog::system_table::SystemTable;
 use fastmig_catalog::{attr_default, template_store};
 use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::class_object::{ClassType, class_properties};
@@ -184,9 +185,13 @@ fn rows_of(
     vs: &VolumeSet,
     line: VersionLine,
     classes: &[SourceClass],
-    name: &[u8],
+    table: SystemTable,
 ) -> io::Result<Vec<Row>> {
-    match classes.iter().find(|c| c.class.name == name) {
+    let name = table.source_name().map(str::as_bytes);
+    match classes
+        .iter()
+        .find(|c| Some(c.class.name.as_slice()) == name)
+    {
         Some(c) => read_rows(vs, line, c),
         None => Ok(Vec::new()),
     }
@@ -295,7 +300,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     let classes = read_classes(i.vols, line)?;
     if matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
         // a pre-11.4 Java target must split into develop's target_class/target_method (R12 § 5.1 2)
-        for r in rows_of(i.vols, line, &classes, b"_db_stored_procedure")? {
+        for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedure)? {
             let name = String::from_utf8_lossy(text(r.values.get("sp_name")).unwrap_or_default())
                 .into_owned();
             let target = text(r.values.get("target")).unwrap_or_default();
@@ -412,8 +417,11 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         let charset = i.vols.volume(0)?.header.db_charset as u8;
         match template_store::builtin(i.target_line, charset) {
             Some(t) => {
-                let c = check_collations(&rows_of(i.vols, line, &classes, b"_db_collation")?, &t)
-                    .map_err(|e| invalid(format!("_db_collation: {e}")))?;
+                let c = check_collations(
+                    &rows_of(i.vols, line, &classes, SystemTable::DbCollation)?,
+                    &t,
+                )
+                .map_err(|e| invalid(format!("_db_collation: {e}")))?;
                 refusals.extend(c.refusals);
                 warnings.extend(c.warnings);
             }
@@ -464,7 +472,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                 ));
             }
         }
-        for r in rows_of(i.vols, line, &classes, b"db_trigger")? {
+        for r in rows_of(i.vols, line, &classes, SystemTable::DbTrigger)? {
             let name = text(r.values.get("name"))
                 .map(String::from_utf8_lossy)
                 .unwrap_or_default();
@@ -474,7 +482,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                 }
             }
         }
-        for r in rows_of(i.vols, line, &classes, b"_db_stored_procedure_code")? {
+        for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedureCode)? {
             let name = text(r.values.get("name"))
                 .map(String::from_utf8_lossy)
                 .unwrap_or_default();
@@ -488,7 +496,12 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     }
 
     // PL/CSQL routines keep their compiled code; the user may recompile (G6 6)
-    let routines = plcsql_routines(&rows_of(i.vols, line, &classes, b"_db_stored_procedure")?);
+    let routines = plcsql_routines(&rows_of(
+        i.vols,
+        line,
+        &classes,
+        SystemTable::DbStoredProcedure,
+    )?);
     if !routines.is_empty() {
         warnings.push(format!(
             "{} PL/CSQL routines keep their compiled code; fastmig/recompile-plcsql.sql recompiles them (workspace#488)",
