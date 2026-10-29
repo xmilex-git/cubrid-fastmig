@@ -14,6 +14,8 @@ use crate::le_field::{get_u32, get_u64, put_u32, put_u64};
 pub const FLAG_BESTSPACE: u32 = 0x1;
 /// Engine `HEAP_PAGE_FLAG_NOT_IN_HEAP` (develop only).
 pub const FLAG_NOT_IN_HEAP: u32 = 0x2;
+/// Engine `HEAP_PAGE_FLAG_VACUUM_ONCE`: the vacuum status of a page one vacuum pass away from clean.
+pub const FLAG_VACUUM_ONCE: u32 = 0x8000_0000;
 /// Engine `HEAP_PAGE_FLAG_VACUUM_STATUS_MASK`: 0 none, `0x8000_0000` once, otherwise unknown.
 pub const FLAG_VACUUM_STATUS_MASK: u32 = 0xC000_0000;
 

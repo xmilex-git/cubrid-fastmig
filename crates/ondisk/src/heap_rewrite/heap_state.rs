@@ -98,6 +98,14 @@ pub(crate) fn spage_err(vpid: Vpid, e: SpageError) -> io::Error {
     invalid(format!("heap page {vpid:?}: {e:?}"))
 }
 
+/// The chain record of heap data page `vpid` (`page` is the whole IO page).
+pub(crate) fn chain_of(page: &[u8], vpid: Vpid) -> io::Result<HeapChain> {
+    SlottedPage::new(db_area(page))
+        .and_then(|sp| sp.record(0))
+        .and_then(|(_, r)| HeapChain::read(r))
+        .ok_or_else(|| invalid(format!("heap page {vpid:?}: slot 0 is not a chain record")))
+}
+
 /// An editor over a whole IO page's user area.
 pub(crate) fn editor(page: &mut [u8], vpid: Vpid) -> io::Result<SpageEditor<'_>> {
     SpageEditor::new(db_area_mut(page))

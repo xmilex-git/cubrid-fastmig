@@ -4,8 +4,8 @@
 //! Input: a [`HeapState`] whose current page is the page to rewrite, and the [`PageTreatment`]. Output: the page (and the
 //! NEWHOME/overflow pages its records reach) edited; counts in [`PageCounts`].
 //! Source: R2 § 3 R3 (record rules; a REC_NEWHOME is reached from its home, never on its own; slots are never
-//! removed), R4 (`spage_compact` result, `need_update_best_hint` cleared), R5 (chain `max_mvccid` = 0, flags = 0;
-//! applied to rewritten pages only, workspace#499 replaces "every page"), R7 (re-encoding); engine `vacuum.c`
+//! removed), R4 (`spage_compact` result, `need_update_best_hint` cleared), R5 (chain `max_mvccid` = 0, vacuum
+//! status bits cleared, workspace#501; applied to rewritten pages only, workspace#499 replaces "every page"), R7 (re-encoding); engine `vacuum.c`
 //! `vacuum_heap_record` (:2190-2440: a deleted REC_RELOCATION also deletes its NEWHOME as
 //! REC_DELETED_WILL_REUSE, a deleted REC_BIGONE releases its overflow pages), `spage_vacuum_slot`; develop
 //! @5b1867174, same in release/11.4 @46212adcd.
@@ -21,7 +21,7 @@ use crate::heap_rewrite::record_patch::{
 };
 use crate::page::{db_area, db_area_mut};
 use crate::record::HomeKind;
-use crate::record::heap_chain::HeapChain;
+use crate::record::heap_chain::{FLAG_VACUUM_STATUS_MASK, HeapChain};
 use crate::record::heap_scan::read_overflow;
 use crate::record::mvcc_header::RecordHeader;
 use crate::spage::{RecordType, SlottedPage};
@@ -252,7 +252,8 @@ pub(crate) fn rewrite_current_page(
                 .unwrap_or_default();
             if let Some(mut chain) = HeapChain::read(&rec) {
                 chain.max_mvccid = 0;
-                chain.flags = 0;
+                // vacuum status only: develop BESTSPACE and NOT_IN_HEAP bits stay (11.4 has no other bits)
+                chain.flags &= !FLAG_VACUUM_STATUS_MASK;
                 chain.write(&mut rec);
                 ed.update(0, &rec).map_err(|e| spage_err(vpid, e))?;
             }

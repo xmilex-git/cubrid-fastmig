@@ -16,12 +16,10 @@ use crate::file_header::{FileDescriptor, FileHeader};
 use crate::le_field::{get_i16, get_u64};
 use crate::log_header::LogHeader;
 use crate::page::db_area;
-use crate::record::heap_chain::{FLAG_VACUUM_STATUS_MASK, HeapChain};
+use crate::record::heap_chain::{FLAG_VACUUM_ONCE, FLAG_VACUUM_STATUS_MASK, HeapChain};
 use crate::volume_set::VolumeSet;
 use crate::{Vfid, Vpid};
 
-/// `HEAP_PAGE_FLAG_VACUUM_ONCE`.
-const VACUUM_ONCE: u32 = 0x8000_0000;
 /// Offset of `data[0].oldest_visible_mvccid` in a vacuum data page.
 const FIRST_ENTRY_OLDEST_VISIBLE: usize = 16 + 16;
 
@@ -72,7 +70,7 @@ impl VacuumHorizon {
     pub fn page_needs_patch(&self, chain: &HeapChain) -> bool {
         match chain.flags & FLAG_VACUUM_STATUS_MASK {
             0 => false,
-            VACUUM_ONCE => true,
+            FLAG_VACUUM_ONCE => true,
             _ => chain.max_mvccid >= self.oldest_unvacuumed,
         }
     }

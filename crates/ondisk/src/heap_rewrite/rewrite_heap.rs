@@ -1,5 +1,5 @@
-//! Rewrites one heap file of the target in place from 11.4 to develop: the pages that need it are patched or
-//! re-encoded, then the header page becomes develop's with its bestspace pages.
+//! Rewrites one heap file of the target in place into develop's format: the pages that need it are patched or
+//! re-encoded, then the header page becomes (11.4 source) or stays (develop source) develop's with its bestspace pages.
 //!
 //! Input: a [`SpaceManager`] over the target (a copy of the source volumes), the source's [`VacuumHorizon`] and a
 //! [`HeapJob`]. Output: the heap rewritten; a [`HeapReport`] with what changed and the statistics written.
@@ -8,6 +8,8 @@
 //! and only patch targets are written; the header page is always rewritten. Pages not written stay byte-identical
 //! (clone sharing kept); their `max_mvccid` is below the target's first MVCCID because the new log continues the
 //! source's `mvcc_next_id` (workspace#484 invariant, `heap_file.c:25045` assert).
+//! A develop source (the same-version path, workspace#501) has its bestspace pages in the chain already: they are
+//! never patched nor counted, and a heap that is not walked is left byte-identical, header included.
 //! Source: workspace#482 decision 10 (patch/transform after releases, before index builds), R2 § 3 R1-R7.
 
 use std::io;
@@ -15,13 +17,12 @@ use std::io;
 use crate::file_alloc::SpaceManager;
 use crate::file_header::{FileHeader, FileType};
 use crate::heap_rewrite::header_rewrite::{HeaderOutcome, rewrite_header};
-use crate::heap_rewrite::heap_state::{HeapState, PageStats, invalid};
+use crate::heap_rewrite::heap_state::{HeapState, PageStats, chain_of, invalid};
 use crate::heap_rewrite::page_rewrite::{PageCounts, PageTreatment, rewrite_current_page};
 use crate::heap_rewrite::re_encode::ReEncode;
 use crate::heap_rewrite::vacuum_horizon::VacuumHorizon;
 use crate::page::db_area;
-use crate::record::heap_chain::HeapChain;
-use crate::record::heap_hdr_stats::HeapHdrStats;
+use crate::record::heap_hdr_stats::{HeapHdrStats, LineFields};
 use crate::spage::SlottedPage;
 use crate::{Hfid, Oid, VersionLine, Vfid, Vpid};
 
@@ -29,6 +30,8 @@ use crate::{Hfid, Oid, VersionLine, Vfid, Vpid};
 #[derive(Clone, Copy)]
 pub struct HeapJob<'a> {
     pub hfid: Hfid,
+    /// Release line of the source volumes: the header record's layout and whether bestspace pages exist.
+    pub source_line: VersionLine,
     /// Records go through this re-encoder (a re-encoded class, or a catalog class whose rows are regenerated);
     /// `None` keeps record bytes and only removes vacuum residue.
     pub re_encode: Option<&'a dyn ReEncode>,
@@ -55,14 +58,7 @@ pub struct HeapReport {
     pub stats: PageStats,
 }
 
-fn chain_of(page: &[u8], vpid: Vpid) -> io::Result<HeapChain> {
-    SlottedPage::new(db_area(page))
-        .and_then(|sp| sp.record(0))
-        .and_then(|(_, r)| HeapChain::read(r))
-        .ok_or_else(|| invalid(format!("heap page {vpid:?}: slot 0 is not a chain record")))
-}
-
-/// Rewrites heap `job.hfid` of the target `space` (11.4 layout in, develop layout out).
+/// Rewrites heap `job.hfid` of the target `space` (`job.source_line` layout in, develop layout out).
 pub fn rewrite_heap(
     space: &SpaceManager,
     horizon: &VacuumHorizon,
@@ -75,7 +71,7 @@ pub fn rewrite_heap(
         .and_then(|sp| sp.record(0))
         .ok_or_else(|| invalid(format!("heap header {hv:?} has no slot 0")))?
         .1;
-    let src = HeapHdrStats::read(rec0, VersionLine::V11_4)
+    let src = HeapHdrStats::read(rec0, job.source_line)
         .map_err(|e| invalid(format!("heap header {hv:?}: {e}")))?;
     let reuse_slots = FileHeader::read(&vs.read_page(job.hfid.vfid.header_vpid())?).file_type()
         == Some(FileType::HeapReuseSlots);
@@ -88,9 +84,17 @@ pub fn rewrite_heap(
         src.last_vpid,
     );
     st.header_reserve =
-        HeapHdrStats::size(VersionLine::Develop) - HeapHdrStats::size(VersionLine::V11_4);
+        HeapHdrStats::size(VersionLine::Develop) - HeapHdrStats::size(job.source_line);
+    let bestspace_pages: &[Vpid] = match &src.line {
+        LineFields::Develop(d) => &d.pages,
+        LineFields::V11_4(_) => &[],
+    };
 
     let walk = job.re_encode.is_some() || horizon.pending;
+    if !walk && job.source_line == VersionLine::Develop {
+        // nothing to clean and nothing to convert: header and pages stay as the source wrote them (workspace#501)
+        return Ok(untouched(job, &src, bestspace_pages));
+    }
     let mut counts = PageCounts::default();
     let mut rewritten = 0;
     // the header page is read first: NEWHOME first-fit order is read order
@@ -110,6 +114,11 @@ pub fn rewrite_heap(
                 return Err(invalid(format!(
                     "heap {hv:?}: chain longer than the volume set"
                 )));
+            }
+            if bestspace_pages.contains(&v) {
+                // entries, not records: neither patched nor read into the statistics (heap_update_statistics)
+                v = st.peek(v, |p| chain_of(p, v))?.next_vpid;
+                continue;
             }
             st.load(v)?;
             let chain = st.peek(v, |p| chain_of(p, v))?;
@@ -149,4 +158,29 @@ pub fn rewrite_heap(
         header,
         ovf_vfid: st.ovf_vfid,
     })
+}
+
+/// The report of a develop heap left as is: only its header page was read.
+fn untouched(job: &HeapJob, src: &HeapHdrStats, bestspace_pages: &[Vpid]) -> HeapReport {
+    let stats = PageStats {
+        pages: src.num_pages.max(0) as u64,
+        recs: src.num_recs,
+        sumlen: src.recs_sumlen,
+    };
+    HeapReport {
+        hfid: job.hfid,
+        class_oid: src.class_oid,
+        measured: false,
+        pages_read: 1,
+        pages_rewritten: 0,
+        counts: PageCounts::default(),
+        appended_pages: 0,
+        header: HeaderOutcome {
+            bestspace_pages: bestspace_pages.to_vec(),
+            evicted: 0,
+            stats,
+        },
+        ovf_vfid: src.ovf_vfid,
+        stats,
+    }
 }

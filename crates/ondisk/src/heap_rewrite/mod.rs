@@ -1,6 +1,6 @@
-//! In-place rewrite of 11.4 heap files into develop's format: vacuum-residue removal (patch), re-encoded record
-//! placement (same slot, REC_RELOCATION + NEWHOME, REC_BIGONE + overflow), and the develop header page with its
-//! bestspace pages.
+//! In-place rewrite of 11.4 heap files into develop's format, and of develop heap files on the same-version path
+//! (workspace#501): vacuum-residue removal (patch), re-encoded record placement (same slot, REC_RELOCATION +
+//! NEWHOME, REC_BIGONE + overflow), and the develop header page with its bestspace pages.
 //!
 //! Input: a writable [`crate::volume_set::VolumeSet`] holding a copy of the source, through
 //! [`crate::file_alloc::SpaceManager`]. Output: each heap rewritten, with a [`HeapReport`].

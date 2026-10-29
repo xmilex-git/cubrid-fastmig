@@ -1,19 +1,21 @@
 //! Turns a heap's 11.4 header page into develop's: room for the larger header record, the bestspace pages
-//! allocated and linked right after the header, and the develop `HEAP_HDR_STATS` written.
+//! allocated and linked right after the header, and the develop `HEAP_HDR_STATS` written. A develop header (the
+//! same-version path) keeps its record size, shard count and bestspace pages; its statistics, candidates and shard
+//! entries are written again by the same rules (workspace#501).
 //!
-//! Input: a [`HeapState`] after the heap's pages were rewritten, the 11.4 header record, whether every chain page
+//! Input: a [`HeapState`] after the heap's pages were rewritten, the source header record, whether every chain page
 //! was read, and whether this is the root class heap. Output: the header page and bestspace pages written; the
 //! [`HeaderOutcome`].
 //! Source: workspace#482 decision 6 (bestspace pages between the header and the old first page; header HOME
 //! records moved out largest first, equal sizes higher slot first) and 7 (statistics measured only on fully read
-//! heaps, otherwise the 11.4 estimates; shard entries and candidates = pages read by descending `total_free`, VPID
-//! ascending on ties, 8 shards, 1 for the root heap); engine develop @5b1867174 `heap_file.c`
-//! `heap_create_bestspace` (:3896-4073), `heap_update_statistics` (:9024-9110), `heap_load_bestspace`
-//! (:4410-4480); R2 § 1.4, § 1.5, § 3 R6.
+//! heaps, otherwise the 11.4 estimates; pages read by descending `total_free`, VPID ascending on ties, 8 shards, 1 for
+//! the root heap) with workspace#501 (the first 128 into the candidate queue, the rest round-robin over the
+//! shards); engine develop @5b1867174 `heap_file.c` `heap_create_bestspace` (:3896-4073),
+//! `heap_update_statistics` (:9024-9110), `heap_load_bestspace` (:4410-4480), `bestspace.cpp` `bestspace::find`; R2 § 1.4, § 1.5, § 3 R6.
 
 use std::io;
 
-use crate::heap_rewrite::heap_state::{HeapState, PageStats, editor, invalid, spage_err};
+use crate::heap_rewrite::heap_state::{HeapState, PageStats, chain_of, editor, invalid, spage_err};
 use crate::page::{self, PageType, db_area, db_area_mut};
 use crate::record::bestspace_page::{self, DEFAULT_SHARDS, ENTRIES_PER_SHARD, ROOT_SHARDS};
 use crate::record::heap_hdr_stats::{
@@ -84,6 +86,24 @@ pub(crate) fn rewrite_header(
     st.load(hv)?;
     let evicted = make_room(st, hv)?;
     st.header_reserve = 0;
+    // a develop source has its bestspace pages already: the first data page follows the last of them
+    if let LineFields::Develop(d) = &src.line {
+        let last = *d
+            .pages
+            .last()
+            .ok_or_else(|| invalid(format!("{hv:?}: develop header without bestspace pages")))?;
+        let first = st.peek(last, |p| chain_of(p, last))?.next_vpid;
+        return write_header_and_bestspace(
+            st,
+            src,
+            measured,
+            d.pages.clone(),
+            first,
+            d.num_shards,
+            false,
+            evicted,
+        );
+    }
     // the link may have moved if a page was appended to a one-page heap
     let old_first = st.peek(hv, |p| {
         let sp = SlottedPage::new(db_area(p))
@@ -95,11 +115,30 @@ pub(crate) fn rewrite_header(
             16,
         ))
     })?;
-    let n = bestspace_page::page_count(io_size);
-    let bs = (0..n)
+    let bs = (0..bestspace_page::page_count(io_size))
         .map(|_| st.space.alloc_page(st.hfid.vfid, PageType::Heap))
         .collect::<io::Result<Vec<_>>>()?;
+    let num_shards = if root { ROOT_SHARDS } else { DEFAULT_SHARDS };
+    write_header_and_bestspace(st, src, measured, bs, old_first, num_shards, true, evicted)
+}
 
+/// Writes the develop header record and bestspace pages `bs` (shard entries and candidates from the pages read);
+/// `old_first` is the first data page after them; `new_pages` says `bs` were just allocated (initialized and
+/// linked here) rather than kept from a develop source (page header kept, user area written again).
+#[allow(clippy::too_many_arguments)]
+fn write_header_and_bestspace(
+    st: &mut HeapState,
+    src: &HeapHdrStats,
+    measured: bool,
+    bs: Vec<Vpid>,
+    old_first: Vpid,
+    num_shards: u64,
+    new_pages: bool,
+    evicted: u64,
+) -> io::Result<HeaderOutcome> {
+    let hv = st.hfid.vpid();
+    let io_size = st.vs().io_pagesize();
+    let n = bs.len();
     let stats = if measured {
         let mut s = PageStats::default();
         st.pages().iter().for_each(|p| s.add(p.stats));
@@ -111,7 +150,6 @@ pub(crate) fn rewrite_header(
             sumlen: src.recs_sumlen,
         }
     };
-    let num_shards = if root { ROOT_SHARDS } else { DEFAULT_SHARDS };
     let mut hdr = HeapHdrStats {
         class_oid: src.class_oid,
         ovf_vfid: st.ovf_vfid,
@@ -145,14 +183,20 @@ pub(crate) fn rewrite_header(
         freespace: free.clamp(0, u16::MAX as i32) as u16,
         vpid,
     };
-    let n_shard = num_shards as usize * ENTRIES_PER_SHARD;
-    let shard: Vec<BestspaceEntry> = ranked.iter().take(n_shard).map(entry).collect();
-    let candidates: Vec<BestspaceEntry> = ranked
+    // the candidate queue first: every insert pops it before its own shard, as engine vacuum feeds it
+    // (bestspace.cpp bestspace::find, vacuum.c heap_add_bestpage); the rest round-robin so every thread's shard
+    // (thread index % shards) sees free pages (workspace#501)
+    let candidates: Vec<BestspaceEntry> = ranked.iter().take(MAX_CANDIDATES).map(entry).collect();
+    let shards = num_shards as usize;
+    let mut shard = vec![BestspaceEntry::NULL; shards * ENTRIES_PER_SHARD];
+    for (i, e) in ranked
         .iter()
-        .skip(n_shard)
-        .take(MAX_CANDIDATES)
-        .map(entry)
-        .collect();
+        .skip(MAX_CANDIDATES)
+        .take(shard.len())
+        .enumerate()
+    {
+        shard[(i % shards) * ENTRIES_PER_SHARD + i / shards] = entry(e);
+    }
     if let LineFields::Develop(d) = &mut hdr.line {
         d.candidates = candidates;
     }
@@ -164,8 +208,14 @@ pub(crate) fn rewrite_header(
     for (i, &vpid) in bs.iter().enumerate() {
         let take =
             bestspace_page::entries_in_page(io_size, i).min(shard.len().saturating_sub(from));
-        let mut p = vec![0u8; io_size];
-        page::init_header(&mut p, vpid, PageType::Heap);
+        let mut p = if new_pages {
+            let mut p = vec![0u8; io_size];
+            page::init_header(&mut p, vpid, PageType::Heap);
+            p
+        } else {
+            // the page header (its LSA) stays; the user area is written again
+            st.vs().read_page(vpid)?.to_vec()
+        };
         bestspace_page::write(
             db_area_mut(&mut p),
             io_size,
@@ -178,7 +228,7 @@ pub(crate) fn rewrite_header(
         from += take;
         st.vs().write_page(vpid, &p)?;
     }
-    if !old_first.is_null() {
+    if new_pages && !old_first.is_null() {
         st.set_prev(old_first, bs[n - 1])?;
     }
     Ok(HeaderOutcome {
