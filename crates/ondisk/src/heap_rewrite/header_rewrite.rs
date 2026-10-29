@@ -138,6 +138,8 @@ fn write_header_and_bestspace(
 ) -> io::Result<HeaderOutcome> {
     let hv = st.hfid.vpid();
     let io_size = st.vs().io_pagesize();
+    // the header page as it stands after `make_room`: its evicted records count once, at their NEWHOME
+    st.flush()?;
     let n = bs.len();
     let stats = if measured {
         let mut s = PageStats::default();
