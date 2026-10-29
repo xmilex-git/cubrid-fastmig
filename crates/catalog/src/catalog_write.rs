@@ -20,9 +20,11 @@ use fastmig_ondisk::class_object::{class_properties, decode, encode_develop};
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::HeapWriter;
 use fastmig_ondisk::value::DecodeResult;
-use fastmig_ondisk::{Btid, Hfid, Oid, VersionLine};
+use fastmig_ondisk::{Btid, Oid, VersionLine};
 
-use crate::catalog_layout::{CatalogLayout, class_catalog_items};
+use crate::catalog_layout::{
+    CatalogLayout, class_catalog_items, placed_heap, placed_rep_dir, placed_slot,
+};
 use crate::classify::ClassKind;
 use crate::same_slot_rows::template_rows;
 use crate::source_catalog::SourceCatalog;
@@ -135,10 +137,9 @@ fn targets_with(
         }
     }
     let user = |o: Oid| *users.get(&o).unwrap_or(&o);
-    let mut new_slot = |name: &[u8]| layout.new_slots.get(name).copied().unwrap_or(Oid::NULL);
-    let mut new_heap =
-        |_: Oid, name: &[u8]| layout.new_heaps.get(name).copied().unwrap_or(Hfid::NULL);
-    let rep_dir = |oid: Oid| layout.records.get(&oid).map_or(Oid::NULL, |r| r.dir);
+    let mut new_slot = |name: &[u8]| placed_slot(layout, name);
+    let mut new_heap = |_: Oid, name: &[u8]| placed_heap(layout, name);
+    let rep_dir = |oid: Oid| placed_rep_dir(layout, oid);
     target_classes(
         &source.classes,
         &source.plans,

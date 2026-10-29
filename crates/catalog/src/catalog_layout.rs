@@ -124,6 +124,10 @@ impl CatalogLayout {
 }
 
 /// One pass's placement answers: placeholders in the first pass, real places in the second.
+/// One flag, not a type per pass: both passes run the same `generate`, and they differ only in where an OID, HFID or
+/// directory comes from — seven two-arm choices inside closures `generate` hands to the row builders. A pass type
+/// would turn each into a match on the same two arms; the first-pass lists below are only touched in the first arm
+/// (workspace#525).
 struct Places<'a> {
     first_pass: bool,
     layout: &'a CatalogLayout,
@@ -235,24 +239,31 @@ fn generate(
             if first {
                 let o = places.placeholder();
                 places.slot_names.push((o, name.to_vec()));
-                o
+                Ok(o)
             } else {
-                layout.new_slots.get(name).copied().unwrap_or(Oid::NULL)
+                placed_slot(layout, name)
             }
         };
         let mut heap_names = Vec::new();
         let mut new_heap = |oid: Oid, name: &[u8]| {
             if first {
                 heap_names.push((oid, name.to_vec()));
-                FileAndPage {
+                Ok(FileAndPage {
                     vfid: Vfid::new(PLACEHOLDER_VOLID, heap_names.len() as i32),
                     pageid: 0,
-                }
+                })
             } else {
-                layout.new_heaps.get(name).copied().unwrap_or(Hfid::NULL)
+                placed_heap(layout, name)
             }
         };
-        let rep_dir = |oid: Oid| layout.records.get(&oid).map_or(Oid::NULL, |r| r.dir);
+        // the first pass has no catalog records yet: a NULL directory OID has the real one's length
+        let rep_dir = |oid: Oid| {
+            if first {
+                Ok(Oid::NULL)
+            } else {
+                placed_rep_dir(layout, oid)
+            }
+        };
         let placeholder = |_| Some(PLACEHOLDER_BTID);
         let source_btid: &dyn Fn(Btid) -> Option<Btid> =
             if distinct_btids { &Some } else { &placeholder };
@@ -636,4 +647,33 @@ fn writer<'m, 's, 'v>(
     writers
         .get_mut(t.name().as_bytes())
         .ok_or_else(|| invalid(format!("no heap for rows of {t}")))
+}
+
+/// The root-heap slot the layout gave the template class `name`; every new class has one after the first pass.
+pub(crate) fn placed_slot(layout: &CatalogLayout, name: &[u8]) -> DecodeResult<Oid> {
+    layout.new_slots.get(name).copied().ok_or_else(|| {
+        decode_error(&format!(
+            "class {} has no root-heap slot in the layout",
+            String::from_utf8_lossy(name)
+        ))
+    })
+}
+
+/// The heap the layout created for table `name`; every reallocated or new table has one after the first pass.
+pub(crate) fn placed_heap(layout: &CatalogLayout, name: &[u8]) -> DecodeResult<Hfid> {
+    layout.new_heaps.get(name).copied().ok_or_else(|| {
+        decode_error(&format!(
+            "table {} has no heap in the layout",
+            String::from_utf8_lossy(name)
+        ))
+    })
+}
+
+/// The representation directory of target class `oid` in the catalog file; every target class has one.
+pub(crate) fn placed_rep_dir(layout: &CatalogLayout, oid: Oid) -> DecodeResult<Oid> {
+    layout
+        .records
+        .get(&oid)
+        .map(|r| r.dir)
+        .ok_or_else(|| decode_error(&format!("class {oid:?} has no catalog record")))
 }

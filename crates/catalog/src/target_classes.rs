@@ -39,11 +39,11 @@ pub struct TargetClass {
 /// The caller's placement decisions.
 pub struct Placement<'a> {
     /// OID of a new root-heap slot for the template class named so.
-    pub new_slot: &'a mut dyn FnMut(&[u8]) -> Oid,
+    pub new_slot: &'a mut dyn FnMut(&[u8]) -> DecodeResult<Oid>,
     /// Heap of a reallocated or new table: `(target class OID, class name)`.
-    pub new_heap: &'a mut dyn FnMut(Oid, &[u8]) -> Hfid,
+    pub new_heap: &'a mut dyn FnMut(Oid, &[u8]) -> DecodeResult<Hfid>,
     /// Representation directory of a target class.
-    pub rep_dir: &'a dyn Fn(Oid) -> Oid,
+    pub rep_dir: &'a dyn Fn(Oid) -> DecodeResult<Oid>,
     /// New BTID of a source user class index by its source BTID; `None` writes the NULL BTID.
     pub source_btid: &'a dyn Fn(Btid) -> Option<Btid>,
     /// New BTID of a template system class index by its template BTID (the two BTID spaces overlap).
@@ -74,7 +74,7 @@ pub fn target_classes(
                     c,
                     plan,
                     &RewriteInputs {
-                        rep_dir: (p.rep_dir)(c.oid),
+                        rep_dir: (p.rep_dir)(c.oid)?,
                         new_btid: p.source_btid,
                     },
                 )?,
@@ -102,7 +102,7 @@ pub fn target_classes(
             Some((c, r)) => (c.oid, Origin::TemplateInPlace(*r)),
             None => match target_role(&name, t.class_type == ClassType::Vclass, version) {
                 Some(r @ (SystemClassRole::New | SystemClassRole::View)) => {
-                    ((p.new_slot)(&t.name), Origin::TemplateNewSlot(r))
+                    ((p.new_slot)(&t.name)?, Origin::TemplateNewSlot(r))
                 }
                 r => {
                     return Err(err(format!(
@@ -120,14 +120,14 @@ pub fn target_classes(
                 c.class.heap
             }
             _ if t.heap.is_null() => Hfid::NULL,
-            _ => (p.new_heap)(oid, &t.name),
+            _ => (p.new_heap)(oid, &t.name)?,
         };
         let class = crate::template_class::instantiate(
             t,
             &crate::template_class::Instance {
                 class_oid: &|o| map.get(&o).map_or(o, |m| m.0),
                 heap,
-                rep_dir: (p.rep_dir)(oid),
+                rep_dir: (p.rep_dir)(oid)?,
                 owner: p.user,
                 new_btid: p.template_btid,
             },
