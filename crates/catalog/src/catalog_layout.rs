@@ -101,6 +101,25 @@ pub struct CatalogLayout {
     pub deleted_classes: Vec<Oid>,
 }
 
+impl CatalogLayout {
+    /// Nothing placed yet.
+    pub fn empty() -> Self {
+        CatalogLayout {
+            new_slots: HashMap::new(),
+            new_heaps: HashMap::new(),
+            users: HashMap::new(),
+            records: HashMap::new(),
+            class_order: Vec::new(),
+            heap_stats: HashMap::new(),
+            catalog_vfid: Vfid::NULL,
+            catalog_pages: Vec::new(),
+            catalog_items: Vec::new(),
+            rows_written: BTreeMap::new(),
+            deleted_classes: Vec::new(),
+        }
+    }
+}
+
 /// One pass's placement answers: placeholders in the first pass, real places in the second.
 struct Places<'a> {
     first_pass: bool,
@@ -358,33 +377,12 @@ pub fn plan_catalog(
     let vs = space.volumes();
     let (_, boot) = BootDbParm::read(vs)?;
     let mut layout = CatalogLayout {
-        new_slots: HashMap::new(),
-        new_heaps: HashMap::new(),
-        users: HashMap::new(),
-        records: HashMap::new(),
-        class_order: Vec::new(),
         heap_stats: user_heap_stats,
-        catalog_vfid: Vfid::NULL,
-        catalog_pages: Vec::new(),
-        catalog_items: Vec::new(),
-        rows_written: BTreeMap::new(),
-        deleted_classes: Vec::new(),
+        ..CatalogLayout::empty()
     };
 
     // first pass: placeholders everywhere, real lengths
-    let empty = CatalogLayout {
-        new_slots: HashMap::new(),
-        new_heaps: HashMap::new(),
-        users: HashMap::new(),
-        records: HashMap::new(),
-        class_order: Vec::new(),
-        heap_stats: HashMap::new(),
-        catalog_vfid: Vfid::NULL,
-        catalog_pages: Vec::new(),
-        catalog_items: Vec::new(),
-        rows_written: BTreeMap::new(),
-        deleted_classes: Vec::new(),
-    };
+    let empty = CatalogLayout::empty();
     let mut p1 = Places {
         first_pass: true,
         layout: &empty,
