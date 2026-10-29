@@ -4,6 +4,7 @@ pub mod ids;
 pub mod le_field;
 pub mod lsa;
 pub mod page;
+pub mod spage;
 
 pub use ids::{Btid, Ehid, FileAndPage, Hfid, Oid, Vfid, Vpid, Vsid};
 pub use lsa::Lsa;
