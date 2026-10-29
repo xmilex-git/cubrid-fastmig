@@ -9,6 +9,7 @@
 
 mod attribute;
 mod class_record;
+mod constraint;
 mod domain;
 mod encode;
 mod method;
@@ -19,6 +20,10 @@ mod sub_set;
 
 pub use attribute::Attribute;
 pub use class_record::{ClassObject, ClassType, decode};
+pub use constraint::{
+    ClassProperties, Constraint, ConstraintKind, ForeignKeyInfo, class_properties, format_btid,
+    parse_btid,
+};
 pub use domain::SchemaDomain;
 pub use encode::encode_develop;
 pub use method::{Method, MethodArg, MethodFile, MethodSig, Resolution};
