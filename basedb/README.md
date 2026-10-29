@@ -10,6 +10,12 @@ A rebuild produces different log LSAs (append_lsa, page LSAs), so every number r
 and in later tickets stops matching. P1 and every later step start from the pristine copy,
 taken with `cp -a --reflink=always <BASEDB_ROOT>/<label>/pristine/<variant> <your dir>`.
 
+A pristine copy still names the **registered** DB: its `_vinf` and every volume header hold absolute paths under
+`<BASEDB_ROOT>/<label>/<variant>/`. Never run an engine utility (`addvoldb`, `csql -S`, a server) on such a copy:
+the engine follows those paths and writes into the registered DB (workspace#494 did this once with `addvoldb -S`;
+the three changed files were restored from pristine). Read a copy with `cubrid-fastmig migrate
+--volumes-in-first-dir`, or migrate it first — the target's headers and `_vinf` carry the target's paths.
+
 ## Run
 
 ```sh
