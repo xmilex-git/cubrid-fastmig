@@ -8,4 +8,6 @@ repository.workspace = true
 [dependencies]
 fastmig-catalog = { path = "../catalog" }
 fastmig-copy = { path = "../copy" }
+fastmig-index = { path = "../index" }
 fastmig-ondisk = { path = "../ondisk" }
+fastmig-verify = { path = "../verify" }
