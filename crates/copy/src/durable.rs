@@ -4,6 +4,11 @@
 //!
 //! Input: the incomplete marker and the worker cap. Output: all created files and directories flushed to disk.
 //! Must run before the target is registered, so a crash never leaves a registered target with unwritten pages.
+//! Policy: this pass is the run's only fsync, and it covers exactly what the marker lists — the target's files.
+//! Spill and scratch files (`--spill-dir`, sort runs, verifier merge files) are never listed and never fsynced:
+//! they die with the run, and a crash restarts from scratch anyway (no resume), as CBRD-27626 does for temp pages.
+//! A cloned volume stays in the pass although none of its data was written: the reflink itself is a metadata
+//! change, and its fsync is a log force (about 13-34 ms per run measured, workspace#494).
 //! Source: Linux `fsync(2)` (flushes the inode's dirty data whichever descriptor calls it, and a directory's own
 //! fsync makes its new entries durable).
 

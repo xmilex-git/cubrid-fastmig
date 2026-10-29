@@ -3,6 +3,7 @@
 //!
 //! Input: the parsed `--mem` / `--spill-dir` values and the target directory. Output: [`Limits`].
 //! `--mem` takes bytes with an optional K, M, G or T suffix (powers of 1024).
+//! Files under the spill directory are never fsynced (see `fastmig_copy::durable`).
 //! Source: decision G1 workspace#481 (one cap for the whole run, like `--workers`); the copy engine streams through
 //! fixed per-worker buffers, the index builder and verifier spill (workspace#493, #495).
 
