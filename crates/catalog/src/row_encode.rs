@@ -1,0 +1,57 @@
+//! Encodes one generated catalog row as a heap record of its develop table.
+//!
+//! Input: the table's develop class object (from the catalog template) and a [`Row`] whose values are keyed by
+//! attribute name. Output: the record bytes: the table's current repid, CHN 0, no MVCC fields (a target starts
+//! with no vacuum residue, workspace#472 Notes), values in the class's storage order; a missing name is NULL.
+//! Source: P1b `record::encode_record`; engine develop @682b080b2 `catalog_class.c:catcls_put_or_value_into_buffer`
+//! (catcls writes CHN 0; its 4-byte variable offsets are a writer choice, readers take any size, R4 § 3.1).
+
+use fastmig_ondisk::VersionLine;
+use fastmig_ondisk::class_object::ClassObject;
+use fastmig_ondisk::record::{RecordHeader, RecordLayout, encode_record};
+use fastmig_ondisk::value::{DecodeError, DecodeResult, Value};
+
+use crate::class_rows::Row;
+
+const LINE: VersionLine = VersionLine::Develop;
+
+pub fn encode_row(table: &ClassObject, row: &Row) -> DecodeResult<Vec<u8>> {
+    let layout = RecordLayout::for_repid(LINE, table, table.repid as u32)?;
+    let name_of = |id: i32| {
+        table
+            .attributes
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.name.as_slice())
+    };
+    // a value under a name the table lacks is a generator defect, not a NULL
+    for n in row.values.keys() {
+        if !table.attributes.iter().any(|a| a.name == n.as_bytes()) {
+            return Err(DecodeError {
+                at: 0,
+                what: format!("{} has no column {n}", String::from_utf8_lossy(&table.name)),
+            });
+        }
+    }
+    let values: Vec<Value> = layout
+        .attrs
+        .iter()
+        .map(|a| {
+            name_of(a.id)
+                .and_then(|n| row.values.get(std::str::from_utf8(n).ok()?))
+                .cloned()
+                .unwrap_or(Value::Null)
+        })
+        .collect();
+    let header = RecordHeader {
+        repid: table.repid as u32,
+        has_bound_bits: false,
+        offset_size: 4,
+        mvcc_flags: 0,
+        chn: 0,
+        insid: None,
+        delid: None,
+        prev_version_lsa: None,
+    };
+    encode_record(LINE, &layout, &header, &values, true)
+}
