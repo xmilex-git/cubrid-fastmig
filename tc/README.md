@@ -30,6 +30,11 @@ FASTMIG_TC_CTP=<cubrid-testtools>/CTP FASTMIG_TC_SERVER_CTL=<workspace>/.agents/
 - env: `FASTMIG_TC_MODES` (default `0 1`: a baseline run of the testcase as is, then the run through the
   switch point), `FASTMIG_TC_TIMEOUT` (seconds per job, default 720 as CTP shell), `FASTMIG_TC_MAX_GB`
   (stop when the out dir grows past it, default 20).
+- Give `run.sh` a copy of the binary that no build touches (e.g. `<scratch>/bin/<sha>/cubrid-fastmig`), not
+  `target/release`: every job records the sha256 of the binary it ran (`bin=` in the verdict), and a run whose
+  jobs ran different binaries ends `RESULT: FAILED` (`mixed binaries`).
+- On a host shared with measurements, pin the run to the CPUs left to it (`taskset -c 0-15 bash tc/run.sh ...`);
+  the namespace jobs inherit the affinity.
 
 ## Files
 

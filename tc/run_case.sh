@@ -78,6 +78,9 @@ cp "$TC_DIR/shim/init.sh" "$TC_DIR/shim/switch_point.sh" "$J/CTP/shell/init_path
 export FASTMIG_TC_JOB="$J" FASTMIG_TC_BIN="$BIN" FASTMIG_TC_SWITCH="$SWITCH" FASTMIG_TC_SERVER_CTL="$SERVER_CTL"
 export FASTMIG_TC_SOURCE_DBS="$J/db-source" FASTMIG_TC_TARGET_DBS="$J/db-target"
 touch "$J/start-marker"
+# the binary this job ran: a run is one binary (run.sh checks every job against its start)
+bin_sha=$(sha256sum "$BIN" | cut -c1-12)
+echo "$bin_sha" >"$J/binary.sha256"
 t0=$(date +%s)
 timeout -k 30 "${FASTMIG_TC_TIMEOUT:-720}"s unshare -Urmipnf --mount-proc --kill-child \
   bash "$SELF" --job "$J" "$INST" "$CASE_SH" >"$J/job.log" 2>&1
@@ -102,6 +105,6 @@ verdict=PASS
 [ "$cores" -eq 0 ] && [ "$internal" -eq 0 ] || verdict=FAIL
 [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] || verdict=FAIL
 
-printf '%s\tswitch=%s\t%s\tok=%s nok=%s switched_dbs=%s switch_bad=%s cores=%s internal_errors=%s verify_codes=%s rc=%s elapsed_s=%s\n' \
+printf '%s\tswitch=%s\t%s\tok=%s nok=%s switched_dbs=%s switch_bad=%s cores=%s internal_errors=%s verify_codes=%s bin=%s rc=%s elapsed_s=%s\n' \
   "$(basename "$CASE_DIR")" "$SWITCH" "$verdict" "$ok" "$nok" "$switched" "$switch_bad" "$cores" "$internal" \
-  "${verify_codes:--}" "$rc" "$elapsed" | tee "$J/verdict"
+  "${verify_codes:--}" "$bin_sha" "$rc" "$elapsed" | tee "$J/verdict"

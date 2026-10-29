@@ -23,6 +23,7 @@ MAX_KB=$(( ${FASTMIG_TC_MAX_GB:-20} * 1024 * 1024 ))
 
 pgrep -u "$(id -u)" -x cub_server | sort >"$OUT/host-servers.before"
 df -h /home | tail -1 >"$OUT/df.before"
+sha256sum "$BIN" | cut -c1-12 >"$OUT/binary.sha256"
 
 n=0
 while IFS=$'\t' read -r tc _; do
@@ -40,9 +41,13 @@ pgrep -u "$(id -u)" -x cub_server | sort >"$OUT/host-servers.after"
 comm -23 "$OUT/host-servers.before" "$OUT/host-servers.after" >"$OUT/host-servers.gone"
 df -h /home | tail -1 >"$OUT/df.after"
 
+# a binary replaced during the run (a rebuild in the same tree) makes the run mixed: not evidence
+if /usr/bin/grep -v "bin=$(cat "$OUT/binary.sha256") " "$OUT/summary.tsv" | /usr/bin/grep -q "bin="; then
+  echo "mixed binaries: jobs ran another binary than $(cat "$OUT/binary.sha256")" | tee -a "$OUT/summary.tsv"
+fi
 column -t -s $'\t' "$OUT/summary.tsv"
 echo "host cub_server before=$(wc -l <"$OUT/host-servers.before") gone=$(wc -l <"$OUT/host-servers.gone")"
-if /usr/bin/grep -q $'\tFAIL\t' "$OUT/summary.tsv" || /usr/bin/grep -q '^stopped' "$OUT/summary.tsv"; then
+if /usr/bin/grep -q $'\tFAIL\t' "$OUT/summary.tsv" || /usr/bin/grep -q '^stopped' "$OUT/summary.tsv" || /usr/bin/grep -q "^mixed" "$OUT/summary.tsv"; then
   echo "RESULT: FAILED"
   exit 1
 fi
