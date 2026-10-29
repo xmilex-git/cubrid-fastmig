@@ -282,6 +282,8 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
     };
     let space = SpaceManager::new(&vols, pair.target, trk).with_growth(growth);
     marker.create_dir_all(&o.limits.spill_dir)?;
+    // laps: page_treatment after prepare, index_build after the rebuild; the catalog writes and BT_STATS of finish
+    // fall in catalog_regeneration, lapped after the closure
     let mut regenerate = || {
         if pair.regenerates_catalog() {
             let prepared = catalog_regeneration::prepare(
@@ -293,15 +295,15 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
             )?;
             measured.extend(prepared.measured());
             rep.lap("page_treatment");
-            let c = catalog_regeneration::finish(
+            let rebuilt = catalog_regeneration::build_indexes(
                 &space,
-                prepared,
+                &prepared,
                 &o.limits,
                 o.worker_limit,
                 rep.progress.meter(INDEX_BUILD),
             )?;
             rep.lap("index_build");
-            Ok(c)
+            catalog_regeneration::finish(&space, prepared, rebuilt)
         } else {
             // the same-version path: patch, deferred indexes out, every index rebuilt (workspace#501, #503, #504)
             let prepared = catalog_regeneration::same_version_prepare(
@@ -311,15 +313,15 @@ fn migrate(o: &Options, progress: Arc<Progress>) -> io::Result<String> {
             )?;
             measured.extend(prepared.measured());
             rep.lap("page_treatment");
-            let c = catalog_regeneration::same_version_finish(
+            let rebuilt = catalog_regeneration::same_version_build_indexes(
                 &space,
-                prepared,
+                &prepared,
                 &o.limits,
                 o.worker_limit,
                 rep.progress.meter(INDEX_BUILD),
             )?;
             rep.lap("index_build");
-            Ok::<_, io::Error>(c)
+            catalog_regeneration::same_version_finish(&space, prepared, rebuilt)
         }
     };
     let catalog = regenerate();

@@ -2,7 +2,9 @@
 //! patched or re-encoded, the catalog regenerated (system rows, class objects, catalog file, `ctid`).
 //!
 //! Input: the [`SpaceManager`] over the target volumes, the source's log header, the worker limit and the
-//! page-treatment meter; between [`prepare`] and [`finish`] the caller creates the B-tree files (workspace#503). Output: the target volumes in
+//! phase meters; the caller laps a phase after each of [`prepare`] (page treatment, catalog placement and system rows),
+//! [`build_indexes`] (B-tree files, workspace#503) and [`finish`] (class objects, catalog file, BT_STATS); the
+//! same-version path has the same three steps. Output: the target volumes in
 //! develop's catalog format; a [`CatalogOutcome`] for report.json.
 //! Source: workspace#482 decision 10 (order: free, page treatment, index build, class objects and catalog);
 //! workspace#504 (catalog writer: `plan_catalog` before the BTIDs exist, `write_catalog` after, `write_bt_stats` once
@@ -19,7 +21,9 @@ use fastmig_catalog::source_catalog::SourceCatalog;
 use fastmig_catalog::template::CatalogTemplate;
 use fastmig_catalog::template_store::builtin;
 use fastmig_index::memory_limit::MemoryLimit;
-use fastmig_index::rebuild::{TargetClass as IndexClass, free_btree_files, rebuild_indexes};
+use fastmig_index::rebuild::{
+    RebuiltIndexes, TargetClass as IndexClass, free_btree_files, rebuild_indexes,
+};
 use fastmig_index::spill_dir::SpillDir;
 use fastmig_index::worker_limit::WorkerLimit;
 use fastmig_ondisk::boot_parm::BootDbParm;
@@ -137,15 +141,38 @@ pub fn prepare(
     })
 }
 
-/// Rebuilds every plain index (index-build phase), then writes the class objects with the new BTIDs, the catalog
-/// file and the B-tree statistics.
-pub fn finish(
+/// Rebuilds every plain index of `owners` under the run's limits (index-build phase).
+fn rebuild(
     space: &SpaceManager,
-    mut p: Prepared,
+    owners: &[IndexClass],
     limits: &Limits,
     worker_limit: usize,
     index_meter: Meter,
-) -> io::Result<CatalogOutcome> {
+) -> io::Result<RebuiltIndexes> {
+    let workers = WorkerLimit::new(worker_limit);
+    let memory = MemoryLimit::new(usize::try_from(limits.memory_limit_bytes).unwrap_or(usize::MAX));
+    let spill = SpillDir::create(&limits.spill_dir)?;
+    rebuild_indexes(
+        space,
+        owners,
+        &fastmig_index::Limits {
+            workers: &workers,
+            memory: &memory,
+            spill: &spill,
+        },
+        Some(index_meter),
+    )
+    .map_err(|e| io::Error::other(format!("index rebuild: {e}")))
+}
+
+/// Rebuilds every plain index of the regenerated classes (index-build phase).
+pub fn build_indexes(
+    space: &SpaceManager,
+    p: &Prepared,
+    limits: &Limits,
+    worker_limit: usize,
+    index_meter: Meter,
+) -> io::Result<RebuiltIndexes> {
     let classes = index_build_classes(&p.source, &p.template, &p.layout)
         .map_err(|e| io::Error::other(format!("class objects for the index rebuild: {e}")))?;
     let owners: Vec<IndexClass> = classes
@@ -157,20 +184,7 @@ pub fn finish(
             hfid: t.class.heap,
         })
         .collect();
-    let workers = WorkerLimit::new(worker_limit);
-    let memory = MemoryLimit::new(usize::try_from(limits.memory_limit_bytes).unwrap_or(usize::MAX));
-    let spill = SpillDir::create(&limits.spill_dir)?;
-    let rebuilt = rebuild_indexes(
-        space,
-        &owners,
-        &fastmig_index::Limits {
-            workers: &workers,
-            memory: &memory,
-            spill: &spill,
-        },
-        Some(index_meter),
-    )
-    .map_err(|e| io::Error::other(format!("index rebuild: {e}")))?;
+    let rebuilt = rebuild(space, &owners, limits, worker_limit, index_meter)?;
     // every BTID written comes from the rebuild, never a grouping tag of `index_build_classes`
     if let Some(((c, n), b)) = rebuilt.by_constraint.iter().find(|(_, b)| b.pageid < 0) {
         return Err(io::Error::other(format!(
@@ -178,6 +192,16 @@ pub fn finish(
             String::from_utf8_lossy(n)
         )));
     }
+    Ok(rebuilt)
+}
+
+/// Writes the class objects with the new BTIDs, the catalog file and the B-tree statistics (catalog-regeneration
+/// phase).
+pub fn finish(
+    space: &SpaceManager,
+    mut p: Prepared,
+    rebuilt: RebuiltIndexes,
+) -> io::Result<CatalogOutcome> {
     write_catalog(
         space,
         &mut p.layout,
@@ -185,11 +209,7 @@ pub fn finish(
         &p.template,
         &|class, name| rebuilt.by_constraint.get(&(class, name.to_vec())).copied(),
     )?;
-    let stats: HashMap<Btid, BtStats> = rebuilt
-        .filled
-        .iter()
-        .map(|f| (f.btid, bt_stats(f.btid, &f.stats)))
-        .collect();
+    let stats = bt_stats_by_btid(&rebuilt);
     write_bt_stats(space, &mut p.layout, &|b| stats.get(&b).cloned())?;
     Ok(CatalogOutcome {
         freed_files: p.freed_files,
@@ -202,6 +222,15 @@ pub fn finish(
         catalog_pages: p.layout.catalog_pages.len(),
         indexes_built: rebuilt.filled.len(),
     })
+}
+
+/// The catalog-row form of every filled index's statistics, by its new BTID.
+fn bt_stats_by_btid(rebuilt: &RebuiltIndexes) -> HashMap<Btid, BtStats> {
+    rebuilt
+        .filled
+        .iter()
+        .map(|f| (f.btid, bt_stats(f.btid, &f.stats)))
+        .collect()
 }
 
 /// The disk-representation form of a filled index's statistics (`has_function` is set by the catalog writer).
@@ -265,15 +294,14 @@ pub fn same_version_prepare(
     })
 }
 
-/// The same-version second half: every index rebuilt (index-build phase), class objects and catalog file written
-/// with the new BTIDs, then the B-tree statistics.
-pub fn same_version_finish(
+/// Rebuilds every plain index of the target's classes (index-build phase).
+pub fn same_version_build_indexes(
     space: &SpaceManager,
-    p: SameVersionPrepared,
+    p: &SameVersionPrepared,
     limits: &Limits,
     worker_limit: usize,
     index_meter: Meter,
-) -> io::Result<CatalogOutcome> {
+) -> io::Result<RebuiltIndexes> {
     let owners: Vec<IndexClass> = p
         .cat
         .classes
@@ -285,20 +313,16 @@ pub fn same_version_finish(
             hfid: c.class.heap,
         })
         .collect();
-    let workers = WorkerLimit::new(worker_limit);
-    let memory = MemoryLimit::new(usize::try_from(limits.memory_limit_bytes).unwrap_or(usize::MAX));
-    let spill = SpillDir::create(&limits.spill_dir)?;
-    let rebuilt = rebuild_indexes(
-        space,
-        &owners,
-        &fastmig_index::Limits {
-            workers: &workers,
-            memory: &memory,
-            spill: &spill,
-        },
-        Some(index_meter),
-    )
-    .map_err(|e| io::Error::other(format!("index rebuild: {e}")))?;
+    rebuild(space, &owners, limits, worker_limit, index_meter)
+}
+
+/// The same-version second half: class objects and catalog file written with the new BTIDs, then the B-tree
+/// statistics (catalog-regeneration phase).
+pub fn same_version_finish(
+    space: &SpaceManager,
+    p: SameVersionPrepared,
+    rebuilt: RebuiltIndexes,
+) -> io::Result<CatalogOutcome> {
     // after the patch every heap's header holds its statistics: measured, or the source's kept as is
     let heap_stats: HashMap<_, _> = p.reports.iter().map(|r| (r.hfid, r.stats)).collect();
     let mut layout = write_classes_and_catalog(
@@ -307,11 +331,7 @@ pub fn same_version_finish(
         &|b| rebuilt.by_old_btid.get(&b).copied(),
         &heap_stats,
     )?;
-    let stats: HashMap<Btid, BtStats> = rebuilt
-        .filled
-        .iter()
-        .map(|f| (f.btid, bt_stats(f.btid, &f.stats)))
-        .collect();
+    let stats = bt_stats_by_btid(&rebuilt);
     write_bt_stats(space, &mut layout, &|b| stats.get(&b).cloned())?;
     let mut rows_written = BTreeMap::new();
     rows_written.insert("deleted deferred-index rows", p.deleted_rows);
