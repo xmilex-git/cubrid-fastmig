@@ -8,7 +8,7 @@
 use super::domain::{self, SchemaDomain};
 use super::or_be::{Structure, within};
 use super::sub_set;
-use crate::value::DecodeResult;
+use crate::value::{DecodeResult, StringCompression};
 
 /// One older representation (repid) of the class.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub struct RepAttribute {
 }
 
 impl Representation {
-    fn decode(elem: &[u8]) -> DecodeResult<Representation> {
+    fn decode(elem: &[u8], c: StringCompression) -> DecodeResult<Representation> {
         let s = Structure::new(elem, 2)?;
         let mut f = s.fixed();
         let id = f.i32()?;
@@ -42,7 +42,7 @@ impl Representation {
                 Ok(RepAttribute {
                     id: f.i32()?,
                     type_id: f.i32()?,
-                    domain: domain::list(a.var(0))?,
+                    domain: domain::list(a.var(0), c)?,
                 })
             })
             .collect::<DecodeResult<_>>();
@@ -55,9 +55,9 @@ impl Representation {
     }
 }
 
-pub(crate) fn list(field: &[u8]) -> DecodeResult<Vec<Representation>> {
+pub(crate) fn list(field: &[u8], c: StringCompression) -> DecodeResult<Vec<Representation>> {
     sub_set::elements(field)?
         .into_iter()
-        .map(Representation::decode)
+        .map(|e| Representation::decode(e, c))
         .collect()
 }

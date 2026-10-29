@@ -85,7 +85,7 @@ _Avoid_: 카탈로그 변환, 카탈로그 업그레이드(엔진 upgradedb와 �
 _Avoid_: 템플릿 DB(파일 자체와 섞인다), 시드
 
 **재인코딩 클래스 (re-encoded class)**:
-어느 representation에든 값 인코딩이 바뀐 타입이 있거나 LOB 속성이 있어서(LOB 로케이터가 develop의 속성별 LOB 디렉터리로 바뀜, workspace#507), 모든 레코드를 현재 representation으로 다시 쓰는 클래스. 그 밖의 클래스는 레코드와 representation을 그대로 둔다.
+어느 representation에든 값 인코딩이 바뀐 타입이 있거나 LOB 속성이 있어서(LOB 로케이터가 develop의 속성별 LOB 디렉터리로 바뀜, workspace#507), 모든 레코드를 현재 representation으로 다시 쓰는 클래스. 10.2 출발에서는 VARCHAR/VARNCHAR 속성(컬렉션 원소 포함)이 있는 클래스도 든다. 10.2는 255 B 이상 문자열을 LZO1X로 압축해 두었고 develop은 그것을 읽지 못하므로, 도구가 LZ4로 다시 쓴다(실제 LZO 값이 든 레코드만 고르지 않는다, [workspace#520](https://github.com/xmilex-git/workspace/issues/520)). 그 밖의 클래스는 레코드와 representation을 그대로 둔다.
 _Avoid_: TRANSFORM 클래스(페이지 처리 등급 transform과 섞인다), 변환 클래스
 
 **일반 인덱스 (plain index)**:

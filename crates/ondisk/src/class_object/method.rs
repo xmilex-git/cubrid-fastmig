@@ -13,7 +13,7 @@ use super::domain::{self, SchemaDomain};
 use super::or_be::{Structure, opt_string, read_oid, within};
 use super::sub_set;
 use crate::Oid;
-use crate::value::DecodeResult;
+use crate::value::{DecodeResult, StringCompression};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Method {
@@ -55,7 +55,7 @@ pub struct Resolution {
     pub alias: Option<Vec<u8>>,
 }
 
-fn args(field: &[u8]) -> DecodeResult<Vec<MethodArg>> {
+fn args(field: &[u8], c: StringCompression) -> DecodeResult<Vec<MethodArg>> {
     sub_set::elements(field)?
         .into_iter()
         .map(|e| {
@@ -64,24 +64,24 @@ fn args(field: &[u8]) -> DecodeResult<Vec<MethodArg>> {
             Ok(MethodArg {
                 type_id: f.i32()?,
                 index: f.i32()?,
-                domain: domain::list(s.var(0))?,
+                domain: domain::list(s.var(0), c)?,
             })
         })
         .collect()
 }
 
-fn signature(elem: &[u8]) -> DecodeResult<MethodSig> {
+fn signature(elem: &[u8], c: StringCompression) -> DecodeResult<MethodSig> {
     let s = Structure::new(elem, 4)?;
     Ok(MethodSig {
         num_args: s.fixed().i32()?,
-        function_name: opt_string(s.var(0))?,
-        sql_definition: opt_string(s.var(1))?,
-        return_value: args(s.var(2))?,
-        arguments: args(s.var(3))?,
+        function_name: opt_string(s.var(0), c)?,
+        sql_definition: opt_string(s.var(1), c)?,
+        return_value: args(s.var(2), c)?,
+        arguments: args(s.var(3), c)?,
     })
 }
 
-pub(crate) fn methods(field: &[u8]) -> DecodeResult<Vec<Method>> {
+pub(crate) fn methods(field: &[u8], c: StringCompression) -> DecodeResult<Vec<Method>> {
     sub_set::elements(field)?
         .into_iter()
         .map(|e| {
@@ -89,10 +89,10 @@ pub(crate) fn methods(field: &[u8]) -> DecodeResult<Vec<Method>> {
             let mut f = s.fixed();
             let class_oid = read_oid(&mut f)?;
             let id = f.i32()?;
-            let name = opt_string(s.var(0))?.unwrap_or_default();
+            let name = opt_string(s.var(0), c)?.unwrap_or_default();
             let signatures = sub_set::elements(s.var(1))?
                 .into_iter()
-                .map(signature)
+                .map(|e| signature(e, c))
                 .collect::<DecodeResult<_>>();
             Ok(Method {
                 class_oid,
@@ -108,20 +108,20 @@ pub(crate) fn methods(field: &[u8]) -> DecodeResult<Vec<Method>> {
         .collect()
 }
 
-pub(crate) fn method_files(field: &[u8]) -> DecodeResult<Vec<MethodFile>> {
+pub(crate) fn method_files(field: &[u8], c: StringCompression) -> DecodeResult<Vec<MethodFile>> {
     sub_set::elements(field)?
         .into_iter()
         .map(|e| {
             let s = Structure::new(e, 2)?;
             Ok(MethodFile {
                 class_oid: read_oid(&mut s.fixed())?,
-                name: opt_string(s.var(0))?,
+                name: opt_string(s.var(0), c)?,
             })
         })
         .collect()
 }
 
-pub(crate) fn resolutions(field: &[u8]) -> DecodeResult<Vec<Resolution>> {
+pub(crate) fn resolutions(field: &[u8], c: StringCompression) -> DecodeResult<Vec<Resolution>> {
     sub_set::elements(field)?
         .into_iter()
         .map(|e| {
@@ -130,8 +130,8 @@ pub(crate) fn resolutions(field: &[u8]) -> DecodeResult<Vec<Resolution>> {
             Ok(Resolution {
                 class_oid: read_oid(&mut f)?,
                 name_space: f.i32()?,
-                name: opt_string(s.var(0))?,
-                alias: opt_string(s.var(1))?,
+                name: opt_string(s.var(0), c)?,
+                alias: opt_string(s.var(1), c)?,
             })
         })
         .collect()

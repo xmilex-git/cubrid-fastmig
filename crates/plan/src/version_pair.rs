@@ -26,6 +26,13 @@ impl VersionPair {
             ),
             (s, t) if s == t => None,
             (VersionLine::V11_4, VersionLine::Develop) => None,
+            // 10.2 values are read (workspace#520); what the target still lacks is named by the ticket that adds it
+            (VersionLine::V10_2, VersionLine::Develop) => Some(
+                "source 10.2: target TDE metadata (workspace#515) and owner-qualified names (workspace#544) not \
+                 written yet; partition streams (workspace#540), cross-owner text (workspace#517) and trailing-space \
+                 rules (workspace#541) not handled yet"
+                    .into(),
+            ),
             (s, t) => Some(format!(
                 "version pair {} -> {} is a downgrade (ADR 0003)",
                 line_name(s),
@@ -34,9 +41,16 @@ impl VersionPair {
         }
     }
 
-    /// The pair whose catalog is regenerated and whose CHAR/NUMERIC/NCHAR records are re-encoded (workspace#482).
+    /// The pair whose catalog is regenerated and whose CHAR/NUMERIC/NCHAR records (from 10.2 also LZO1X strings,
+    /// workspace#520) are re-encoded (workspace#482).
     pub fn regenerates_catalog(self) -> bool {
-        (self.source, self.target) == (VersionLine::V11_4, VersionLine::Develop)
+        matches!(
+            (self.source, self.target),
+            (
+                VersionLine::V10_2 | VersionLine::V11_4,
+                VersionLine::Develop
+            )
+        )
     }
 }
 
@@ -44,9 +58,9 @@ impl VersionPair {
 /// ticket that opens the version (map supervisor 2026-10-30, workspace#522); the order is G7 workspace#514.
 pub fn source_line(v: SourceVersion) -> Result<VersionLine, String> {
     v.line().ok_or_else(|| match v {
-        SourceVersion::V10_2 => format!("source {} not supported yet (workspace#520)", v.name()),
         SourceVersion::V11_0 => format!("source {}: not in scope (workspace#514)", v.name()),
-        SourceVersion::V11_2
+        SourceVersion::V10_2
+        | SourceVersion::V11_2
         | SourceVersion::V11_3
         | SourceVersion::V11_4
         | SourceVersion::Develop => unreachable!("a line of its own"),
@@ -56,6 +70,7 @@ pub fn source_line(v: SourceVersion) -> Result<VersionLine, String> {
 /// The `--target-version` spelling of a line.
 pub fn line_name(l: VersionLine) -> &'static str {
     match l {
+        VersionLine::V10_2 => "10.2",
         VersionLine::V11_4 => "11.4",
         VersionLine::Develop => "develop",
     }

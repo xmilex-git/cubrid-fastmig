@@ -89,7 +89,7 @@ pub fn dry_run(
 ) -> io::Result<DryRun> {
     let (_, boot) = BootDbParm::read(vs)?;
     let classes = read_classes(vs, line)?;
-    let plans = classify(&classes);
+    let plans = classify(&classes, line);
     let tclasses = template_classes(template)?;
     let mut d = DryRun::default();
 
@@ -253,6 +253,7 @@ pub fn dry_run(
                     c,
                     p,
                     &RewriteInputs {
+                        from: line,
                         rep_dir: Oid::NULL,
                         new_btid: &|_| None,
                     },

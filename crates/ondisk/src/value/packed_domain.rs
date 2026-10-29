@@ -15,7 +15,7 @@ use crate::value::domain::{
     MAX_VARNCHAR_PRECISION_11_4,
 };
 use crate::value::or_buf::{DecodeResult, OrReader, OrWriter};
-use crate::value::string::{read_string, write_string};
+use crate::value::string::{StringCompression, read_string, write_string};
 
 const TYPE_MASK: u32 = 0x3F;
 const NEXT_FLAG: u32 = 0x80;
@@ -39,7 +39,9 @@ const COLL_ISO_BINARY: i32 = 0;
 fn is_string(version: VersionLine, ty: DbType) -> bool {
     match ty {
         DbType::Char | DbType::Varchar => true,
-        DbType::Nchar | DbType::Varnchar => version == VersionLine::V11_4,
+        DbType::Nchar | DbType::Varnchar => {
+            matches!(version, VersionLine::V10_2 | VersionLine::V11_4)
+        }
         _ => false,
     }
 }
@@ -187,11 +189,12 @@ fn decode_chain(version: VersionLine, r: &mut OrReader, bit40: Bit40) -> DecodeR
             let _header = r.u32()?;
             let count = r.i32()?;
             for _ in 0..count.max(0) {
-                d.enum_labels.push(read_string(r)?);
+                d.enum_labels
+                    .push(read_string(r, StringCompression::of(version))?);
             }
         }
         if ty == DbType::Json && carrier & SCHEMA_FLAG != 0 {
-            d.json_schema = Some(read_string(r)?);
+            d.json_schema = Some(read_string(r, StringCompression::of(version))?);
         }
         if has_set_domain(ty) && carrier & FLAG_100 != 0 {
             d.set_domain = decode_packed_domain(version, r)?;
@@ -247,7 +250,7 @@ pub fn encode_packed_domain(
             DbType::Numeric => {
                 let scale = d.scale.max(0);
                 let direct_max = match version {
-                    VersionLine::V11_4 => 255,
+                    VersionLine::V10_2 | VersionLine::V11_4 => 255,
                     VersionLine::Develop => 128,
                 };
                 if d.scale < 0 || scale >= direct_max {
@@ -258,7 +261,7 @@ pub fn encode_packed_domain(
                 }
                 precision = if d.precision <= FLOATING_PRECISION {
                     match version {
-                        VersionLine::V11_4 => 38,
+                        VersionLine::V10_2 | VersionLine::V11_4 => 38,
                         VersionLine::Develop => 40,
                     }
                 } else {

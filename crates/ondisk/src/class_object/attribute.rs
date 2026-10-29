@@ -10,7 +10,7 @@ use super::domain::{self, SchemaDomain};
 use super::or_be::{Structure, opt_string, read_oid, within};
 use super::sub_set;
 use crate::Oid;
-use crate::value::DecodeResult;
+use crate::value::{DecodeResult, StringCompression};
 
 /// One attribute. Default values and properties stay in their packed form (`or_put_value`, a tagged sequence).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub struct Attribute {
 }
 
 impl Attribute {
-    pub(crate) fn decode(elem: &[u8]) -> DecodeResult<Attribute> {
+    pub(crate) fn decode(elem: &[u8], c: StringCompression) -> DecodeResult<Attribute> {
         let s = Structure::new(elem, 7)?;
         let mut f = s.fixed();
         let id = f.i32()?;
@@ -46,7 +46,7 @@ impl Attribute {
         let order = f.i32()?;
         let class_oid = read_oid(&mut f)?;
         let flags = f.i32()?;
-        let name = within(opt_string(s.var(0)), "name")?.unwrap_or_default();
+        let name = within(opt_string(s.var(0), c), "name")?.unwrap_or_default();
         let field = |e: &str| format!("attribute {}.{e}", String::from_utf8_lossy(&name));
         Ok(Attribute {
             id,
@@ -56,18 +56,18 @@ impl Attribute {
             flags,
             default_value: s.var(1).to_vec(),
             original_value: s.var(2).to_vec(),
-            domain: within(domain::list(s.var(3)), &field("domain"))?,
+            domain: within(domain::list(s.var(3), c), &field("domain"))?,
             triggers: within(sub_set::oids(s.var(4)), &field("triggers"))?,
             properties: s.var(5).to_vec(),
-            comment: within(opt_string(s.var(6)), &field("comment"))?,
+            comment: within(opt_string(s.var(6), c), &field("comment"))?,
             name,
         })
     }
 }
 
-pub(crate) fn list(field: &[u8]) -> DecodeResult<Vec<Attribute>> {
+pub(crate) fn list(field: &[u8], c: StringCompression) -> DecodeResult<Vec<Attribute>> {
     sub_set::elements(field)?
         .into_iter()
-        .map(Attribute::decode)
+        .map(|e| Attribute::decode(e, c))
         .collect()
 }

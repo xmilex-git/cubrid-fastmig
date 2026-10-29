@@ -50,7 +50,7 @@ impl SourceCatalog {
             io::Error::other(format!("source {} has no codec line", version.name()))
         })?;
         let mut classes = read_classes(vs, line)?;
-        let plans = classify(&classes);
+        let plans = classify(&classes, line);
         let rows = |name: &str| -> io::Result<Vec<Row>> {
             let c = classes
                 .iter()

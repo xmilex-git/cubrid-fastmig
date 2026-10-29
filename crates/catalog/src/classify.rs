@@ -1,16 +1,17 @@
 //! Step 1 of regeneration: one decision per source class — its role, whether its records are re-encoded, and
 //! what refuses or warns the migration.
 //!
-//! Input: the source (11.4) class objects. Output: a [`ClassPlan`] per class.
+//! Input: the source class objects (10.2 or 11.4 line). Output: a [`ClassPlan`] per class.
 //! Source: decisions workspace#482 1 (system class roles; a user domain on a reallocated system class refuses),
 //! 4 (re-encoded classes keep their repid), 5 (NCHAR(n) → CHAR(n), VARNCHAR(n) → VARCHAR(n), n > 2048 refuses);
 //! R3 § 5 rule A1 (a class is re-encoded when any representation has a type whose encoding changed: CHAR,
 //! NUMERIC, and NCHAR by decision 5; also a collection without an element type, workspace#499 — the test is
-//! `value::changes_in_develop`, shared with the record codec); workspace#481 (pre-check refusals and warnings).
+//! `value::changes_in_develop`, shared with the record codec; from 10.2 also VARCHAR/VARNCHAR, workspace#520);
+//! workspace#481 (pre-check refusals and warnings).
 
 use fastmig_ondisk::class_object::{ClassType, SchemaDomain};
 use fastmig_ondisk::record::schema_domain;
-use fastmig_ondisk::value::{DbType, changes_in_develop};
+use fastmig_ondisk::value::{DbType, Domain, changes_in_develop};
 use fastmig_ondisk::{Oid, VersionLine};
 
 use crate::source_classes::SourceClass;
@@ -83,8 +84,16 @@ fn all_domains(c: &SourceClass) -> Vec<(i32, &SchemaDomain)> {
     out
 }
 
-/// Classifies the source classes.
-pub fn classify(classes: &[SourceClass]) -> Vec<ClassPlan> {
+/// 10.2 writes a VARCHAR/VARNCHAR value of 255 B or more as LZO1X, which develop cannot read, so every class holding
+/// one (directly or as a collection element) is re-encoded; checking each record for an LZO value would read the same
+/// records and leave the clone sharing of only some pages (R8 § 2.8, D6; workspace#520).
+fn holds_lzo1x_strings(d: &Domain) -> bool {
+    matches!(d.ty, DbType::Varchar | DbType::Varnchar)
+        || d.set_domain.iter().any(holds_lzo1x_strings)
+}
+
+/// Classifies the source classes, written by `line`.
+pub fn classify(classes: &[SourceClass], line: VersionLine) -> Vec<ClassPlan> {
     let role_of = |oid: Oid| {
         classes.iter().find(|c| c.oid == oid).and_then(|c| {
             c.class.is_system_class().then(|| {
@@ -114,9 +123,13 @@ pub fn classify(classes: &[SourceClass]) -> Vec<ClassPlan> {
             };
             let mut re_encoded = false;
             for (att, chain) in attribute_domains(c) {
-                match schema_domain(VersionLine::V11_4, chain) {
+                match schema_domain(line, chain) {
                     // a LOB locator moves to develop's per-attribute directory (workspace#507)
-                    Ok(d) => re_encoded |= changes_in_develop(&d) || matches!(d.ty, DbType::Blob | DbType::Clob),
+                    Ok(d) => {
+                        re_encoded |= changes_in_develop(&d)
+                            || matches!(d.ty, DbType::Blob | DbType::Clob)
+                            || line == VersionLine::V10_2 && holds_lzo1x_strings(&d)
+                    }
                     Err(e) => refusals.push(format!("{name}: attribute id {att}: {e}")),
                 }
             }

@@ -240,6 +240,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     };
     let regenerates = pair.regenerates_catalog();
     refusals.extend(pair.refusal());
+    // 10.2 values read (workspace#520), but its catalog tables are not laid out yet (workspace#515, #544)
+    if pair.source == VersionLine::V10_2 {
+        return Err(io::Error::other(Refused(refusals)));
+    }
     let mut warnings = Vec::new();
     let mut system_name_rewrites = Vec::new();
 
@@ -311,7 +315,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             }
         }
     }
-    let class_plans = regenerates.then(|| classify(&classes));
+    let class_plans = regenerates.then(|| classify(&classes, line));
     let mut treatments = Vec::new();
     for (n, c) in classes.iter().enumerate() {
         let name = String::from_utf8_lossy(&c.class.name).into_owned();
@@ -432,6 +436,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                 c,
                 p,
                 &RewriteInputs {
+                    from: line,
                     rep_dir: Oid::NULL,
                     new_btid: &|_| None,
                 },

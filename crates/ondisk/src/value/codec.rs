@@ -20,7 +20,8 @@ use crate::value::or_buf::{DecodeResult, OrReader, OrWriter};
 use crate::value::packed_domain::{ValueTag, decode_value_tag, encode_packed_domain};
 use crate::value::set::{decode_set, encode_set};
 use crate::value::string::{
-    read_fixed_char_11_4, read_string, str_size, write_fixed_char_11_4, write_string,
+    StringCompression, read_fixed_char_11_4, read_string, str_size, write_fixed_char_11_4,
+    write_string,
 };
 
 fn read_oid(r: &mut OrReader) -> DecodeResult<Oid> {
@@ -80,18 +81,20 @@ pub fn decode_data(version: VersionLine, r: &mut OrReader, d: &Domain) -> Decode
         T::Oid => Value::Oid(read_oid(r)?),
         T::Enumeration => Value::Enumeration(r.u16()?),
         T::Numeric => Value::Numeric(match version {
-            VersionLine::V11_4 => read_numeric_11_4(r, d.precision, d.scale)?,
+            VersionLine::V10_2 | VersionLine::V11_4 => read_numeric_11_4(r, d.precision, d.scale)?,
             VersionLine::Develop => read_numeric_develop(r, d.precision)?,
         }),
         T::Char | T::Nchar => {
             let s = match version {
-                VersionLine::Develop => read_string(r)?,
+                VersionLine::Develop => read_string(r, StringCompression::of(version))?,
                 // 11.4 CHAR without a precision (tags only): BE length then the bytes
-                VersionLine::V11_4 if d.precision == FLOATING_PRECISION => {
+                VersionLine::V10_2 | VersionLine::V11_4 if d.precision == FLOATING_PRECISION => {
                     let n = r.i32()?;
                     r.bytes(n.max(0) as usize)?.to_vec()
                 }
-                VersionLine::V11_4 => read_fixed_char_11_4(r, d.precision, d.codeset)?,
+                VersionLine::V10_2 | VersionLine::V11_4 => {
+                    read_fixed_char_11_4(r, d.precision, d.codeset)?
+                }
             };
             if d.ty == T::Nchar {
                 Value::Nchar(s)
@@ -99,8 +102,8 @@ pub fn decode_data(version: VersionLine, r: &mut OrReader, d: &Domain) -> Decode
                 Value::Char(s)
             }
         }
-        T::Varchar => Value::Varchar(read_string(r)?),
-        T::Varnchar => Value::Varnchar(read_string(r)?),
+        T::Varchar => Value::Varchar(read_string(r, StringCompression::of(version))?),
+        T::Varnchar => Value::Varnchar(read_string(r, StringCompression::of(version))?),
         T::Bit => {
             if d.precision == FLOATING_PRECISION {
                 let bits = r.i32()?.max(0) as u32;
@@ -172,16 +175,18 @@ pub fn encode_data(version: VersionLine, w: &mut OrWriter, d: &Domain, v: &Value
         (T::Object, Value::Object(o)) | (T::Oid, Value::Oid(o)) => write_oid(w, o),
         (T::Enumeration, Value::Enumeration(x)) => w.u16(*x),
         (T::Numeric, Value::Numeric(n)) => match version {
-            VersionLine::V11_4 => write_numeric_11_4(w, n),
+            VersionLine::V10_2 | VersionLine::V11_4 => write_numeric_11_4(w, n),
             VersionLine::Develop => write_numeric_develop(w, n),
         },
         (T::Char | T::Nchar, Value::Char(s) | Value::Nchar(s)) => match version {
             VersionLine::Develop => write_string(w, s),
-            VersionLine::V11_4 if d.precision == FLOATING_PRECISION => {
+            VersionLine::V10_2 | VersionLine::V11_4 if d.precision == FLOATING_PRECISION => {
                 w.i32(s.len() as i32);
                 w.bytes(s);
             }
-            VersionLine::V11_4 => write_fixed_char_11_4(w, s, d.precision, d.codeset),
+            VersionLine::V10_2 | VersionLine::V11_4 => {
+                write_fixed_char_11_4(w, s, d.precision, d.codeset)
+            }
         },
         (T::Varchar | T::Varnchar, Value::Varchar(s) | Value::Varnchar(s)) => write_string(w, s),
         (T::Bit, Value::Bit { bits, bytes }) => {

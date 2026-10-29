@@ -22,7 +22,7 @@ const DISK_ATTR_SIZE: usize = 88;
 
 fn bt_stats_size(line: VersionLine) -> usize {
     match line {
-        VersionLine::V11_4 => 80,
+        VersionLine::V10_2 | VersionLine::V11_4 => 80,
         VersionLine::Develop => 120,
     }
 }
@@ -264,7 +264,7 @@ fn read_bt_stats(mut r: OrReader, line: VersionLine) -> DecodeResult<BtStats> {
     let has_function = r.i32()?;
     let mut pkeys = [0i64; PKEYS_NUM];
     let keys = match line {
-        VersionLine::V11_4 => {
+        VersionLine::V10_2 | VersionLine::V11_4 => {
             for p in &mut pkeys {
                 *p = r.i32()? as i64;
             }

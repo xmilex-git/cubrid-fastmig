@@ -8,7 +8,7 @@
 
 use super::or_be::{Structure, opt_string, read_oid, within};
 use super::sub_set;
-use crate::value::{CollationFlag, DbType, DecodeResult, Domain, read_string};
+use crate::value::{CollationFlag, DbType, DecodeResult, Domain, StringCompression, read_string};
 use crate::{Oid, VersionLine};
 
 /// One domain as the class object stores it. `type_id` is the raw `DB_TYPE` of the record's release line.
@@ -53,7 +53,7 @@ impl SchemaDomain {
         })
     }
 
-    pub(crate) fn decode(elem: &[u8]) -> DecodeResult<SchemaDomain> {
+    pub(crate) fn decode(elem: &[u8], c: StringCompression) -> DecodeResult<SchemaDomain> {
         let s = Structure::new(elem, 3)?;
         let mut f = s.fixed();
         Ok(SchemaDomain {
@@ -63,25 +63,25 @@ impl SchemaDomain {
             codeset: f.i32()?,
             collation_id: f.i32()?,
             class_oid: read_oid(&mut f)?,
-            set_domain: within(list(s.var(0)), "set_domain")?,
-            enumeration: within(enumeration(s.var(1)), "enumeration")?,
-            json_schema: within(opt_string(s.var(2)), "json_schema")?,
+            set_domain: within(list(s.var(0), c), "set_domain")?,
+            enumeration: within(enumeration(s.var(1), c), "enumeration")?,
+            json_schema: within(opt_string(s.var(2), c), "json_schema")?,
         })
     }
 }
 
 /// A domain substructure set (an attribute's domain is a one-element list; a set type nests).
-pub(crate) fn list(field: &[u8]) -> DecodeResult<Vec<SchemaDomain>> {
+pub(crate) fn list(field: &[u8], c: StringCompression) -> DecodeResult<Vec<SchemaDomain>> {
     sub_set::elements(field)?
         .into_iter()
-        .map(SchemaDomain::decode)
+        .map(|e| SchemaDomain::decode(e, c))
         .collect()
 }
 
-fn enumeration(field: &[u8]) -> DecodeResult<Vec<Vec<u8>>> {
+fn enumeration(field: &[u8], c: StringCompression) -> DecodeResult<Vec<Vec<u8>>> {
     if field.is_empty() {
         return Ok(Vec::new());
     }
     let (count, mut r) = sub_set::skip_header(field)?;
-    (0..count).map(|_| read_string(&mut r)).collect()
+    (0..count).map(|_| read_string(&mut r, c)).collect()
 }

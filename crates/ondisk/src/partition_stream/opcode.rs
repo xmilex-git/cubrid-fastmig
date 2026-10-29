@@ -17,6 +17,7 @@ const T_DECODE: i32 = 136;
 /// Engine `T_PREDICATE`.
 fn t_predicate(line: VersionLine) -> i32 {
     match line {
+        VersionLine::V10_2 => unreachable!("parse refuses a 10.2 stream (workspace#540)"),
         VersionLine::V11_4 => 161,
         VersionLine::Develop => 165,
     }
@@ -25,6 +26,7 @@ fn t_predicate(line: VersionLine) -> i32 {
 /// Number of `OPERATOR_TYPE` names, so an opcode at or above it is not one.
 pub fn opcode_count(line: VersionLine) -> i32 {
     match line {
+        VersionLine::V10_2 => unreachable!("parse refuses a 10.2 stream (workspace#540)"),
         VersionLine::V11_4 => 199,
         VersionLine::Develop => 206,
     }

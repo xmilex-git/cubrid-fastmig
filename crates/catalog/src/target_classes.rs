@@ -63,6 +63,9 @@ pub fn target_classes(
     template: &CatalogTemplate,
     p: &mut Placement,
 ) -> DecodeResult<Vec<TargetClass>> {
+    let from = version
+        .line()
+        .ok_or_else(|| err(format!("source {} has no codec line", version.name())))?;
     let mut out = Vec::new();
     // source system classes kept in place, by develop name
     let mut in_place: HashMap<Vec<u8>, (&SourceClass, SystemClassRole)> = HashMap::new();
@@ -74,6 +77,7 @@ pub fn target_classes(
                     c,
                     plan,
                     &RewriteInputs {
+                        from,
                         rep_dir: (p.rep_dir)(c.oid)?,
                         new_btid: p.source_btid,
                     },

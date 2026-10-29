@@ -14,7 +14,7 @@ use super::or_be::{Structure, opt_string, read_oid, within};
 use super::partition::{self, Partition};
 use super::representation::{self, Representation};
 use super::sub_set;
-use crate::value::{DecodeResult, OrReader};
+use crate::value::{DecodeResult, OrReader, StringCompression};
 use crate::{Hfid, Oid, VersionLine, Vfid};
 
 /// `OR_NON_MVCC_HEADER_SIZE`: repid word and CHN.
@@ -92,20 +92,6 @@ pub struct ClassObject {
     pub partitions: Vec<Partition>,
 }
 
-/// Decodes one class object record. `line` selects the per-line differences (partition fixed area).
-pub fn decode(record: &[u8], line: VersionLine) -> DecodeResult<ClassObject> {
-    decode_fixed(record, line, true)
-}
-
-/// Decodes one class object record written by 10.2: an 84 B fixed area that ends at `collation_id` (no
-/// `tde_algorithm`, read as 0 = NONE); everything else as 11.4. Strings of 255 B or more are LZO-compressed in 10.2
-/// and are not readable until workspace#520.
-/// Source: release/10.2 @416bb667c `transform_cl.c:3671-3695` (`put_class_attributes` fixed part ends with
-/// `or_put_int (buf, (int) class_->collation_id)`; 11.0 added `tde_algorithm`, 0cf60dd26); R8 § 2.9 (workspace#513).
-pub fn decode_10_2(record: &[u8]) -> DecodeResult<ClassObject> {
-    decode_fixed(record, VersionLine::V11_4, false)
-}
-
 /// Engine `SM_CLASSFLAG_SYSTEM`: bit of a class object's `flags` set on system classes.
 pub const CLASSFLAG_SYSTEM: i32 = 0x1;
 
@@ -133,16 +119,17 @@ pub struct ClassHead {
 
 /// Decodes only the name, flags, class type, owner and partitions of a class object. Those fields precede
 /// `tde_algorithm`, so one reader serves 10.2 (84 B fixed area) and later; the other variable fields (view query
-/// specs, 10.2 LZO strings, workspace#520) are not read.
+/// specs and other strings) are not read.
 pub fn decode_head(record: &[u8], line: VersionLine) -> DecodeResult<ClassHead> {
+    let c = StringCompression::of(line);
     let s = Structure::new(&record[HEADER_SIZE..], NVARS)?;
     let mut f = s.fixed();
-    f.skip(64)?; // att_ids .. class_attribute_count (offsets as in `decode_fixed`)
+    f.skip(64)?; // att_ids .. class_attribute_count (offsets as in `decode`)
     let flags = f.i32()?;
     let class_type = ClassType::from_raw(f.i32()?);
     let owner = read_oid(&mut f)?;
     Ok(ClassHead {
-        name: within(opt_string(s.var(0)), "name")?.unwrap_or_default(),
+        name: within(opt_string(s.var(0), c), "name")?.unwrap_or_default(),
         flags,
         class_type,
         owner,
@@ -150,11 +137,13 @@ pub fn decode_head(record: &[u8], line: VersionLine) -> DecodeResult<ClassHead> 
     })
 }
 
-fn decode_fixed(
-    record: &[u8],
-    line: VersionLine,
-    has_tde_algorithm: bool,
-) -> DecodeResult<ClassObject> {
+/// Decodes one class object record. `line` selects the per-line differences: the partition fixed area (develop), and
+/// for 10.2 an 84 B fixed area that ends at `collation_id` (no `tde_algorithm`, read as 0 = NONE) and LZO1X strings.
+/// Source: release/10.2 @416bb667c `transform_cl.c:3671-3695` (`put_class_attributes` fixed part ends with
+/// `or_put_int (buf, (int) class_->collation_id)`; 11.0 added `tde_algorithm`, 0cf60dd26); R8 § 2.8, § 2.9
+/// (workspace#513, #520).
+pub fn decode(record: &[u8], line: VersionLine) -> DecodeResult<ClassObject> {
+    let c = StringCompression::of(line);
     let mut h = OrReader::new(record);
     let repid = (h.u32()? & REPID_MASK) as i32;
     let chn = h.i32()?;
@@ -190,13 +179,16 @@ fn decode_fixed(
     let class_type = ClassType::from_raw(f.i32()?);
     let owner = read_oid(&mut f)?;
     let collation_id = f.i32()?;
-    let tde_algorithm = if has_tde_algorithm { f.i32()? } else { 0 };
+    let tde_algorithm = match line {
+        VersionLine::V10_2 => 0,
+        VersionLine::V11_4 | VersionLine::Develop => f.i32()?,
+    };
 
-    let name = within(opt_string(s.var(0)), "name")?.unwrap_or_default();
+    let name = within(opt_string(s.var(0), c), "name")?.unwrap_or_default();
     let ctx = |field: &str| format!("class {} {field}", String::from_utf8_lossy(&name));
     let query_specs = sub_set::elements(s.var(12)).and_then(|es| {
         es.into_iter()
-            .map(|e| opt_string(Structure::new(e, 1)?.var(0)).map(Option::unwrap_or_default))
+            .map(|e| opt_string(Structure::new(e, 1)?.var(0), c).map(Option::unwrap_or_default))
             .collect()
     });
     Ok(ClassObject {
@@ -219,21 +211,21 @@ fn decode_fixed(
         owner,
         collation_id,
         tde_algorithm,
-        loader_commands: within(opt_string(s.var(1)), &ctx("loader_commands"))?,
-        representations: within(representation::list(s.var(2)), &ctx("representations"))?,
+        loader_commands: within(opt_string(s.var(1), c), &ctx("loader_commands"))?,
+        representations: within(representation::list(s.var(2), c), &ctx("representations"))?,
         sub_classes: within(sub_set::oids(s.var(3)), &ctx("sub_classes"))?,
         super_classes: within(sub_set::oids(s.var(4)), &ctx("super_classes"))?,
-        attributes: within(attribute::list(s.var(5)), &ctx("attributes"))?,
-        shared_attributes: within(attribute::list(s.var(6)), &ctx("shared_attributes"))?,
-        class_attributes: within(attribute::list(s.var(7)), &ctx("class_attributes"))?,
-        methods: within(method::methods(s.var(8)), &ctx("methods"))?,
-        class_methods: within(method::methods(s.var(9)), &ctx("class_methods"))?,
-        method_files: within(method::method_files(s.var(10)), &ctx("method_files"))?,
-        resolutions: within(method::resolutions(s.var(11)), &ctx("resolutions"))?,
+        attributes: within(attribute::list(s.var(5), c), &ctx("attributes"))?,
+        shared_attributes: within(attribute::list(s.var(6), c), &ctx("shared_attributes"))?,
+        class_attributes: within(attribute::list(s.var(7), c), &ctx("class_attributes"))?,
+        methods: within(method::methods(s.var(8), c), &ctx("methods"))?,
+        class_methods: within(method::methods(s.var(9), c), &ctx("class_methods"))?,
+        method_files: within(method::method_files(s.var(10), c), &ctx("method_files"))?,
+        resolutions: within(method::resolutions(s.var(11), c), &ctx("resolutions"))?,
         query_specs: within(query_specs, &ctx("query_spec"))?,
         triggers: within(sub_set::oids(s.var(13)), &ctx("triggers"))?,
         properties: s.var(14).to_vec(),
-        comment: within(opt_string(s.var(15)), &ctx("comment"))?,
+        comment: within(opt_string(s.var(15), c), &ctx("comment"))?,
         partitions: within(partition::list(s.var(16), line), &ctx("partition"))?,
         name,
     })

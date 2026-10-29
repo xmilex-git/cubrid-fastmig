@@ -8,7 +8,7 @@
 use super::or_be::{Structure, opt_string, within};
 use super::sub_set;
 use crate::VersionLine;
-use crate::value::DecodeResult;
+use crate::value::{DecodeResult, StringCompression};
 
 /// One partition element. `class_partition_type` is `None` in 11.4, where the record does not store it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,16 +32,16 @@ impl Partition {
         let mut f = s.fixed();
         let ptype = f.i32()?;
         let class_partition_type = match line {
-            VersionLine::V11_4 => None,
+            VersionLine::V10_2 | VersionLine::V11_4 => None,
             VersionLine::Develop => Some(f.i32()?),
         };
         Ok(Partition {
             ptype,
             class_partition_type,
-            pname: within(opt_string(s.var(0)), "pname")?,
-            pexpr: within(opt_string(s.var(1)), "pexpr")?,
+            pname: within(opt_string(s.var(0), StringCompression::of(line)), "pname")?,
+            pexpr: within(opt_string(s.var(1), StringCompression::of(line)), "pexpr")?,
             pvalues: s.var(2).to_vec(),
-            comment: within(opt_string(s.var(3)), "comment")?,
+            comment: within(opt_string(s.var(3), StringCompression::of(line)), "comment")?,
         })
     }
 }

@@ -72,6 +72,7 @@ impl SourceVersion {
 
     fn of_line(l: VersionLine) -> Self {
         match l {
+            VersionLine::V10_2 => SourceVersion::V10_2,
             VersionLine::V11_4 => SourceVersion::V11_4,
             VersionLine::Develop => SourceVersion::Develop,
         }
@@ -115,17 +116,18 @@ impl SourceVersion {
         }
     }
 
-    /// The codec line the source's pages are read with; `None` until that version is opened (10.2 by
-    /// workspace#520; 11.0 is not in scope, workspace#514). 11.2 and 11.3 read with the 11.4 codecs: values, records,
-    /// class objects, heap headers, file headers and partition streams are byte-identical to 11.4 (R8 § 2.6-2.9,
+    /// The codec line the source's pages are read with; `None` for 11.0 (not in scope, workspace#514). 10.2 has a line
+    /// of its own: its strings are LZO1X and its class objects 84 B (workspace#520). 11.2 and 11.3 read with the 11.4
+    /// codecs: values, records, class objects, heap headers, file headers and partition streams are byte-identical to 11.4 (R8 § 2.6-2.9,
     /// § 2.12); what differs is decided on the version itself (headers, system tables; workspace#529).
     pub fn line(self) -> Option<VersionLine> {
         match self {
             SourceVersion::V11_2 | SourceVersion::V11_3 | SourceVersion::V11_4 => {
                 Some(VersionLine::V11_4)
             }
+            SourceVersion::V10_2 => Some(VersionLine::V10_2),
             SourceVersion::Develop => Some(VersionLine::Develop),
-            SourceVersion::V10_2 | SourceVersion::V11_0 => None,
+            SourceVersion::V11_0 => None,
         }
     }
 

@@ -90,7 +90,7 @@ pub fn estimate(
             let skip: HashSet<Oid> = index_rows.into_iter().chain(key_rows).collect();
             count(vols, &classes, Rows::Heaps(&HashMap::new(), &skip), workers)?
         }
-        VersionLine::V11_4 => {
+        VersionLine::V10_2 | VersionLine::V11_4 => {
             let src = SourceCatalog::read(vols, source)?;
             let template = builtin(VersionLine::Develop, src.charset).ok_or_else(|| {
                 invalid(format!("no catalog template for charset {}", src.charset))
@@ -103,7 +103,7 @@ pub fn estimate(
                     // user classes are MVCC classes (page_treatment); LOB locators are not keys
                     re_encoders.insert(
                         c.oid,
-                        ClassReEncoder::new(&c.class, true)
+                        ClassReEncoder::new(&c.class, src.line, true)
                             .map_err(|e| invalid(format!("{}: {e}", p.name)))?,
                     );
                 }

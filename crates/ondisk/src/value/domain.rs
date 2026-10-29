@@ -98,7 +98,7 @@ impl Domain {
             DbType::Varnchar => MAX_VARNCHAR_PRECISION_11_4,
             DbType::Char | DbType::Nchar | DbType::Bit => FLOATING_PRECISION,
             DbType::Numeric => match version {
-                VersionLine::V11_4 => DEFAULT_NUMERIC_PRECISION_11_4,
+                VersionLine::V10_2 | VersionLine::V11_4 => DEFAULT_NUMERIC_PRECISION_11_4,
                 VersionLine::Develop => DEFAULT_NUMERIC_PRECISION_DEVELOP,
             },
             _ => 0,
@@ -113,7 +113,11 @@ impl Domain {
         }
         let fixed_string = matches!(
             (version, self.ty),
-            (_, DbType::Bit) | (VersionLine::V11_4, DbType::Char | DbType::Nchar)
+            (_, DbType::Bit)
+                | (
+                    VersionLine::V10_2 | VersionLine::V11_4,
+                    DbType::Char | DbType::Nchar
+                )
         );
         if fixed_string && self.precision != FLOATING_PRECISION {
             Some(str_size(self.precision, self.codeset))

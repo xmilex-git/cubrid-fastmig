@@ -271,7 +271,7 @@ impl HeapHdrStats {
     /// Record length of `HEAP_HDR_STATS` in `line`.
     pub const fn size(line: VersionLine) -> usize {
         match line {
-            VersionLine::V11_4 => 296,
+            VersionLine::V10_2 | VersionLine::V11_4 => 296,
             VersionLine::Develop => 1152,
         }
     }
@@ -282,7 +282,7 @@ impl HeapHdrStats {
             return Err(short(rec, line));
         }
         Ok(match line {
-            VersionLine::V11_4 => {
+            VersionLine::V10_2 | VersionLine::V11_4 => {
                 let h = HeapHdrStats114Le::ref_from_bytes(rec).map_err(|_| short(rec, line))?;
                 HeapHdrStats {
                     class_oid: h.common.class_oid.get(),
@@ -339,7 +339,7 @@ impl HeapHdrStats {
         assert_eq!(rec.len(), Self::size(line), "HEAP_HDR_STATS buffer size");
         rec.fill(0);
         match (&self.line, line) {
-            (LineFields::V11_4(e), VersionLine::V11_4) => {
+            (LineFields::V11_4(e), VersionLine::V10_2 | VersionLine::V11_4) => {
                 let h = HeapHdrStats114Le::mut_from_bytes(rec).expect("size checked above");
                 h.common.class_oid.set(self.class_oid);
                 h.common.ovf_vfid.set(self.ovf_vfid);

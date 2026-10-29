@@ -30,7 +30,7 @@ impl ClsInfo {
         let time_stamp = r.i32()?;
         let rep_dir = read_oid(&mut r)?;
         let tot_objs = match line {
-            VersionLine::V11_4 => objs32 as i64,
+            VersionLine::V10_2 | VersionLine::V11_4 => objs32 as i64,
             VersionLine::Develop => r.i64()?,
         };
         Ok(ClsInfo {

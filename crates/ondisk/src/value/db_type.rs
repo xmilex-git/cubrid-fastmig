@@ -83,8 +83,8 @@ impl DbType {
             23 => Bit,
             24 => Varbit,
             25 => Char,
-            26 if version == VersionLine::V11_4 => Nchar,
-            27 if version == VersionLine::V11_4 => Varnchar,
+            26 if matches!(version, VersionLine::V10_2 | VersionLine::V11_4) => Nchar,
+            27 if matches!(version, VersionLine::V10_2 | VersionLine::V11_4) => Varnchar,
             28 => Resultset,
             29 => Midxkey,
             30 => Table,
@@ -134,7 +134,7 @@ impl DbType {
             Bigint | Double | Datetime | Datetimeltz | Timestamptz | Object | Oid => 8,
             Datetimetz | Monetary => 12,
             // 11.4 `OR_NUMERIC_SIZE` = `DB_NUMERIC_BUF_SIZE` 16 B; develop NUMERIC is variable (CBRD-26006 #6486).
-            Numeric if version == VersionLine::V11_4 => 16,
+            Numeric if matches!(version, VersionLine::V10_2 | VersionLine::V11_4) => 16,
             _ => return None,
         })
     }

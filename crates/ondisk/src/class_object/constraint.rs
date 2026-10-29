@@ -201,7 +201,7 @@ fn constraint(
     };
     let e: Vec<&Value> = s.elements.iter().map(|e| &e.value).collect();
     let tail = match line {
-        VersionLine::V11_4 => 2,
+        VersionLine::V10_2 | VersionLine::V11_4 => 2,
         VersionLine::Develop => 4,
     };
     if e.len() < 1 + tail {
@@ -214,7 +214,9 @@ fn constraint(
     };
     // an 11.3/11.4 DEDUPLICATE index lists its hidden key like an attribute; the target has none (workspace#537)
     let stripped = match line {
-        VersionLine::V11_4 => super::without_deduplicate_key(kind, &s.elements[1..e.len() - tail]),
+        VersionLine::V10_2 | VersionLine::V11_4 => {
+            super::without_deduplicate_key(kind, &s.elements[1..e.len() - tail])
+        }
         VersionLine::Develop => s.elements[1..e.len() - tail].to_vec(),
     };
     let body: Vec<&Value> = stripped.iter().map(|e| &e.value).collect();

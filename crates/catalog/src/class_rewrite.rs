@@ -26,7 +26,6 @@ use fastmig_ondisk::{Btid, Oid, VersionLine};
 
 use crate::classify::ClassPlan;
 
-const FROM: VersionLine = VersionLine::V11_4;
 const TO: VersionLine = VersionLine::Develop;
 /// 11.4 `DB_MAX_VARNCHAR_PRECISION` and `DB_MAX_VARCHAR_PRECISION`.
 const MAX_VARNCHAR_PRECISION: i32 = 0x3fff_ffff / 2;
@@ -34,6 +33,8 @@ const MAX_VARCHAR_PRECISION: i32 = 0x3fff_ffff;
 
 /// What the rewrite needs from the rest of the migration.
 pub struct RewriteInputs<'a> {
+    /// The source line class objects and packed values were written by (10.2 or 11.4).
+    pub from: VersionLine,
     /// The class's new representation directory record.
     pub rep_dir: Oid,
     /// New BTID of a rebuilt index, by its old BTID; `None` writes the NULL BTID (dry run).
@@ -78,17 +79,17 @@ fn map_type_id(t: i32) -> i32 {
 }
 
 /// A packed default (`or_put_value` with its domain) in develop encoding; empty stays empty.
-fn map_packed_value(packed: &[u8]) -> DecodeResult<Vec<u8>> {
+fn map_packed_value(from: VersionLine, packed: &[u8]) -> DecodeResult<Vec<u8>> {
     if packed.is_empty() {
         return Ok(Vec::new());
     }
-    let (tag, v) = decode_tagged(FROM, &mut OrReader::new(packed), Some(packed.len()))?;
+    let (tag, v) = decode_tagged(from, &mut OrReader::new(packed), Some(packed.len()))?;
     let mut w = OrWriter::new();
     encode_tagged(TO, &mut w, &domain_to_develop(&tag), &value_to_develop(&v));
     Ok(w.buf)
 }
 
-fn map_attribute(a: &Attribute) -> DecodeResult<Attribute> {
+fn map_attribute(from: VersionLine, a: &Attribute) -> DecodeResult<Attribute> {
     let mut o = a.clone();
     o.type_id = map_type_id(a.type_id);
     o.domain = a.domain.iter().map(map_domain).collect();
@@ -99,8 +100,8 @@ fn map_attribute(a: &Attribute) -> DecodeResult<Attribute> {
             e.what
         ))
     };
-    o.default_value = map_packed_value(&a.default_value).map_err(ctx)?;
-    o.original_value = map_packed_value(&a.original_value).map_err(ctx)?;
+    o.default_value = map_packed_value(from, &a.default_value).map_err(ctx)?;
+    o.original_value = map_packed_value(from, &a.original_value).map_err(ctx)?;
     Ok(o)
 }
 
@@ -199,6 +200,7 @@ fn map_constraint_info(
 
 /// The class's property sequence in develop form, without the deferred indexes.
 fn map_properties(
+    from: VersionLine,
     packed: &[u8],
     props: &ClassProperties,
     attr_ids: &[i32],
@@ -207,7 +209,7 @@ fn map_properties(
     if packed.is_empty() {
         return Ok(Vec::new());
     }
-    let set = decode_set(FROM, &mut OrReader::new(packed), None)?;
+    let set = decode_set(from, &mut OrReader::new(packed), None)?;
     let deferred = |name: &[u8]| {
         props
             .constraints
@@ -276,11 +278,11 @@ fn map_properties(
 
 /// Partition values: bounds re-encoded; the master's expression stream (element 2) transcoded and put in a
 /// VARCHAR container.
-fn map_pvalues(packed: &[u8], master: bool) -> DecodeResult<Vec<u8>> {
+fn map_pvalues(from: VersionLine, packed: &[u8], master: bool) -> DecodeResult<Vec<u8>> {
     if packed.is_empty() {
         return Ok(Vec::new());
     }
-    let (tag, v) = decode_tagged(FROM, &mut OrReader::new(packed), Some(packed.len()))?;
+    let (tag, v) = decode_tagged(from, &mut OrReader::new(packed), Some(packed.len()))?;
     let mut v = value_to_develop(&v);
     if master
         && let Value::Set(s) = &mut v
@@ -300,7 +302,7 @@ fn map_pvalues(packed: &[u8], master: bool) -> DecodeResult<Vec<u8>> {
             .ok_or_else(|| err("partition stream shorter than its header"))?;
         s.elements[2] = SetElement {
             tag: Some(Domain::builtin(TO, DbType::Varchar)),
-            value: Value::Varchar(transcode_partition_stream(FROM, TO, stream)?),
+            value: Value::Varchar(transcode_partition_stream(from, TO, stream)?),
         };
     }
     let mut w = OrWriter::new();
@@ -321,42 +323,43 @@ pub fn deferred_indexes(class: Oid, props: &ClassProperties) -> Vec<DeferredInde
         .collect()
 }
 
-/// The develop class object of an 11.4 user class.
+/// The develop class object of a 10.2 or 11.4 user class.
 pub fn rewrite_user_class(
     src: &crate::source_classes::SourceClass,
     plan: &ClassPlan,
     inputs: &RewriteInputs,
 ) -> DecodeResult<ClassObject> {
+    let from = inputs.from;
     let c = &src.class;
     let mut o = c.clone();
     o.rep_dir = inputs.rep_dir;
     o.attributes = c
         .attributes
         .iter()
-        .map(map_attribute)
+        .map(|a| map_attribute(inputs.from, a))
         .collect::<DecodeResult<_>>()?;
     o.shared_attributes = c
         .shared_attributes
         .iter()
-        .map(map_attribute)
+        .map(|a| map_attribute(inputs.from, a))
         .collect::<DecodeResult<_>>()?;
     o.class_attributes = c
         .class_attributes
         .iter()
-        .map(map_attribute)
+        .map(|a| map_attribute(inputs.from, a))
         .collect::<DecodeResult<_>>()?;
     // a view has no records, but its fixed/variable split still follows develop's types
     let is_view = c.class_type == ClassType::Vclass;
     let view_changes = is_view
         && c.attributes.iter().any(|a| {
             a.domain.iter().any(|d| {
-                d.to_value_domain(FROM)
+                d.to_value_domain(from)
                     .is_some_and(|d| changes_in_develop(&d))
             })
         });
     if plan.re_encoded || view_changes {
         // records are rewritten in the current representation, laid out as develop orders it
-        let layout = RecordLayout::for_repid(FROM, c, c.repid as u32)?.to_develop();
+        let layout = RecordLayout::for_repid(from, c, c.repid as u32)?.to_develop();
         let mut ordered = Vec::with_capacity(o.attributes.len());
         for la in &layout.attrs {
             let a = o
@@ -379,12 +382,18 @@ pub fn rewrite_user_class(
             }
         }
     }
-    let props = class_properties(&c.properties, FROM)?;
+    let props = class_properties(&c.properties, from)?;
     let attr_ids: Vec<i32> = c.attributes.iter().map(|a| a.id).collect();
-    o.properties = map_properties(&c.properties, &props, &attr_ids, inputs.new_btid)?;
+    o.properties = map_properties(
+        inputs.from,
+        &c.properties,
+        &props,
+        &attr_ids,
+        inputs.new_btid,
+    )?;
     for p in &mut o.partitions {
         p.class_partition_type = Some(if p.pname.is_none() { 1 } else { 2 });
-        p.pvalues = map_pvalues(&p.pvalues, p.pname.is_none())?;
+        p.pvalues = map_pvalues(inputs.from, &p.pvalues, p.pname.is_none())?;
     }
     Ok(o)
 }

@@ -8,7 +8,7 @@
 //! @5b1867174. Checked on T1 pages (workspace#492).
 
 use crate::Oid;
-use crate::value::{DecodeError, DecodeResult, OrReader, read_string};
+use crate::value::{DecodeError, DecodeResult, OrReader, StringCompression, read_string};
 
 /// Prefixes a decode error with the field it happened in, outermost last added.
 pub(crate) fn within<T>(r: DecodeResult<T>, field: &str) -> DecodeResult<T> {
@@ -27,11 +27,11 @@ pub(crate) fn read_oid(r: &mut OrReader) -> DecodeResult<Oid> {
 }
 
 /// A string variable field: `None` when the field is empty (NULL string).
-pub(crate) fn opt_string(field: &[u8]) -> DecodeResult<Option<Vec<u8>>> {
+pub(crate) fn opt_string(field: &[u8], c: StringCompression) -> DecodeResult<Option<Vec<u8>>> {
     if field.is_empty() {
         return Ok(None);
     }
-    read_string(&mut OrReader::new(field)).map(Some)
+    read_string(&mut OrReader::new(field), c).map(Some)
 }
 
 /// One structure seen through its variable offset table.

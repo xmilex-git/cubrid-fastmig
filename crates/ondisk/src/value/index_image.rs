@@ -35,7 +35,7 @@ use crate::value::numeric::{
     Numeric, read_numeric_11_4, read_numeric_develop, write_numeric_11_4, write_numeric_develop,
 };
 use crate::value::or_buf::{DecodeError, DecodeResult, OrReader, OrWriter};
-use crate::value::string::{MIN_LENGTH_FOR_COMPRESSION, str_size};
+use crate::value::string::{MIN_LENGTH_FOR_COMPRESSION, StringCompression, str_size};
 
 /// Built-in collations whose order this module implements (engine `LANG_COLL_*` ids, the same in 11.4 and
 /// develop, `src/base/language_support.h:107-116`). LDML locale collations (ids from 32) are not implemented:
@@ -322,7 +322,7 @@ fn string_header(b: &[u8]) -> DecodeResult<StringHeader> {
     })
 }
 
-fn string_bytes(b: &[u8]) -> DecodeResult<Cow<'_, [u8]>> {
+fn string_bytes(b: &[u8], c: StringCompression) -> DecodeResult<Cow<'_, [u8]>> {
     let StringHeader {
         header_len: h,
         stored,
@@ -333,9 +333,7 @@ fn string_bytes(b: &[u8]) -> DecodeResult<Cow<'_, [u8]>> {
         .get(h..h + stored)
         .ok_or_else(|| err(h, "string image past its buffer".into()))?;
     if clen > 0 {
-        let mut out = vec![0u8; len];
-        lz4_flex::block::decompress_into(data, &mut out)
-            .map_err(|e| err(h, format!("LZ4: {e}")))?;
+        let out = c.decompress(data, len).map_err(|what| err(h, what))?;
         Ok(Cow::Owned(out))
     } else {
         Ok(Cow::Borrowed(data))
@@ -344,7 +342,8 @@ fn string_bytes(b: &[u8]) -> DecodeResult<Cow<'_, [u8]>> {
 
 /// Whether the domain's string image is the 11.4 fixed CHAR field.
 fn fixed_char_11_4(version: VersionLine, d: &Domain) -> bool {
-    version == VersionLine::V11_4 && matches!(d.ty, DbType::Char | DbType::Nchar)
+    matches!(version, VersionLine::V10_2 | VersionLine::V11_4)
+        && matches!(d.ty, DbType::Char | DbType::Nchar)
 }
 
 /// Bytes the image of one value of domain `d` takes at the start of `b` (engine `mr_index_lengthmem_*`).
@@ -440,7 +439,9 @@ pub fn decode_image(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<
         }
         T::Enumeration => Value::Enumeration(try_get_u16(b, 0)?),
         T::Numeric => Value::Numeric(match version {
-            VersionLine::V11_4 => read_numeric_11_4(&mut OrReader::new(b), d.precision, d.scale)?,
+            VersionLine::V10_2 | VersionLine::V11_4 => {
+                read_numeric_11_4(&mut OrReader::new(b), d.precision, d.scale)?
+            }
             VersionLine::Develop => read_numeric_develop(&mut OrReader::new(b), d.precision)?,
         }),
         T::Char | T::Nchar if fixed_char_11_4(version, d) => {
@@ -459,9 +460,11 @@ pub fn decode_image(version: VersionLine, d: &Domain, b: &[u8]) -> DecodeResult<
                 Value::Char(s)
             }
         }
-        T::Char => Value::Char(string_bytes(b)?.into_owned()),
-        T::Varchar => Value::Varchar(string_bytes(b)?.into_owned()),
-        T::Varnchar => Value::Varnchar(string_bytes(b)?.into_owned()),
+        T::Char => Value::Char(string_bytes(b, StringCompression::of(version))?.into_owned()),
+        T::Varchar => Value::Varchar(string_bytes(b, StringCompression::of(version))?.into_owned()),
+        T::Varnchar => {
+            Value::Varnchar(string_bytes(b, StringCompression::of(version))?.into_owned())
+        }
         T::Bit => {
             if d.precision == FLOATING_PRECISION {
                 Value::Bit {
@@ -530,7 +533,7 @@ pub fn encode_image(version: VersionLine, d: &Domain, v: &Value, out: &mut Vec<u
         (T::Numeric, Value::Numeric(n)) => {
             let mut w = OrWriter::new();
             match version {
-                VersionLine::V11_4 => write_numeric_11_4(&mut w, n),
+                VersionLine::V10_2 | VersionLine::V11_4 => write_numeric_11_4(&mut w, n),
                 VersionLine::Develop => write_numeric_develop(&mut w, n),
             }
             out.extend_from_slice(&w.buf);

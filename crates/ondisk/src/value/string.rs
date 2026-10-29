@@ -6,7 +6,9 @@
 //! (develop @5b1867174 :14650-14980, :10926, :12136); 11.4 fixed CHAR `mr_readval_char_internal`
 //! (release/11.4 @46212adcd) and `intl_char_size` (`src/base/intl_support.c`); R2 § 2.1, § 2.3.
 
-use crate::value::or_buf::{DecodeResult, OrReader, OrWriter};
+use crate::VersionLine;
+use crate::value::lzo1x;
+use crate::value::or_buf::{DecodeError, DecodeResult, OrReader, OrWriter};
 
 /// Engine `OR_MINIMUM_STRING_LENGTH_FOR_COMPRESSION`: strings at least this long use the 0xFF header.
 pub const MIN_LENGTH_FOR_COMPRESSION: usize = 255;
@@ -71,10 +73,44 @@ pub fn char_prefix_len(s: &[u8], chars: usize, cs: u8) -> usize {
     pos.min(s.len())
 }
 
+/// The block format of a compressed string's payload: LZO1X in 10.2, LZ4 from 11.0 (CBRD-23703 ecaa13201; R8 § 2.8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StringCompression {
+    Lzo1x,
+    Lz4,
+}
+
+impl StringCompression {
+    /// The format a line's writer used; this tool writes LZ4 for every target (workspace#520).
+    pub fn of(line: VersionLine) -> Self {
+        match line {
+            VersionLine::V10_2 => StringCompression::Lzo1x,
+            VersionLine::V11_4 | VersionLine::Develop => StringCompression::Lz4,
+        }
+    }
+
+    /// Decompresses `block` to exactly `len` bytes; the error names the format and the offset into the block.
+    pub fn decompress(self, block: &[u8], len: usize) -> Result<Vec<u8>, String> {
+        match self {
+            StringCompression::Lz4 => {
+                let mut out = vec![0u8; len];
+                let n = lz4_flex::block::decompress_into(block, &mut out)
+                    .map_err(|e| format!("LZ4: {e}"))?;
+                if n != len {
+                    return Err(format!("LZ4 gave {n} bytes, header says {len}"));
+                }
+                Ok(out)
+            }
+            StringCompression::Lzo1x => lzo1x::decompress(block, len)
+                .map_err(|e| format!("LZO1X at block byte {}: {}", e.at, e.what)),
+        }
+    }
+}
+
 /// Reads one VARCHAR-format string (engine `mr_readval_string_internal` with `INT_ALIGNMENT`):
-/// `[len:u8][bytes][0x00]` or `[0xFF][compressed_len:BE i32][len:BE i32][LZ4 or raw][0x00]`, then 4-byte alignment.
-/// The cursor ends after the padding. Returns the decompressed bytes.
-pub fn read_string(r: &mut OrReader) -> DecodeResult<Vec<u8>> {
+/// `[len:u8][bytes][0x00]` or `[0xFF][compressed_len:BE i32][len:BE i32][LZ4/LZO1X or raw][0x00]`, then 4-byte
+/// alignment. The cursor ends after the padding. Returns the decompressed bytes.
+pub fn read_string(r: &mut OrReader, compression: StringCompression) -> DecodeResult<Vec<u8>> {
     let first = r.u8()?;
     let out = if first < 0xFF {
         r.bytes(first as usize)?.to_vec()
@@ -85,14 +121,11 @@ pub fn read_string(r: &mut OrReader) -> DecodeResult<Vec<u8>> {
             return Err(r.error(format!("bad string lengths {clen}/{len}")));
         }
         if clen > 0 {
+            let at = r.pos();
             let src = r.bytes(clen as usize)?;
-            let mut dst = vec![0u8; len as usize];
-            let n = lz4_flex::block::decompress_into(src, &mut dst)
-                .map_err(|e| r.error(format!("LZ4: {e}")))?;
-            if n != len as usize {
-                return Err(r.error(format!("LZ4 gave {n} bytes, header says {len}")));
-            }
-            dst
+            compression
+                .decompress(src, len as usize)
+                .map_err(|what| DecodeError { at, what })?
         } else {
             r.bytes(len as usize)?.to_vec()
         }
@@ -106,10 +139,14 @@ pub fn read_string(r: &mut OrReader) -> DecodeResult<Vec<u8>> {
 /// Convenience for callers holding a whole buffer: the string at `off` and the bytes it used (padding included).
 /// Alignment is counted from the start of `buf`, so `buf` must start where the engine's buffer was 4-byte aligned
 /// (a record or packed value start).
-pub fn read_varchar(buf: &[u8], off: usize) -> DecodeResult<(Vec<u8>, usize)> {
+pub fn read_varchar(
+    buf: &[u8],
+    off: usize,
+    compression: StringCompression,
+) -> DecodeResult<(Vec<u8>, usize)> {
     let mut r = OrReader::new(buf);
     r.skip(off)?;
-    let s = read_string(&mut r)?;
+    let s = read_string(&mut r, compression)?;
     Ok((s, r.pos() - off))
 }
 

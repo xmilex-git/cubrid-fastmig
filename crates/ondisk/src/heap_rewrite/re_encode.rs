@@ -1,7 +1,7 @@
-//! Re-encodes one record of a re-encoded class: decoded under the 11.4 representation it was written with, written
+//! Re-encodes one record of a re-encoded class: decoded under the 10.2/11.4 representation it was written with, written
 //! in develop's encoding under the class's current representation, with a header free of vacuum residue.
 //!
-//! Input: the 11.4 class object (current attributes and older representations) and whether the class is MVCC; then
+//! Input: the 10.2/11.4 class object (current attributes and older representations) and whether the class is MVCC; then
 //! one record at a time. Output: the develop record bytes.
 //! Source: workspace#482 decision 4 (every record goes to the current repid, repid number kept), R2 § 3 R7.2-R7.3
 //! (header after cleanup: 8 B, MVCC flags 0, CHN kept); `RecordLayout::to_develop` (the attribute order the class
@@ -40,6 +40,8 @@ pub fn mvcc_disabled_class(name: &[u8]) -> bool {
 }
 
 pub struct ClassReEncoder {
+    /// The source line records are decoded with.
+    line: VersionLine,
     source: HashMap<u32, RecordLayout>,
     target: RecordLayout,
     /// Original default value of each current attribute (`Value::Null` when it has none), develop form.
@@ -50,9 +52,8 @@ pub struct ClassReEncoder {
 }
 
 impl ClassReEncoder {
-    /// Prepares the layouts of every representation of `class` (an 11.4 class object).
-    pub fn new(class: &ClassObject, mvcc: bool) -> DecodeResult<ClassReEncoder> {
-        let line = VersionLine::V11_4;
+    /// Prepares the layouts of every representation of `class`, a class object of source line `line` (10.2 or 11.4).
+    pub fn new(class: &ClassObject, line: VersionLine, mvcc: bool) -> DecodeResult<ClassReEncoder> {
         let current = RecordLayout::for_repid(line, class, class.repid as u32)?;
         let mut source = HashMap::new();
         for r in &class.representations {
@@ -74,6 +75,7 @@ impl ClassReEncoder {
         let target = current.to_develop();
         source.insert(current.repid, current);
         Ok(ClassReEncoder {
+            line,
             source,
             target,
             defaults,
@@ -119,7 +121,7 @@ impl ReEncode for ClassReEncoder {
                 h.repid
             ),
         })?;
-        let d = decode_record(VersionLine::V11_4, layout, rec)?;
+        let d = decode_record(self.line, layout, rec)?;
         let by_id: HashMap<i32, &Value> =
             layout.attrs.iter().map(|a| a.id).zip(&d.values).collect();
         let values: Vec<Value> = self

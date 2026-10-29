@@ -8,6 +8,9 @@
 /// A release line with a known on-disk layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VersionLine {
+    /// release/10.2 (10.2.x): the 11.4 codecs except LZO1X string payloads, an 84 B class object fixed area and the
+    /// 10.2 stream enums (R8 § 2.8, § 2.9, § 2.12). A source line only, never a target (workspace#520).
+    V10_2,
     /// release/11.4 (11.4.x).
     V11_4,
     /// develop (11.5.0).
@@ -18,6 +21,7 @@ impl VersionLine {
     /// Log header `db_compatibility`.
     pub fn db_compatibility(self) -> f32 {
         match self {
+            VersionLine::V10_2 => 10.15,
             VersionLine::V11_4 => 11.4,
             VersionLine::Develop => 11.5,
         }
@@ -26,6 +30,7 @@ impl VersionLine {
     /// Log header `db_release` this tool writes for a target of this line. 11.4: the T1 baseline install (11.4.6).
     pub fn db_release(self) -> &'static str {
         match self {
+            VersionLine::V10_2 => "10.2.18",
             VersionLine::V11_4 => "11.4.6",
             VersionLine::Develop => "11.5.0",
         }
@@ -35,7 +40,7 @@ impl VersionLine {
     /// `SYSTEM_METADATA_VERSION` or boot refuses (`ER_SYSMETA_UPGRADE_REQUIRED`, boot_sr.c:2608).
     pub fn sysmeta_version(self) -> u16 {
         match self {
-            VersionLine::V11_4 => 0,
+            VersionLine::V10_2 | VersionLine::V11_4 => 0,
             VersionLine::Develop => 1,
         }
     }
@@ -43,7 +48,7 @@ impl VersionLine {
     /// Engine `FILE_HEADER_ALIGNED_SIZE`: 216 B in 11.4, 200 B in develop (CBRD-27308, CUBRID/cubrid#7792).
     pub fn file_header_size(self) -> usize {
         match self {
-            VersionLine::V11_4 => 216,
+            VersionLine::V10_2 | VersionLine::V11_4 => 216,
             VersionLine::Develop => 200,
         }
     }

@@ -15,7 +15,6 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::{
     ClassReEncoder, HeapJob, HeapReport, VacuumHorizon, rewrite_heap,
@@ -79,7 +78,7 @@ fn treat_one(
     // user classes are MVCC classes
     let re_encoder = plan
         .re_encoded
-        .then(|| ClassReEncoder::new(&c.class, true))
+        .then(|| ClassReEncoder::new(&c.class, source.line, true))
         .transpose()
         // LOB locators move to develop's per-attribute directories (workspace#507)
         .map(|r| {
@@ -96,7 +95,7 @@ fn treat_one(
         horizon,
         &HeapJob {
             hfid: c.class.heap,
-            source_line: VersionLine::V11_4,
+            source_line: source.line,
             re_encode: re_encoder.as_ref().map(|r| r as _),
             root: false,
             pages_walked: Some(&|n| meter.add(n)),

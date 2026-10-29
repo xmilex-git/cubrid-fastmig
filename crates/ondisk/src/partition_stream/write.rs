@@ -131,7 +131,7 @@ impl<'a> Writer<'a> {
     /// develop's extra word (REGU `converts`, ARITH `fails`, CBRD-27583); none in 11.4.
     fn develop_word(&self) -> usize {
         match self.line {
-            VersionLine::V11_4 => 0,
+            VersionLine::V10_2 | VersionLine::V11_4 => 0,
             VersionLine::Develop => INT,
         }
     }
@@ -238,8 +238,10 @@ impl<'a> Writer<'a> {
                         encode_packed_domain(self.line, w, d, false, false);
                         w.i32(*mode);
                     }
-                    (VersionLine::V11_4, None) => {}
-                    (VersionLine::V11_4, Some(_)) => panic!("11.4 has no REGU conversion"),
+                    (VersionLine::V10_2 | VersionLine::V11_4, None) => {}
+                    (VersionLine::V10_2 | VersionLine::V11_4, Some(_)) => {
+                        panic!("10.2 and 11.4 have no REGU conversion")
+                    }
                 }
                 w.i32(*ty);
                 w.i32(*flags);
@@ -271,7 +273,9 @@ impl<'a> Writer<'a> {
                 w.i32(*misc_operand);
                 match self.line {
                     VersionLine::Develop => w.i32(*fails),
-                    VersionLine::V11_4 => assert_eq!(*fails, 0, "11.4 has no ARITH fails"),
+                    VersionLine::V10_2 | VersionLine::V11_4 => {
+                        assert_eq!(*fails, 0, "10.2 and 11.4 have no ARITH fails")
+                    }
                 }
                 if let Some(p) = pred {
                     let o = self.save(*p);

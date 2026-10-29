@@ -49,8 +49,10 @@ const DEVELOP_SYSTEM_NAMES: &[&str] = &[
     "dual",
 ];
 const TICKET: &str = "workspace#518";
-/// Values below the 255 B compression threshold read as 11.4 (R8 § 2.8).
-const LINE: VersionLine = VersionLine::V11_4;
+/// The codec line of a source before user schema: 11.0 writes the 11.4 class objects and LZ4 strings (R8 § 2.8, § 2.9).
+fn line_of(version: SourceVersion) -> VersionLine {
+    version.line().unwrap_or(VersionLine::V11_4)
+}
 
 fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
@@ -63,6 +65,7 @@ fn show(s: &[u8]) -> String {
 /// The live rows of system table `table`, with only the attributes in `attrs` decoded, by attribute name.
 fn rows(
     vs: &VolumeSet,
+    line: VersionLine,
     classes: &[(Oid, ClassObject)],
     table: SystemTable,
     attrs: &[&str],
@@ -89,9 +92,9 @@ fn rows(
         if h.is_deleted() {
             continue;
         }
-        let layout = RecordLayout::for_repid(LINE, c, h.repid)
+        let layout = RecordLayout::for_repid(line, c, h.repid)
             .map_err(|e| invalid(format!("{name} repid {}: {e}", h.repid)))?;
-        let d = decode_record_attrs(LINE, &layout, &r.bytes, |id| ids.contains_key(&id))
+        let d = decode_record_attrs(line, &layout, &r.bytes, |id| ids.contains_key(&id))
             .map_err(|e| invalid(format!("{name} {:?}: {e}", r.oid)))?;
         let values = layout
             .attrs
@@ -123,6 +126,7 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
     if !matches!(version, SourceVersion::V10_2 | SourceVersion::V11_0) {
         return Ok(Vec::new());
     }
+    let line = line_of(version);
     let (_, boot) = BootDbParm::read(vs)?;
     let mut heads = Vec::new();
     let mut system = Vec::new();
@@ -131,7 +135,7 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
         if r.oid == boot.rootclass_oid {
             continue;
         }
-        let head = class_object::decode_head(&r.bytes, LINE)
+        let head = class_object::decode_head(&r.bytes, line)
             .map_err(|e| invalid(format!("class object {:?}: {e}", r.oid)))?;
         if [
             SystemTable::DbUser,
@@ -142,17 +146,13 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
         .iter()
         .any(|t| t.source_name().map(str::as_bytes) == Some(head.name.as_slice()))
         {
-            // 11.0 has the 11.4 class object layout (R8 § 2.9)
-            let full = match version {
-                SourceVersion::V10_2 => class_object::decode_10_2(&r.bytes),
-                _ => class_object::decode(&r.bytes, LINE),
-            }
-            .map_err(|e| invalid(format!("class {}: {e}", show(&head.name))))?;
+            let full = class_object::decode(&r.bytes, line)
+                .map_err(|e| invalid(format!("class {}: {e}", show(&head.name))))?;
             system.push((r.oid, full));
         }
         heads.push(head);
     }
-    let users = rows(vs, &system, SystemTable::DbUser, &["name"])?;
+    let users = rows(vs, line, &system, SystemTable::DbUser, &["name"])?;
     let user_name: HashMap<Oid, Vec<u8>> = users
         .iter()
         .map(|(o, v)| (*o, user::name(v).unwrap_or_default().to_vec()))
@@ -183,10 +183,10 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
     for c in user_classes() {
         name_rules("class", &c.name);
     }
-    for (_, s) in rows(vs, &system, SystemTable::DbSerial, &["name"])? {
+    for (_, s) in rows(vs, line, &system, SystemTable::DbSerial, &["name"])? {
         name_rules("serial", serial::name(&s).unwrap_or_default());
     }
-    for (_, t) in rows(vs, &system, SystemTable::DbTrigger, &["name"])? {
+    for (_, t) in rows(vs, line, &system, SystemTable::DbTrigger, &["name"])? {
         name_rules("trigger", trigger::name(&t).unwrap_or_default());
     }
     for (_, u) in &users {
@@ -223,6 +223,7 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
     }
     for (_, p) in rows(
         vs,
+        line,
         &system,
         SystemTable::DbStoredProcedure,
         &["sp_name", "owner"],
