@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use fastmig_catalog::sp_target_signature::split_target_signature;
+use crate::unload_rules_before_11_4 as before_11_4;
 use fastmig_ondisk::{SourceVersion, VersionLine};
 
 /// Which side's entries a rule rewrites.
@@ -32,14 +32,13 @@ pub enum Rewrite {
     ClassIdNames,
     /// `|file:<digits>/ces_` → `|file:ces_`: drop a numeric directory in front of an LOB locator's `ces_` part.
     LobClassDir,
-    /// A pre-11.4 `call [change_sp_owner]('<name>', '<OWNER>') on class [db_root];` is folded into its
-    /// `CREATE FUNCTION|PROCEDURE [<name>]` entry as develop prints it: `[<owner>].[<name>]`, `AUTHID OWNER` before
-    /// `AS LANGUAGE`, and the NAME split and joined as `target_class.target_method`. The call entry is emptied.
+    /// The pre-11.4 print forms, one per function of [`crate::unload_rules_before_11_4`].
     SpOwnerAuthid,
-    /// 11.2's serial print: lower-case clause lines become develop's (`noCYCLE` as develop writes it), `create serial
-    /// [<name>]` with its `call [change_serial_owner] ('<name>', '<OWNER>')` becomes `CREATE SERIAL [<owner>].[<name>]`,
-    /// and the `call [find_user]` lines develop does not print are emptied.
+    IndexExpression,
+    SynonymOwnerCase,
     Serial11_2,
+    TriggerOwner11_2,
+    AutoIncrement11_2,
     /// Drop ` WITH DEDUPLICATE=<level>`, any level.
     DeduplicateLevel,
 }
@@ -69,15 +68,47 @@ pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
     }
 }
 
-// 11.2 and 11.3 print stored procedures the pre-11.4 way; 11.2 also prints serials its own way (smoke DBs, workspace#529)
+// 11.2 and 11.3 print stored procedures, function/filter index text and synonym owners their own way; 11.2 also its
+// serials, auto_increment state and trigger owners (T4 baselines -> develop, workspace#529; `unload_rules_before_11_4`)
 const PRE_11_4_TO_DEVELOP: &[Rule] = &[
-    // CBRD-25184 (1ea4a86e0, CUBRID/cubrid#5438): 11.4+ prints a procedure owner-qualified with its AUTHID and the
-    // NAME split into target_class.target_method; before, an unqualified name and a separate change_sp_owner call
     Rule {
         name: "sp-owner-authid",
         files: &["schema"],
         side: Side::Source,
         rewrite: Rewrite::SpOwnerAuthid,
+    },
+    Rule {
+        name: "index-expression",
+        files: &["indexes"],
+        side: Side::Both,
+        rewrite: Rewrite::IndexExpression,
+    },
+    Rule {
+        name: "synonym-owner-case",
+        files: &["schema"],
+        side: Side::Source,
+        rewrite: Rewrite::SynonymOwnerCase,
+    },
+];
+
+const V11_2_TO_DEVELOP: &[Rule] = &[
+    Rule {
+        name: "serial-11-2",
+        files: &["schema"],
+        side: Side::Source,
+        rewrite: Rewrite::Serial11_2,
+    },
+    Rule {
+        name: "trigger-owner-11-2",
+        files: &["trigger"],
+        side: Side::Source,
+        rewrite: Rewrite::TriggerOwner11_2,
+    },
+    Rule {
+        name: "auto-increment-11-2",
+        files: &["schema"],
+        side: Side::Target,
+        rewrite: Rewrite::AutoIncrement11_2,
     },
 ];
 
@@ -157,8 +188,12 @@ pub fn normalize(
                 Rewrite::NcharLiteral => entries.iter_mut().filter_map(drop_nchar_prefix).count(),
                 Rewrite::ClassIdNames => class_id_names(entries),
                 Rewrite::LobClassDir => entries.iter_mut().filter_map(drop_lob_class_dir).count(),
-                Rewrite::SpOwnerAuthid => sp_owner_authid(entries),
-                Rewrite::Serial11_2 => serial_11_2(entries),
+                Rewrite::SpOwnerAuthid => before_11_4::sp_owner_authid(entries),
+                Rewrite::IndexExpression => before_11_4::index_expression(entries),
+                Rewrite::SynonymOwnerCase => before_11_4::synonym_owner_case(entries),
+                Rewrite::Serial11_2 => before_11_4::serial_11_2(entries),
+                Rewrite::TriggerOwner11_2 => before_11_4::trigger_owner_11_2(entries),
+                Rewrite::AutoIncrement11_2 => before_11_4::auto_increment_11_2(entries),
                 Rewrite::DeduplicateLevel => entries
                     .iter_mut()
                     .filter_map(drop_deduplicate_level)
@@ -290,127 +325,6 @@ fn drop_lob_class_dir(e: &mut Vec<u8>) -> Option<()> {
         e.drain(from..to);
     }
     Some(())
-}
-
-/// The byte string between `open` and the next `close` after it, and where it ends.
-fn between<'a>(e: &'a [u8], from: usize, open: &[u8], close: u8) -> Option<(&'a [u8], usize)> {
-    let start = from + e[from..].windows(open.len()).position(|w| w == open)? + open.len();
-    let len = e[start..].iter().position(|&b| b == close)?;
-    Some((&e[start..start + len], start + len))
-}
-
-/// See [`Rewrite::SpOwnerAuthid`]; returns how many entries changed (calls emptied and procedures rewritten).
-fn sp_owner_authid(entries: &mut [Vec<u8>]) -> usize {
-    const CALL: &[u8] = b"call [change_sp_owner]('";
-    let mut owner: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-    let mut changed = 0;
-    for e in entries.iter_mut().filter(|e| e.starts_with(CALL)) {
-        let Some((name, end)) = between(e, 0, b"('", b'\'') else {
-            continue;
-        };
-        let Some((user, _)) = between(e, end, b", '", b'\'') else {
-            continue;
-        };
-        owner.insert(name.to_vec(), user.to_ascii_lowercase());
-        e.clear();
-        changed += 1;
-    }
-    for e in entries.iter_mut() {
-        let Some(rest) = e
-            .strip_prefix(b"CREATE FUNCTION [")
-            .or_else(|| e.strip_prefix(b"CREATE PROCEDURE ["))
-        else {
-            continue;
-        };
-        let Some(name_len) = rest.iter().position(|&b| b == b']') else {
-            continue;
-        };
-        let Some(user) = owner.get(&rest[..name_len]) else {
-            continue;
-        };
-        let at = e.len() - rest.len();
-        let mut out = [&e[..at], user.as_slice(), b"].[", &e[at..]].concat();
-        if replace(&mut out, b" AS LANGUAGE ", b" AUTHID OWNER AS LANGUAGE ").is_none() {
-            continue;
-        }
-        if let Some((target, end)) = between(&out, 0, b" NAME '", b'\'')
-            && let Some((class, method)) = split_target_signature(target)
-        {
-            let start = end - target.len();
-            out = [
-                &out[..start],
-                class.as_slice(),
-                b".",
-                method.as_slice(),
-                &out[end..],
-            ]
-            .concat();
-        }
-        *e = out;
-        changed += 1;
-    }
-    changed
-}
-
-const V11_2_TO_DEVELOP: &[Rule] = &[
-    // the serial print of release/11.2 (unload_schema.c), seen on an 11.2.9 smoke DB (workspace#529)
-    Rule {
-        name: "serial-11-2",
-        files: &["schema"],
-        side: Side::Source,
-        rewrite: Rewrite::Serial11_2,
-    },
-];
-
-/// See [`Rewrite::Serial11_2`]; returns how many entries changed.
-fn serial_11_2(entries: &mut [Vec<u8>]) -> usize {
-    const CLAUSES: [(&[u8], &[u8]); 9] = [
-        (b"\t increment by ", b"\t INCREMENT BY "),
-        (b"\t maxvalue ", b"\t MAXVALUE "),
-        (b"\t minvalue ", b"\t MINVALUE "),
-        (b"\t start with ", b"\t START WITH "),
-        (b"\t cache ", b"\t CACHE "),
-        (b"\t nocache", b"\t NOCACHE"),
-        (b"\t nocycle", b"\t noCYCLE"),
-        (b"\t cycle", b"\t CYCLE"),
-        (b"\t comment ", b"\t COMMENT "),
-    ];
-    const CALL: &[u8] = b"call [change_serial_owner] ('";
-    let mut owner: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-    let mut changed = 0;
-    for e in entries.iter_mut() {
-        if e.starts_with(b"call [find_user](") {
-            e.clear();
-            changed += 1;
-        } else if e.starts_with(CALL) {
-            let Some((name, end)) = between(e, 0, b"('", b'\'') else {
-                continue;
-            };
-            let Some((user, _)) = between(e, end, b", '", b'\'') else {
-                continue;
-            };
-            owner.insert(name.to_vec(), user.to_ascii_lowercase());
-            e.clear();
-            changed += 1;
-        } else if let Some((from, to)) = CLAUSES.iter().find(|(f, _)| e.starts_with(f)) {
-            *e = [*to, &e[from.len()..]].concat();
-            changed += 1;
-        }
-    }
-    for e in entries.iter_mut() {
-        let Some(rest) = e.strip_prefix(b"create serial [") else {
-            continue;
-        };
-        let Some(name_len) = rest.iter().position(|&b| b == b']') else {
-            continue;
-        };
-        let Some(user) = owner.get(&rest[..name_len]) else {
-            continue;
-        };
-        *e = [b"CREATE SERIAL [", user.as_slice(), b"].[", rest].concat();
-        changed += 1;
-    }
-    changed
 }
 
 /// Drops every ` WITH DEDUPLICATE=<digits>` of one entry.

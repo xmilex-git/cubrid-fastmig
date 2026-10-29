@@ -29,6 +29,7 @@ use fastmig_ondisk::btree::ovf_oid_page::{OvfDirEntry, OvfHeader};
 use fastmig_ondisk::btree::root_header::RootHeader;
 use fastmig_ondisk::btree::{DISK_VPID_SIZE, MVCCID_ALL_VISIBLE};
 use fastmig_ondisk::page;
+use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::spage::SlottedPage;
 use fastmig_ondisk::value::KeyDomain;
 use fastmig_ondisk::{Btid, Oid, Vpid};
@@ -96,6 +97,31 @@ impl<'a> IndexTree<'a> {
     /// The separator of leaf `i` (empty for a leaf whose parent record carries none: the first, or unreadable).
     pub fn separator(&self, i: usize) -> &[u8] {
         self.leaves[i].1.as_deref().unwrap_or_default()
+    }
+
+    /// The common prefix of a leaf written before 11.4, which kept none in its header: a MIDXKEY leaf with at least
+    /// two keys whose first and last records are fences is compressed, and its prefix is the columns the two fence keys
+    /// share (release/11.3 btree.c `btree_node_is_compressed`, `btree_node_common_prefix` → `pr_midxkey_common_prefix`;
+    /// 11.4 c1e7266a3 #4789 moved it into the header; workspace#529). 0 when the page does not qualify.
+    fn common_prefix_before_11_4(&self, page: &[u8]) -> i32 {
+        let Some(s) = slotted(page) else { return 0 };
+        let key_cnt = s.num_slots().saturating_sub(1);
+        if !self.kd.midxkey || key_cnt < 2 {
+            return 0;
+        }
+        let unique = self.root.is_unique();
+        let fence_key = |slot| {
+            let (_, rec) = s.record(slot)?;
+            let r = read_leaf_record(rec, unique, &self.kd).ok()?;
+            match r.key {
+                KeyRef::Inline(b) if r.is_fence() => Some(b),
+                _ => None,
+            }
+        };
+        match (fence_key(1), fence_key(key_cnt)) {
+            (Some(lower), Some(upper)) => self.kd.common_columns(lower, upper) as i32,
+            _ => 0,
+        }
     }
 
     fn d(&self, code: &'static str, at: Vpid) -> Defect {
@@ -369,14 +395,17 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                 self.push(self.t.d("leaf-unreadable", v));
                 continue;
             };
-            let Some(h) = slotted(&p).and_then(|s| {
-                s.record(0).and_then(|r| {
-                    NodeHeader::read_layout(r.1, self.t.db.version.header_layout()).ok()
-                })
+            let layout = self.t.db.version.header_layout();
+            let Some(mut h) = slotted(&p).and_then(|s| {
+                s.record(0)
+                    .and_then(|r| NodeHeader::read_layout(r.1, layout).ok())
             }) else {
                 self.push(self.t.d("leaf-no-header", v));
                 continue;
             };
+            if layout == HeaderLayout::Before11_4 {
+                h.common_prefix = self.t.common_prefix_before_11_4(&p);
+            }
             let links = FirstLeaf {
                 vpid: v,
                 prev: h.prev,
