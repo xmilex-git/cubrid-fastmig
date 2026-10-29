@@ -8,14 +8,32 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::spill_arena::SpillArena;
 
 pub struct SpillDir {
     dir: PathBuf,
     next: AtomicU64,
+    /// With a temp disk limit every run goes into this arena and no file is created here (workspace#526).
+    arena: Option<Arc<SpillArena>>,
 }
 
 impl SpillDir {
+    /// Runs written into `arena`: nothing is created on disk (the arena is already allocated).
+    pub fn in_arena(arena: Arc<SpillArena>) -> Self {
+        Self {
+            dir: arena.path().to_path_buf(),
+            next: AtomicU64::new(0),
+            arena: Some(arena),
+        }
+    }
+
+    pub fn arena(&self) -> Option<&Arc<SpillArena>> {
+        self.arena.as_ref()
+    }
+
     pub fn create(base: &Path) -> io::Result<Self> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         std::fs::create_dir_all(base)?;
@@ -28,6 +46,7 @@ impl SpillDir {
         Ok(Self {
             dir,
             next: AtomicU64::new(0),
+            arena: None,
         })
     }
 
@@ -45,6 +64,9 @@ impl SpillDir {
 
 impl Drop for SpillDir {
     fn drop(&mut self) {
+        if self.arena.is_some() {
+            return;
+        }
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
             for e in entries.flatten() {
                 let _ = std::fs::remove_file(e.path());

@@ -151,7 +151,10 @@ fn rebuild(
 ) -> io::Result<RebuiltIndexes> {
     let workers = WorkerLimit::new(worker_limit);
     let memory = MemoryLimit::new(usize::try_from(limits.memory_limit_bytes).unwrap_or(usize::MAX));
-    let spill = SpillDir::create(&limits.spill_dir)?;
+    let spill = match &limits.arena {
+        Some(a) => SpillDir::in_arena(a.clone()),
+        None => SpillDir::create(&limits.spill_dir)?,
+    };
     rebuild_indexes(
         space,
         owners,

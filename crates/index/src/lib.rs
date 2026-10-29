@@ -30,6 +30,7 @@ pub mod rebuild;
 pub mod run_writer;
 pub mod scratch_sink;
 pub mod sort_run;
+pub mod spill_arena;
 pub mod spill_dir;
 pub mod spill_run;
 pub mod splitter;

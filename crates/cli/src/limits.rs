@@ -9,6 +9,9 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use fastmig_index::spill_arena::SpillArena;
 
 use crate::args::{CliError, Parsed};
 
@@ -20,6 +23,8 @@ pub struct Limits {
     pub spill_dir: PathBuf,
     /// The temp disk limit migrate chose before the start (workspace#526); None: no limit, one index batch.
     pub temp_disk: Option<u64>,
+    /// The spill arena of that limit, allocated before the first write; every spill goes into it.
+    pub arena: Option<Arc<SpillArena>>,
 }
 
 impl Limits {
@@ -36,6 +41,7 @@ impl Limits {
             memory_limit_bytes,
             spill_dir,
             temp_disk: None,
+            arena: None,
         })
     }
 }

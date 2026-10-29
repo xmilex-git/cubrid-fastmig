@@ -7,6 +7,7 @@
 
 use crate::key_order::KeyOrder;
 use crate::sort_run::Run;
+use crate::spill_arena::{Extent, ExtentReader, ExtentWriter, SpillArena};
 use crate::spill_dir::SpillDir;
 use crate::temp_disk::{TEMP_DISK, spill_record_bytes};
 use fastmig_ondisk::Oid;
@@ -14,6 +15,7 @@ use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// One key in this many is kept as a sample.
 const SAMPLE_EVERY: usize = 1024;
@@ -25,8 +27,14 @@ pub struct Sample {
     pub key: Vec<u8>,
 }
 
+/// Where a run's records are: its own file, or extents of the spill arena (`--temp-disk`, workspace#526).
+enum Storage {
+    File(PathBuf),
+    Arena(Arc<SpillArena>, Vec<Extent>),
+}
+
 pub struct SpillRun {
-    path: PathBuf,
+    storage: Storage,
     len: usize,
     samples: Vec<Sample>,
     /// Bytes of the file, counted in `TEMP_DISK` while the run lives.
@@ -48,13 +56,27 @@ impl SpillRun {
             .map(|i| spill_record_bytes(run.key(i).len() as u64))
             .sum();
         TEMP_DISK.add(bytes);
+        let storage = match dir.arena() {
+            Some(a) => Storage::Arena(a.clone(), Vec::new()),
+            None => Storage::File(dir.new_file_path()),
+        };
         let mut me = Self {
-            path: dir.new_file_path(),
+            storage,
             len: run.len(),
             samples: Vec::with_capacity(run.len() / SAMPLE_EVERY + 1),
             bytes,
         };
-        let mut w = BufWriter::with_capacity(1 << 20, File::create(&me.path)?);
+        // the run owns its space (and frees it on drop) before the first byte goes out
+        let arena_extents;
+        let sink: Box<dyn Write> = match &mut me.storage {
+            Storage::File(p) => Box::new(File::create(p)?),
+            Storage::Arena(a, ext) => {
+                *ext = a.alloc(bytes)?;
+                arena_extents = (a.clone(), ext.clone());
+                Box::new(ExtentWriter::new(arena_extents.0.file(), &arena_extents.1))
+            }
+        };
+        let mut w = BufWriter::with_capacity(1 << 20, sink);
         let mut offset = 0u64;
         let mut hdr = [0u8; RECORD_HEADER];
         for i in 0..run.len() {
@@ -133,14 +155,43 @@ impl SpillRun {
 
 impl Drop for SpillRun {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        match &self.storage {
+            Storage::File(p) => {
+                let _ = std::fs::remove_file(p);
+            }
+            Storage::Arena(a, ext) => a.free(ext),
+        }
         TEMP_DISK.sub(self.bytes);
     }
 }
 
 /// Reads entries `[from.index, end)` of a spill file in order.
+/// A run's bytes as one stream: its file, or its arena extents.
+enum RunReader {
+    File(File),
+    Arena(ExtentReader),
+}
+
+impl Read for RunReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            RunReader::File(f) => f.read(buf),
+            RunReader::Arena(r) => r.read(buf),
+        }
+    }
+}
+
+impl Seek for RunReader {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        match self {
+            RunReader::File(f) => f.seek(to),
+            RunReader::Arena(r) => r.seek(to),
+        }
+    }
+}
+
 pub struct SpillCursor {
-    r: BufReader<File>,
+    r: BufReader<RunReader>,
     remaining: usize,
     key: Vec<u8>,
     oid: Oid,
@@ -149,7 +200,10 @@ pub struct SpillCursor {
 
 impl SpillCursor {
     pub fn open(run: &SpillRun, from: SpillPos, end: usize, buf_bytes: usize) -> io::Result<Self> {
-        let mut f = File::open(&run.path)?;
+        let mut f = match &run.storage {
+            Storage::File(p) => RunReader::File(File::open(p)?),
+            Storage::Arena(a, ext) => RunReader::Arena(ExtentReader::new(a.clone(), ext.clone())),
+        };
         if from.index < end {
             f.seek(SeekFrom::Start(from.offset))?;
         }

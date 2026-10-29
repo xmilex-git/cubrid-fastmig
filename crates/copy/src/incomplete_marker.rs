@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const MARKER_NAME: &str = "FASTMIG_INCOMPLETE";
+/// Prefix of a scratch line in the marker: a path a rerun removes but the end-of-run fsync skips.
+const SCRATCH: &str = "scratch\t";
 
 pub struct IncompleteMarker {
     path: PathBuf,
@@ -57,6 +59,16 @@ impl IncompleteMarker {
         f.write_all(format!("{s}\n").as_bytes())
     }
 
+    /// Records scratch file `p` (absolute) before the tool creates it: removed by a rerun like any recorded path,
+    /// but not in [`created`](Self::created), so the end-of-run fsync never flushes it (the spill arena,
+    /// workspace#526).
+    pub fn record_scratch(&self, p: &Path) -> io::Result<()> {
+        let s = p.to_str().filter(|s| p.is_absolute() && !s.contains('\n'));
+        let s = s.ok_or_else(|| io::Error::other(format!("cannot record path {}", p.display())))?;
+        let mut f = self.file.lock().unwrap();
+        f.write_all(format!("{SCRATCH}{s}\n").as_bytes())
+    }
+
     /// Creates directory `p` and its missing parents, recording each one it creates.
     pub fn create_dir_all(&self, p: &Path) -> io::Result<()> {
         if p.is_dir() {
@@ -73,6 +85,7 @@ impl IncompleteMarker {
     pub fn created(&self) -> io::Result<Vec<PathBuf>> {
         Ok(fs::read_to_string(&self.path)?
             .lines()
+            .filter(|l| !l.starts_with(SCRATCH))
             .map(PathBuf::from)
             .collect())
     }
@@ -87,7 +100,7 @@ impl IncompleteMarker {
 fn remove_listed(marker: &Path) -> io::Result<()> {
     let listed = fs::read_to_string(marker)?;
     for line in listed.lines().rev() {
-        let p = Path::new(line);
+        let p = Path::new(line.strip_prefix(SCRATCH).unwrap_or(line));
         let removed = match fs::symlink_metadata(p) {
             Ok(m) if m.is_dir() => fs::remove_dir(p),
             Ok(_) => fs::remove_file(p),

@@ -52,6 +52,7 @@ use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
 use crate::verify::{DbArg, run_verifier};
 use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
+use fastmig_index::spill_arena::SpillArena;
 use fastmig_index::temp_disk::TEMP_DISK;
 
 const HELP: &str = "\
@@ -258,7 +259,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let (src, plan) = (b.src, b.plan);
     let mem = o.limits.memory_limit_bytes;
     // one batch when the limit holds every index at once (the bound of a run without --temp-disk)
-    let limits = Limits {
+    let mut limits = Limits {
         temp_disk: b
             .temp_limit
             .filter(|&l| b.est.as_ref().is_none_or(|e| l < e.temp_max(mem))),
@@ -296,6 +297,18 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     // until the copy shows what was cloned, assume every byte is written and synced
     rep.progress.set_total(DURABLE_SYNC, bytes);
     let marker = IncompleteMarker::prepare(&po.target_dir)?;
+    // the temp disk limit is taken from the filesystem now, before the first byte of the target (workspace#526)
+    if let Some(l) = temp_limit {
+        marker.create_dir_all(&limits.spill_dir)?;
+        let path = limits.spill_dir.join("arena");
+        marker.record_scratch(&path)?;
+        limits.arena = Some(Arc::new(SpillArena::create(&path, l).map_err(|e| {
+            io::Error::other(format!(
+                "temp disk: allocating {l} B at {}: {e}",
+                path.display()
+            ))
+        })?));
+    }
     marker.create_dir_all(&o.log_dir)?;
     let fastmig_dir = po.target_dir.join("fastmig");
     marker.create_dir_all(&fastmig_dir)?;

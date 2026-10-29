@@ -209,7 +209,10 @@ pub fn run_verifier(
 ) -> io::Result<(u8, String)> {
     let wb = WorkerLimit::new(worker_limit);
     let mb = MemoryLimit::new(usize::try_from(lim.memory_limit_bytes).unwrap_or(usize::MAX));
-    let spill = SpillDir::create(&lim.spill_dir)?;
+    let spill = match &lim.arena {
+        Some(a) => SpillDir::in_arena(a.clone()),
+        None => SpillDir::create(&lim.spill_dir)?,
+    };
     let limits = fastmig_verify::Limits {
         workers: &wb,
         memory: &mb,
