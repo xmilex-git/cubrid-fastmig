@@ -13,26 +13,22 @@
 # Source: decisions G1 workspace#481 (migrate, verify, SQL files in <dest>/fastmig), G5 workspace#486 (deferred
 # indexes are applied before the set comparison), ADR 0007 (verifier + set comparison).
 
-# the databases registered in the source databases.txt: "<name> <volume dir> <lob base path>" per line
+# the databases registered in the source databases.txt, one name per line
 fastmig_tc_source_dbs() {
-  awk 'NF >= 5 && $1 !~ /^#/ { sub(/^file:/, "", $5); print $1, $2, $5 }' "$FASTMIG_TC_SOURCE_DBS/databases.txt" 2>/dev/null
+  awk 'NF >= 5 && $1 !~ /^#/ { print $1 }' "$FASTMIG_TC_SOURCE_DBS/databases.txt" 2>/dev/null
 }
 
 # one database: source unload, migrate, verify, deferred SQL, target unload, set comparison
 fastmig_tc_migrate_one() {
-  local db="$1" lob="$3" d="$FASTMIG_TC_JOB/switch/$1"
-  local r_su r_mi r_ve r_sq=0 r_tu r_co=-1 f manifest="$d/lob-manifest"
+  local db="$1" d="$FASTMIG_TC_JOB/switch/$1"
+  local r_su r_mi r_ve r_sq=0 r_tu r_co=-1 f
   mkdir -p "$d/source-unload" "$d/target-unload"
   ( cd "$d" && CUBRID_DATABASES="$FASTMIG_TC_SOURCE_DBS" "$CUBRID/bin/cubrid" unloaddb -S -O "$d/source-unload" "$db" ) \
     >"$d/source-unload.log" 2>&1
   r_su=$?
-  # shortcut: every file under the source lob-base-path is listed as referenced (the locator scan that builds the
-  # manifest comes with workspace#484); replace with migrate's own scan when it lands
-  : >"$manifest"
-  [ -d "$lob" ] && find "$lob" -type f -printf '%s\t%P\n' >"$manifest"
   "$FASTMIG_TC_BIN" migrate "$db" --dest "$d/volumes" --workers 4 --progress plain \
     --source-databases-txt "$FASTMIG_TC_SOURCE_DBS/databases.txt" \
-    --target-databases-txt "$FASTMIG_TC_TARGET_DBS/databases.txt" --lob-manifest "$manifest" \
+    --target-databases-txt "$FASTMIG_TC_TARGET_DBS/databases.txt" \
     >"$d/migrate.log" 2>&1
   r_mi=$?
   "$FASTMIG_TC_BIN" verify "$db" --databases-txt "$FASTMIG_TC_TARGET_DBS/databases.txt" \
@@ -69,14 +65,14 @@ fastmig_tc_migrate_one() {
 fastmig_tc_switch_point() {
   [ "$FASTMIG_TC_SWITCH" = 1 ] || return 0
   [ "$(readlink "$FASTMIG_TC_JOB/dbs")" = "$FASTMIG_TC_SOURCE_DBS" ] || return 0
-  local running db vol lob
+  local running db
   running="$("$CUBRID/bin/cubrid" server status 2>/dev/null | sed -n 's/^ *Server \([^ ]*\) .*/\1/p')"
   for db in $running; do fastmig_tc_server stop "$db" >/dev/null; done
   "$CUBRID/bin/cubrid" service stop >/dev/null 2>&1
   : >>"$FASTMIG_TC_TARGET_DBS/databases.txt"
   # a pipe, not process substitution: testcases run under sh (bash in POSIX mode)
-  fastmig_tc_source_dbs | while read -r db vol lob; do
-    fastmig_tc_migrate_one "$db" "$vol" "$lob"
+  fastmig_tc_source_dbs | while read -r db; do
+    fastmig_tc_migrate_one "$db"
   done
   ln -sfn "$FASTMIG_TC_TARGET_DBS" "$FASTMIG_TC_JOB/dbs"
   for db in $running; do fastmig_tc_server start "$db" >/dev/null; done
