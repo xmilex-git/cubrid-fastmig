@@ -19,7 +19,14 @@ FASTMIG_E2E_SERVER_CTL=<workspace>/.agents/skills/cubrid-server-control/scripts/
 - Optional env: `FASTMIG_E2E_WORKERS` (worker limit, default 4), `FASTMIG_E2E_CPUS` (taskset CPU list for migrate and
   verify; also turns on the quiet gate), `FASTMIG_E2E_CHECKDB=1` (engine checkdb, #484 (5): the small 11.4 -> develop
   target only), `FASTMIG_E2E_BREAKER` (the #484 (6) probe binary), `FASTMIG_E2E_SOURCE_UNLOAD` (unloaddb prefix of the
-  source, default `<BASEDB_ROOT>/<label>/unload/<variant>/<db>`).
+  source, default `<BASEDB_ROOT>/<label>/unload/<variant>/<db>`), `FASTMIG_E2E_LOB_BASE` (see below).
+- A 10.2..11.3 baseline's LOB locators are absolute paths under the base it was built in
+  (`<BASEDB_ROOT>/<label>/<variant>/lob`). Give that base as `FASTMIG_E2E_LOB_BASE` so the run takes the in-place
+  path (locators under the base, files copied into develop's per-attribute directories, `lob-after-boot`); the run
+  only reads that directory, `lob-base-before`/`lob-base-unchanged` compare its file list and sha256, and finalize is
+  recorded `skipped` (it would delete that base's files). Not covered: a source whose directory was moved after its
+  LOBs were written — its locators lie outside the base, so migrate leaves them and their files where they are (G6
+  workspace#488), a place develop's boot does not clean.
 
 ## Steps
 
@@ -41,6 +48,7 @@ Each step is one row `step seconds rc` in `<out>/steps.tsv`, its output in `<out
 | `finalize` | deletes the source copy; run only when every path of the source fingerprint is in `<out>/source` | (8) |
 | `break-*`, `verify-broken-*` | breaks the finalized target cumulatively; verify must exit 1 after each | (6), (8) |
 | `target-deletedb` | engine deletedb of the registered target | |
+| `lob-base-before`, `lob-base-unchanged` | with `FASTMIG_E2E_LOB_BASE`: that base's file list and sha256 before the run and the same after it | (8) |
 
 Not covered: (3) the cp comparison and median-of-3 (run the command 3 times under `FASTMIG_E2E_CPUS`, as the
 unload→load baseline), (7) the lock smoke and partition pruning.

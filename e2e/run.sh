@@ -11,7 +11,10 @@
 #   wrapper), FASTMIG_E2E_WORKERS (worker limit, default 4), FASTMIG_E2E_CPUS (taskset CPU list for migrate and verify,
 #   default: none), FASTMIG_E2E_CHECKDB=1 (engine checkdb -S on the target, #484 (5): small 11.4 -> develop only),
 #   FASTMIG_E2E_BREAKER (the #484 (6) probe binary: breaks the finalized target, expects verify exit 1),
-#   FASTMIG_E2E_SOURCE_UNLOAD (unloaddb prefix of the source; default the baseline's <label>/unload/<variant>/<db>).
+#   FASTMIG_E2E_SOURCE_UNLOAD (unloaddb prefix of the source; default the baseline's <label>/unload/<variant>/<db>),
+#   FASTMIG_E2E_LOB_BASE (lob-base-path the source copy is registered with; default <out>/source/lob. A 10.2..11.3
+#   baseline's locators are absolute under the base it was built in, so give that base to run its LOB path; finalize
+#   is then not run, it would delete that base's files, workspace#529).
 # Output: <out>/steps.tsv ("step seconds rc" per step), one log per step under <out>/log/, the migrate phases from
 #   report.json in <out>/phases.tsv. Exit 0 when every step that ran exited as expected, else 1.
 # Steps: reflink copy -> plan -> migrate -> verify target/source -> deferred SQL -> target unloaddb -> set comparison
@@ -72,8 +75,11 @@ step() {
 # 1. reflink copy of the pristine; its volume headers still name the registered DB, so no engine utility ever
 #    opens it (basedb/README.md): fastmig reads it with --volumes-in-first-dir
 step copy 0 cp -a --reflink=always "$PRISTINE" "$SRC" || exit 1
-printf '%s\t%s\tlocalhost\t%s\tfile:%s/lob\n' "$DB" "$SRC" "$SRC" "$SRC" >"$OUT/src-dbs/databases.txt"
+printf '%s\t%s\tlocalhost\t%s\tfile:%s\n' "$DB" "$SRC" "$SRC" "${FASTMIG_E2E_LOB_BASE:-$SRC/lob}" >"$OUT/src-dbs/databases.txt"
 : >"$OUT/dbs/databases.txt"
+# a lob-base outside the copy belongs to the registered baseline: its file list and contents must not change (workspace#529)
+lob_digest() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum); }
+[ -z "${FASTMIG_E2E_LOB_BASE:-}" ] || step lob-base-before 0 lob_digest "$FASTMIG_E2E_LOB_BASE"
 find "$SRC" -maxdepth 1 -type f ! -name '*_lgar*' -exec cat {} + >/dev/null   # warm, as the baseline runs
 common=(--dest "$TGT" --target-version "$TV" --volumes-in-first-dir
   --source-databases-txt "$OUT/src-dbs/databases.txt" --target-databases-txt "$OUT/dbs/databases.txt")
@@ -130,7 +136,10 @@ fi
 # 9. finalize: deletes the source copy's volumes, logs, LOB files and Java dirs; refused unless verify passed.
 #    Guard first: every path the source fingerprint names lies in this run's source copy.
 fp=$TGT/fastmig/source-fingerprint
-if [ $registered = 1 ] && [ -f "$fp" ] && ! awk -F'\t' -v s="$SRC/" '
+if [ $registered = 1 ] && [ -n "${FASTMIG_E2E_LOB_BASE:-}" ]; then
+  echo "finalize skipped (lob-base outside the copy): finalize would delete the files of $FASTMIG_E2E_LOB_BASE" >"$OUT/log/finalize.log"
+  printf 'finalize\t0.000\tskipped\n' >>"$OUT/steps.tsv"
+elif [ $registered = 1 ] && [ -f "$fp" ] && ! awk -F'\t' -v s="$SRC/" '
     $1 == "volume" { if (index($3, s) != 1) bad = 1 }
     $1 == "log" || $1 == "vol-path" || $1 == "log-path" || $1 == "lob-base" { if (index($2 "/", s) != 1) bad = 1 }
     END { exit !bad }' "$fp"; then
@@ -156,6 +165,10 @@ fi
 # 11. delete the target (registered: engine deletedb; not registered: left for the caller's literal rm -rf)
 if [ $registered = 1 ]; then
   step target-deletedb 0 cubrid deletedb "$DB"
+fi
+if [ -n "${FASTMIG_E2E_LOB_BASE:-}" ]; then
+  cp "$OUT/log/lob-base-before.log" "$OUT/lob-base-before.sha256"
+  step lob-base-unchanged 0 diff "$OUT/lob-base-before.sha256" <(lob_digest "$FASTMIG_E2E_LOB_BASE")
 fi
 # migrate's own phase timings: the "seconds" object of report.json, one "phase seconds" row each
 grep -o '"seconds": {[^}]*}' "$OUT/report.json" 2>/dev/null | grep -o '"[a-z_]*": [0-9][0-9.]*' | tr -d '"' |

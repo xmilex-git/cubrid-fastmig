@@ -39,6 +39,7 @@ pub enum Rewrite {
     Serial11_2,
     TriggerOwner11_2,
     AutoIncrement11_2,
+    LobAbsoluteLocator,
     /// Drop ` WITH DEDUPLICATE=<level>`, any level.
     DeduplicateLevel,
 }
@@ -68,7 +69,8 @@ pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
     }
 }
 
-// 11.2 and 11.3 print stored procedures, function/filter index text and synonym owners their own way; 11.2 also its
+// 11.2 and 11.3 print stored procedures, function/filter index text, synonym owners and absolute LOB locators their
+// own way; 11.2 also its
 // serials, auto_increment state and trigger owners (T4 baselines -> develop, workspace#529; `unload_rules_before_11_4`)
 const PRE_11_4_TO_DEVELOP: &[Rule] = &[
     Rule {
@@ -88,6 +90,12 @@ const PRE_11_4_TO_DEVELOP: &[Rule] = &[
         files: &["schema"],
         side: Side::Source,
         rewrite: Rewrite::SynonymOwnerCase,
+    },
+    Rule {
+        name: "lob-absolute-locator",
+        files: &["objects"],
+        side: Side::Source,
+        rewrite: Rewrite::LobAbsoluteLocator,
     },
 ];
 
@@ -194,6 +202,7 @@ pub fn normalize(
                 Rewrite::Serial11_2 => before_11_4::serial_11_2(entries),
                 Rewrite::TriggerOwner11_2 => before_11_4::trigger_owner_11_2(entries),
                 Rewrite::AutoIncrement11_2 => before_11_4::auto_increment_11_2(entries),
+                Rewrite::LobAbsoluteLocator => before_11_4::lob_absolute_locator(entries),
                 Rewrite::DeduplicateLevel => entries
                     .iter_mut()
                     .filter_map(drop_deduplicate_level)

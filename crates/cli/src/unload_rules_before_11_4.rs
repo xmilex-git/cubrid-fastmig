@@ -275,3 +275,39 @@ pub fn auto_increment_11_2(entries: &mut [Vec<u8>]) -> usize {
     }
     changed
 }
+
+/// LOB locators: an 11.2/11.3 locator is absolute under the base it was written in (`|file:/<base>/ces_NNN/<file>`),
+/// a develop target's relative (`|file:ces_NNN/<file>` once the rule lob-class-dir dropped its class directory). The
+/// absolute directory part is dropped; the `ces_NNN/<file>` part is still compared, and the files' bytes are the e2e
+/// lob-contents and lob-after-boot steps' check.
+pub fn lob_absolute_locator(entries: &mut [Vec<u8>]) -> usize {
+    const HEAD: &[u8] = b"|file:/";
+    let mut changed = 0;
+    for e in entries.iter_mut() {
+        let mut out = Vec::with_capacity(e.len());
+        let mut i = 0;
+        while i < e.len() {
+            if e[i..].starts_with(HEAD) {
+                // the path runs to the next field separator or the end of the quoted value
+                let path_end = e[i + 1..]
+                    .iter()
+                    .position(|&b| b == b'|' || b == b'\'')
+                    .map_or(e.len(), |n| i + 1 + n);
+                let path = &e[i + HEAD.len() - 1..path_end];
+                if let Some(at) = path.windows(5).rposition(|w| w == b"/ces_") {
+                    out.extend_from_slice(b"|file:");
+                    out.extend_from_slice(&path[at + 1..]);
+                    i = path_end;
+                    continue;
+                }
+            }
+            out.push(e[i]);
+            i += 1;
+        }
+        if out != *e {
+            *e = out;
+            changed += 1;
+        }
+    }
+    changed
+}
