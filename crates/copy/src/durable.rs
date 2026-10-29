@@ -1,8 +1,8 @@
 //! Makes everything the tool created durable in one pass at the end of the run, instead of one fsync per write
 //! step: every file and directory listed in the incomplete marker, and the directories holding them, are fsynced on
-//! the shared worker cap.
+//! the shared worker limit.
 //!
-//! Input: the incomplete marker and the worker cap. Output: all created files and directories flushed to disk.
+//! Input: the incomplete marker and the worker limit. Output: all created files and directories flushed to disk.
 //! Progress: `meter` (the durable-sync phase) gets each synced file's length.
 //! Must run before the target is registered, so a crash never leaves a registered target with unwritten pages.
 //! Policy: this pass is the run's only fsync, and it covers exactly what the marker lists — the target's files.

@@ -1,8 +1,8 @@
 //! Copies out-of-volume assets: the referenced LOB files listed in the LOB manifest, and the Java SP directories
 //! `java` and `java_static`. Each file is cloned when the filesystem allows it and byte-copied otherwise, on the
-//! shared worker cap; nothing is converted.
+//! shared worker limit; nothing is converted.
 //!
-//! Input: source and target roots, the file list (manifest entries or a directory walk), the worker cap and the
+//! Input: source and target roots, the file list (manifest entries or a directory walk), the worker limit and the
 //! incomplete marker. Output: counts per copy method, and the manifest entries whose source file is missing (a
 //! pre-existing defect: skipped and reported, not an error).
 //! Source: decision G6 workspace#488 (copy referenced files only, clone first; Java directories copied as is);
