@@ -48,13 +48,13 @@ impl IncompleteMarker {
         })
     }
 
-    /// Records `p` (absolute) before the tool creates it, so a crash right after still leaves it listed.
+    /// Records `p` (absolute) before the tool creates it. Not fsynced per line: after a crash that lost lines, the
+    /// rerun stops at a directory still holding unlisted files (it never removes what it cannot name).
     pub fn record(&self, p: &Path) -> io::Result<()> {
         let s = p.to_str().filter(|s| p.is_absolute() && !s.contains('\n'));
         let s = s.ok_or_else(|| io::Error::other(format!("cannot record path {}", p.display())))?;
         let mut f = self.file.lock().unwrap();
-        f.write_all(format!("{s}\n").as_bytes())?;
-        f.sync_data()
+        f.write_all(format!("{s}\n").as_bytes())
     }
 
     /// Creates directory `p` and its missing parents, recording each one it creates.
@@ -67,6 +67,14 @@ impl IncompleteMarker {
         }
         self.record(p)?;
         fs::create_dir(p)
+    }
+
+    /// Every path recorded so far, in creation order.
+    pub fn created(&self) -> io::Result<Vec<PathBuf>> {
+        Ok(fs::read_to_string(&self.path)?
+            .lines()
+            .map(PathBuf::from)
+            .collect())
     }
 
     /// Removes the marker: the migration in this directory passed verification.

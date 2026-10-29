@@ -2,10 +2,10 @@
 //! read lock, the incomplete marker, out-of-volume assets (LOB files, Java SP directories), the new active log and
 //! the target registration (`_vinf`, `databases.txt`).
 
-pub mod aligned_buf;
 pub mod asset_copy;
 pub mod byte_copy;
 pub mod clone_file;
+pub mod durable;
 pub mod incomplete_marker;
 pub mod lob_manifest;
 pub mod new_log;

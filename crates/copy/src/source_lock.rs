@@ -13,14 +13,11 @@
 //! file, fails on a conflicting lock), `log_manager.c:log_initialize_internal`, `boot_sr.c:boot_mount`
 //! (release/11.4 and develop @5b1867174); decision G1 workspace#481 (Q5).
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-/// Linux x86-64 `O_DIRECT`.
-pub const O_DIRECT: i32 = 0o40000;
 const F_SETLK: i32 = 6;
 const F_RDLCK: i16 = 0;
 const SEEK_SET: i16 = 0;
@@ -41,7 +38,7 @@ unsafe extern "C" {
 
 /// Opens the source active log read-only and read-locks it; fails when a server holds it.
 pub fn open_locked_log(path: &Path) -> io::Result<File> {
-    let file = open_source(path, false)?;
+    let file = open_source(path)?;
     let fl = Flock {
         l_type: F_RDLCK,
         l_whence: SEEK_SET,
@@ -64,18 +61,7 @@ pub fn open_locked_log(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-/// Opens a source file read-only, with `O_DIRECT` when `direct` and the filesystem takes it.
-pub fn open_source(path: &Path, direct: bool) -> io::Result<File> {
-    if direct {
-        match OpenOptions::new()
-            .read(true)
-            .custom_flags(O_DIRECT)
-            .open(path)
-        {
-            Ok(f) => return Ok(f),
-            Err(e) if e.raw_os_error() == Some(22) => {} // EINVAL: no direct I/O on this filesystem
-            Err(e) => return Err(e),
-        }
-    }
+/// Opens a source file read-only.
+pub fn open_source(path: &Path) -> io::Result<File> {
     File::open(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }

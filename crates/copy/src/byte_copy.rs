@@ -1,7 +1,7 @@
 //! Byte copy of one range of a volume, with the page treatment applied inline: the copy mode's single pass reads a
 //! chunk of whole pages, lets the hook patch them in the buffer, and writes the buffer to the target.
 //!
-//! Input: the source and target files, the byte range (whole IO pages), a reusable aligned buffer and the hook.
+//! Input: the source and target files, the byte range (whole IO pages), a reusable buffer and the hook.
 //! Output: the target range written. The source is never written.
 //! Source: decision G1 workspace#481 (copy treats pages inline in the copying pass; clone patches the target in
 //! place afterwards, outside this module).

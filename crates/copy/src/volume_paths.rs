@@ -31,7 +31,6 @@ pub fn rewrite(targets: &[PathBuf], io_pagesize: usize) -> io::Result<()> {
             .ok_or_else(|| io::Error::other("non-UTF-8 path"))?;
         set_paths(&mut page, own, &next)?;
         f.write_all_at(&page, 0)?;
-        f.sync_all()?;
     }
     Ok(())
 }

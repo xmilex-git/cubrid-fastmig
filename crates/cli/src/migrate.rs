@@ -16,8 +16,8 @@ use std::time::Instant;
 
 use fastmig_copy::asset_copy::{self, AssetOutcome};
 use fastmig_copy::{
-    IncompleteMarker, NoPatch, VolumeJob, VolumeOutcome, copy_volumes, lob_manifest, new_log,
-    new_log_start, open_locked_log, open_source, register_db, volinfo, volume_paths,
+    IncompleteMarker, NoPatch, VolumeJob, VolumeOutcome, copy_volumes, durable, lob_manifest,
+    new_log, new_log_start, open_locked_log, open_source, register_db, volinfo, volume_paths,
 };
 use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::boot_parm::BootDbParm;
@@ -183,7 +183,7 @@ fn migrate(o: &Options) -> io::Result<()> {
         };
         jobs.push(VolumeJob {
             volid: v.volid,
-            source: open_source(&v.path, true)?,
+            source: open_source(&v.path)?,
             target,
             io_pagesize: vols.io_pagesize(),
         });
@@ -230,6 +230,8 @@ fn migrate(o: &Options) -> io::Result<()> {
     marker.record(&volinfo::log_dir_file(&o.log_dir, &o.target_name, "_vinf"))?;
     volinfo::write(&o.log_dir, &o.target_name, &targets)?;
     rep.lap("new_log");
+    durable::sync_created(&marker, o.workers)?;
+    rep.lap("fsync");
 
     register_db::register(
         &o.target_dbtxt,

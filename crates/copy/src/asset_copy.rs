@@ -154,6 +154,5 @@ fn copy_file(src: &File, dst: &Path, marker: &IncompleteMarker) -> io::Result<(C
         io::copy(&mut &*src, &mut out)?;
         CopyMethod::Copy
     };
-    out.sync_all()?;
     Ok((method, meta.len()))
 }

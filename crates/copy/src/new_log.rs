@@ -98,8 +98,7 @@ pub fn write(path: &Path, hdr: &LogHeader) -> io::Result<()> {
     let f = OpenOptions::new().write(true).create_new(true).open(path)?;
     f.set_len((hdr.npages as u64 + 1) * lps as u64)?;
     f.write_all_at(&p0, 0)?;
-    f.write_all_at(&p1, lps as u64)?;
-    f.sync_all()
+    f.write_all_at(&p1, lps as u64)
 }
 
 fn page_header(logical_pageid: i64) -> LogPageHeader {
