@@ -10,7 +10,7 @@
 use std::io;
 
 use crate::ids::{Ehid, Hfid, Oid, Vfid};
-use crate::le_field::{get_i16, get_i32, put_i16};
+use crate::le_field::{get_i16, get_i32, put_i16, put_i32};
 use crate::page::{db_area, db_area_mut};
 use crate::spage::{RecordType, SlottedPage, SpageEditor};
 use crate::volume_set::VolumeSet;
@@ -111,6 +111,23 @@ impl BootDbParm {
     /// Engine `boot_dbparm_save_volume` for a permanent volume: `nvols` and `last_volid` rewritten in place
     /// (same record length, same slot).
     pub fn write_volume_counts(vols: &VolumeSet, nvols: i16, last_volid: i16) -> io::Result<()> {
+        Self::update(vols, |rec| {
+            put_i16(rec, 96, nvols);
+            put_i16(rec, 100, last_volid);
+        })
+    }
+
+    /// The catalog file of a regenerated catalog (`catalog_create` result): `ctid.vfid` and `ctid.hpgid` rewritten
+    /// in place; `ctid.xhid` stays, develop never reads the catalog's extendible hash (workspace#492).
+    pub fn write_ctid(vols: &VolumeSet, vfid: Vfid, hpgid: i32) -> io::Result<()> {
+        Self::update(vols, |rec| {
+            vfid.write(rec, 44);
+            put_i32(rec, 64, hpgid);
+        })
+    }
+
+    /// Rewrites the record in place (same length, same slot) through `f`.
+    fn update(vols: &VolumeSet, f: impl FnOnce(&mut [u8])) -> io::Result<()> {
         let (oid, _) = Self::read(vols)?;
         let mut page = vols.read_page(oid.vpid())?;
         let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
@@ -120,8 +137,7 @@ impl BootDbParm {
             Some((RecordType::Home, r)) => r.to_vec(),
             _ => return Err(bad("BOOT_DB_PARM record moved")),
         };
-        put_i16(&mut rec, 96, nvols);
-        put_i16(&mut rec, 100, last_volid);
+        f(&mut rec);
         ed.update(oid.slotid as usize, &rec)
             .map_err(|e| bad(&format!("BOOT_DB_PARM update: {e:?}")))?;
         vols.write_page(oid.vpid(), &page)

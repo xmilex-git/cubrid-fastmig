@@ -203,6 +203,16 @@ impl<'v> SpaceManager<'v> {
         })
     }
 
+    /// Engine `file_descriptor_update`: rewrites the 64-byte descriptor of `vfid` (a heap names its own HFID, which
+    /// is known only after its sticky first page is allocated).
+    pub fn set_descriptor(&self, vfid: Vfid, descriptor: [u8; 64]) -> io::Result<()> {
+        self.run(|op| {
+            let mut h = op.header(vfid)?;
+            h.descriptor_raw = descriptor;
+            op.put_header(vfid, &h)
+        })
+    }
+
     // ---- pages ----
 
     /// Engine `file_alloc` of a user page (`file_perm_alloc`): a page of the first partial sector of the header

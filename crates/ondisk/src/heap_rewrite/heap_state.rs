@@ -134,6 +134,9 @@ pub(crate) struct HeapState<'s, 'v> {
     pages: Vec<PageInfo>,
     index: HashMap<Vpid, usize>,
     pub appended_pages: u64,
+    /// Bestspace pages: they hold entries, not records, so they are neither insert targets nor counted when an edit
+    /// (a chain link) touches them.
+    pub bestspace_pages: Vec<Vpid>,
 }
 
 impl<'s, 'v> HeapState<'s, 'v> {
@@ -157,6 +160,7 @@ impl<'s, 'v> HeapState<'s, 'v> {
             pages: Vec::new(),
             index: HashMap::new(),
             appended_pages: 0,
+            bestspace_pages: Vec::new(),
         }
     }
 
@@ -174,6 +178,9 @@ impl<'s, 'v> HeapState<'s, 'v> {
     }
 
     fn note(&mut self, vpid: Vpid, page: &[u8]) -> io::Result<()> {
+        if self.bestspace_pages.contains(&vpid) {
+            return Ok(());
+        }
         let sp = SlottedPage::new(db_area(page))
             .ok_or_else(|| invalid(format!("heap page {vpid:?} is not a slotted page")))?;
         let info = PageInfo {
@@ -312,9 +319,20 @@ impl<'s, 'v> HeapState<'s, 'v> {
 
     /// Inserts `rec` as a REC_NEWHOME on the first page read so far (not `exclude`) with room, else on a new page at
     /// the chain end; returns its OID.
+    pub fn insert_newhome(&mut self, rec: &[u8], exclude: Vpid) -> io::Result<Oid> {
+        self.insert_first_fit(RecordType::NewHome, rec, exclude)
+    }
+
+    /// Inserts `rec` as record type `rtype` on the first page read so far (not `exclude`) with room, else on a new
+    /// page at the chain end; returns its OID.
     // shortcut: first fit scans every page read (O(pages) per relocated record); upgrade to a free-space index if a
     // heap with many relocations makes the scan show up in measurements.
-    pub fn insert_newhome(&mut self, rec: &[u8], exclude: Vpid) -> io::Result<Oid> {
+    pub fn insert_first_fit(
+        &mut self,
+        rtype: RecordType,
+        rec: &[u8],
+        exclude: Vpid,
+    ) -> io::Result<Oid> {
         let header = self.hfid.vpid();
         let mut i = 0;
         while i < self.pages.len() {
@@ -329,12 +347,10 @@ impl<'s, 'v> HeapState<'s, 'v> {
                 continue;
             }
             let vpid = info.vpid;
-            let slot = self.edit(vpid, |p| {
-                match editor(p, vpid)?.insert(RecordType::NewHome, rec) {
-                    Ok(s) => Ok(Some(s)),
-                    Err(SpageError::DoesntFit) => Ok(None),
-                    Err(e) => Err(spage_err(vpid, e)),
-                }
+            let slot = self.edit(vpid, |p| match editor(p, vpid)?.insert(rtype, rec) {
+                Ok(s) => Ok(Some(s)),
+                Err(SpageError::DoesntFit) => Ok(None),
+                Err(e) => Err(spage_err(vpid, e)),
             })?;
             if let Some(s) = slot {
                 return Ok(Oid::new(vpid.volid, vpid.pageid, s as i16));
@@ -343,7 +359,7 @@ impl<'s, 'v> HeapState<'s, 'v> {
         let vpid = self.append_page()?;
         let s = self.edit(vpid, |p| {
             editor(p, vpid)?
-                .insert(RecordType::NewHome, rec)
+                .insert(rtype, rec)
                 .map_err(|e| spage_err(vpid, e))
         })?;
         Ok(Oid::new(vpid.volid, vpid.pageid, s as i16))
