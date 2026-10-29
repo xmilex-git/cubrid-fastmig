@@ -110,18 +110,41 @@ impl Run {
     fn full_cmp(&self, a: &Entry, b: &Entry, order: &dyn KeyOrder) -> Ordering {
         let ka = &self.keys[a.key_off..a.key_off + a.key_len as usize];
         let kb = &self.keys[b.key_off..b.key_off + b.key_len as usize];
+        // byte-equal images are equal keys: a duplicate key orders by OID without decoding its columns
+        if ka == kb {
+            return a.oid.cmp(&b.oid);
+        }
         order.compare(ka, kb).then(a.oid.cmp(&b.oid))
+    }
+
+    /// Word `w` of the entry's radix words, or `None` past its last word.
+    fn word(&self, e: &Entry, w: usize) -> Option<u64> {
+        (w < e.words_len as usize).then(|| self.words[e.words_off as usize + w])
     }
 
     /// Byte `depth` of the entry's radix words (big-end first), or `None` past its last word.
     fn digit(&self, e: &Entry, depth: usize) -> Option<u8> {
-        let w = depth / 8;
-        (w < e.words_len as usize)
-            .then(|| (self.words[e.words_off as usize + w] >> (56 - 8 * (depth % 8))) as u8)
+        self.word(e, depth / 8)
+            .map(|w| (w >> (56 - 8 * (depth % 8))) as u8)
     }
 
     fn msd(&self, part: &mut [Entry], spare: &mut [Entry], depth: usize, order: &dyn KeyOrder) {
-        if part.len() < RADIX_MIN_ENTRIES || part.iter().any(|e| self.digit(e, depth).is_none()) {
+        if part.len() < RADIX_MIN_ENTRIES {
+            part.sort_unstable_by(|a, b| self.full_cmp(a, b, order));
+            return;
+        }
+        // a word every entry shares orders nothing: skip it in one pass instead of eight digit passes (low-cardinality
+        // keys share most of their words; workspace#509)
+        let mut depth = depth;
+        loop {
+            let w = depth / 8;
+            let first = self.word(&part[0], w);
+            if first.is_none() || part[1..].iter().any(|e| self.word(e, w) != first) {
+                break;
+            }
+            depth = (w + 1) * 8;
+        }
+        if part.iter().any(|e| self.digit(e, depth).is_none()) {
             // words exhausted for some entry: from here the words no longer decide, the comparator does
             part.sort_unstable_by(|a, b| self.full_cmp(a, b, order));
             return;
@@ -129,6 +152,11 @@ impl Run {
         let mut count = [0usize; 256];
         for e in part.iter() {
             count[self.digit(e, depth).unwrap() as usize] += 1;
+        }
+        if count.contains(&part.len()) {
+            // one bucket holds the whole part: nothing to move at this digit
+            self.msd(part, spare, depth + 1, order);
+            return;
         }
         let mut start = [0usize; 256];
         let mut acc = 0;
