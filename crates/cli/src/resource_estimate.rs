@@ -69,6 +69,8 @@ pub struct ResourceEstimate {
     pub scan_seconds: f64,
     pub workers: usize,
     pub physical_memory: u64,
+    /// The run regenerates the system catalog (an 11.x or 10.2 source): its rows are built in memory.
+    pub regenerates: bool,
     /// Spill bytes the verifier's source side takes (`verify::source_pair_bytes`), counted only for `--verify`.
     pub verify_source: Option<u64>,
     /// Heap pages of the source the verifier reads (its live row map), counted with `verify_source`.
@@ -168,6 +170,7 @@ pub fn estimate(
     e.scan_seconds = started.elapsed().as_secs_f64();
     e.workers = workers;
     e.physical_memory = physical_memory;
+    e.regenerates = pair.regenerates_catalog();
     Ok(e)
 }
 
@@ -248,6 +251,7 @@ fn count(
         scan_seconds: 0.0,
         workers,
         physical_memory: 0,
+        regenerates: false,
         verify_source: None,
         verify_heap_pages: None,
     })
@@ -292,6 +296,21 @@ impl ResourceEstimate {
         limits::mem_min(self.workers)
     }
 
+    /// The most RSS a run with `--mem` `mem` is expected to reach: the limit plus what stays outside it (docs/resources.md,
+    /// "Memory outside --mem"), fitted from the measured runs as an upper envelope: 12 MiB of buffers, stacks and
+    /// allocator, 18 MiB more when the catalog is regenerated, 32 MiB per GiB of pair bytes (run bookkeeping, sample
+    /// keys, leaf summaries) and with `--verify` 24 MiB per GiB of the verifier's source side. Measured, not proven.
+    pub fn rss_expected_max(&self, mem: u64, verify: bool) -> u64 {
+        const MIB: f64 = (1u64 << 20) as f64;
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        let mut outside =
+            12.0 + if self.regenerates { 18.0 } else { 0.0 } + 32.0 * gib(self.temp_max());
+        if verify {
+            outside += 24.0 * gib(self.verify_source.unwrap_or(self.temp_max()));
+        }
+        mem + (outside * MIB).ceil() as u64
+    }
+
     /// Room for every pair (as spill bytes) in finished runs plus the workers' shares, at most the physical memory:
     /// fewer spills, not none (an in-memory run takes more than its spill bytes); the temp limit does not depend on
     /// it.
@@ -315,7 +334,7 @@ impl ResourceEstimate {
             })
             .collect();
         format!(
-            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_mem_min_bytes\": {}, \"indexes\": [{}]}}",
+            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_mem_min_bytes\": {}, \"rss_expected_max_bytes\": {}, \"rss_expected_max_verify_bytes\": {}, \"indexes\": [{}]}}",
             self.scan_seconds,
             self.workers,
             self.extra_seconds(b),
@@ -324,6 +343,8 @@ impl ResourceEstimate {
             opt(self.verify_source),
             opt(self.verify_min()),
             opt(self.verify_mem_min()),
+            self.rss_expected_max(mem, false),
+            self.rss_expected_max(mem, true),
             idx.join(", ")
         )
     }
@@ -344,7 +365,7 @@ impl ResourceEstimate {
             None => "--verify needs >= temp max and the source side (counted by plan --verify; docs/resources.md)".into(),
         };
         format!(
-            "resources (index rebuild, --workers {}; counted in {:.1} s, one heap scan):\n  temp disk: min {} MiB ({b} index batches, about {:.1} s more), max {} MiB (one batch)\n  {verify}\n  memory: min {} MiB, this run {} MiB, recommended {} MiB (fewer spills; temp does not depend on it)\n",
+            "resources (index rebuild, --workers {}; counted in {:.1} s, one heap scan):\n  temp disk: min {} MiB ({b} index batches, about {:.1} s more), max {} MiB (one batch)\n  {verify}\n  memory: min {} MiB, this run {} MiB, recommended {} MiB (fewer spills; temp does not depend on it)\n  expected max RSS at this run's --mem: {} MiB, {} MiB with --verify (--mem plus what stays outside it, measured: docs/resources.md)\n",
             self.workers,
             self.scan_seconds,
             mib(lo),
@@ -352,7 +373,9 @@ impl ResourceEstimate {
             mib(hi),
             mib(self.mem_min()),
             mib(mem),
-            mib(self.mem_recommended())
+            mib(self.mem_recommended()),
+            mib(self.rss_expected_max(mem, false)),
+            mib(self.rss_expected_max(mem, true))
         )
     }
 }

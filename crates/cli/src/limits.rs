@@ -1,5 +1,5 @@
 //! The process-wide resource limits every subcommand shares: `--mem` (the memory limit; default a quarter of the
-//! physical memory) and `--spill-dir` (where stages that exceed it spill; default `<dest>/fastmig/spill`).
+//! physical memory, at least 256 MiB where half the memory allows) and `--spill-dir` (where stages that exceed it spill; default `<dest>/fastmig/spill`).
 //!
 //! Input: the parsed `--mem` / `--spill-dir` values and the target directory. Output: [`Limits`].
 //! `--mem` takes bytes with an optional K, M, G or T suffix (powers of 1024).
@@ -33,7 +33,12 @@ impl Limits {
     pub fn from(p: &Parsed, target_dir: &Path) -> Result<Limits, CliError> {
         let memory_limit_bytes = match p.value("--mem") {
             Some(v) => parse_size(v).ok_or_else(|| CliError::Usage(format!("bad --mem {v}")))?,
-            None => physical_memory()? / 4,
+            // at least 256 MiB (at most half the memory): from there every measured run stayed within --mem
+            // (docs/resources.md, "Memory outside --mem")
+            None => {
+                let p = physical_memory()?;
+                (p / 4).max((256 << 20).min(p / 2))
+            }
         };
         let spill_dir = match p.value("--spill-dir") {
             Some(d) => std::path::absolute(d)?,

@@ -1,7 +1,7 @@
 //! The one memory limit of a run (`--mem`), in bytes, shared by everything that holds keys in memory: heap-scan
 //! runs of every class and index, sort scratch, merge buffers.
 //!
-//! Input: the limit (cli `Limits::memory_limit_bytes`, default MemTotal/4, the same argument the verifier uses).
+//! Input: the limit (cli `Limits::memory_limit_bytes`, default MemTotal/4 and at least 256 MiB, the same argument the verifier uses).
 //! Output: grants held while the memory is in use, returned on drop.
 //! Source: workspace#493 (memory limit and spill, added at the user's request); the engine's counterpart is the
 //! index-build sort buffer (`index_build_buffer_size`, CBRD-27235, `system_parameter.c`) with runs spilled to

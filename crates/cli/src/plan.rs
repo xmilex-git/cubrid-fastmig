@@ -39,7 +39,7 @@ cubrid-fastmig plan <db> --dest <dir> [options]
   --no-clone                     plan byte copies even where the filesystem could clone
   --volumes-in-first-dir         find volumes 1.. next to volume 0 (a source copied without its headers rewritten)
   --workers <n>                  worker limit the resource table assumes (default: CPUs / 2)
-  --mem <size>                   memory limit the resource table assumes (default: physical memory / 4)
+  --mem <size>                   memory limit the resource table assumes (default: physical memory / 4, at least 256M)
   --verify                       also count the temp disk the verifier needs on the source (migrate --verify;
                                  one more read of every indexed heap)
   --json                         print plan.json instead of the table

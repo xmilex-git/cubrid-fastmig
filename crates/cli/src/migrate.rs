@@ -70,7 +70,7 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
   --source-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --target-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --lob-dir <dir>                target lob-base-path (default: <dest>/lob)
-  --mem <size>                   memory limit for the whole run, e.g. 16G (default: physical memory / 4)
+  --mem <size>                   memory limit for the whole run, e.g. 16G (default: physical memory / 4, at least 256M)
   --spill-dir <dir>              where stages over the memory limit spill (default: <dest>/fastmig/spill)
   --temp-disk min|max|<size>     temp disk limit: spill bytes on disk at once, kept by building indexes in batches
                                  (default: asked on a terminal, else max when it fits the free space;

@@ -85,16 +85,41 @@ space only as it writes (`SpillCursor::consume`, `SpillOut`): the bytes on disk 
 merge, so the temp disk bounds above hold. It costs one more read and write of the merged runs; at a memory limit
 that keeps few runs open, several rounds.
 
+### Memory outside `--mem`
+
 Outside `--mem`, and why:
 
 - per worker, fixed: the copy engine's I/O buffer, page buffers of the scan and the build (a few pages), thread
   stacks; a key longer than a third of the merge memory still merges two runs at a time;
-- proportional to the data, not to `--mem`: one sample key per 1024 pairs of a spilled run (`spill_run`), the leaf
-  summaries a build keeps for its upper levels (one key per leaf), page treatment's per-page counts (`HeapState`,
-  about 100 B a page) and the verifier's live row map (its own grant, `LiveRowMap`);
+- per spilled run (more runs at a smaller `--mem`): its descriptor, extents and one sample key per 1024 pairs
+  (`spill_run`), its shard bounds;
+- proportional to the data, not to `--mem`: the leaf summaries a build keeps for its upper levels (one key per
+  leaf), page treatment's per-page counts (`HeapState`, about 100 B a page);
 - proportional to the catalog: an 11.4 source's regenerated catalog rows (`catalog_layout::generate`; T1: 14 MB of
   the 21.7 MB peak at `--mem 2M`, valgrind massif);
-- the allocator's own: memory freed by one thread kept in its arena (RSS above the live heap).
+- the allocator's own: memory freed by one thread kept in its arena (RSS above the live heap; large blocks are
+  mapped, glibc `M_MMAP_THRESHOLD` fixed at 1 MiB).
+
+So the excess is no constant: it is largest at a small `--mem` (many runs) and below zero from 256 MiB, where the
+limit's own grants are not all touched. Measured max RSS (MiB), big develop and big 11.4 DBs (pair bytes 1.43 GiB
+each), `--workers 16`, CPU 0-15, default temp disk, binary c9def7d:
+
+| `--mem` | develop | develop `--verify` | 11.4 | 11.4 `--verify` |
+|---|---|---|---|---|
+| 16M | 54.6 (+38.6) | 86.1 (+70.1) | 66.9 (+50.9) | 89.2 (+73.2) |
+| 32M | 53.7 (+21.7) | 68.5 (+36.5) | 71.2 (+39.2) | 74.5 (+42.5) |
+| 64M | 76.9 (+12.9) | 87.6 (+23.6) | 89.0 (+25.0) | 91.6 (+27.6) |
+| 128M | 122.7 (−5.3) | 134.8 (+6.8) | 138.1 (+10.1) | 140.4 (+12.4) |
+| 256M | 220.1 (−35.9) | 219.3 (−36.7) | 251.9 (−4.1) | 249.5 (−6.5) |
+| 1G | 680.4 (−343.6) | 714.5 (−309.5) | 677.6 (−346.4) | 695.7 (−328.3) |
+
+`plan` shows the **expected max RSS** at the chosen `--mem` (`ResourceEstimate::rss_expected_max`): `--mem` plus
+12 MiB, plus 18 MiB when the catalog is regenerated, plus 32 MiB per GiB of pair bytes, plus with `--verify` 24 MiB
+per GiB of the verifier's source side — an upper envelope of every run measured (the table above, and T1 at
+`--mem 2M` and 8M: develop dirty 4 workers `--verify` 12.4 MB against 14.5 MiB, 11.4 dirty 29.3 MiB against
+33 MiB, 11.4 clean 16 workers `--mem 8M --verify` 37.0 MiB against 38.5 MiB), fitted, not proven. The default
+`--mem` (no option) is a quarter of the physical memory and at least 256 MiB where half the memory allows: from
+256 MiB every measured run stayed within `--mem`.
 
 T1 develop dirty, `--workers 4 --mem 2M` (below the old mem min): no `--verify` heap peak 5.3 MiB (3.4 MiB before
 the build starts); `--verify` max RSS 11.3 MiB. Before the merge bound, the build opened every spilled run in every
