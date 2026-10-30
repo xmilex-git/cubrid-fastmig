@@ -17,6 +17,7 @@
 
 use std::io;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::extdata::{self, ExtdataHeader};
 use crate::file_header::{FileHeader, FileType, Tablespace};
@@ -58,6 +59,8 @@ pub struct SpaceManager<'v> {
     growth: VolumeGrowth,
     /// The disk cache, loaded from the STABs at the first space change.
     disk: Mutex<Option<DiskCache>>,
+    /// User pages allocated so far (workspace#526: what the run writes outside the space it took at the start).
+    allocated: AtomicU64,
 }
 
 impl<'v> SpaceManager<'v> {
@@ -71,6 +74,7 @@ impl<'v> SpaceManager<'v> {
             trk_vfid,
             growth: VolumeGrowth::engine_default(vols.io_pagesize()),
             disk: Mutex::new(None),
+            allocated: AtomicU64::new(0),
         }
     }
 
@@ -223,12 +227,19 @@ impl<'v> SpaceManager<'v> {
     /// table, the file expanded when no page is free. The page is written with a header naming it, `ptype`, NULL
     /// LSA, and a zeroed body.
     pub fn alloc_page(&self, vfid: Vfid, ptype: PageType) -> io::Result<Vpid> {
+        self.allocated.fetch_add(1, Ordering::Relaxed);
         self.run(|op| alloc_user_page(op, vfid, ptype, false))
+    }
+
+    /// User pages allocated so far, every file.
+    pub fn allocated_pages(&self) -> u64 {
+        self.allocated.load(Ordering::Relaxed)
     }
 
     /// Like [`Self::alloc_page`] and records the page as the file's sticky first page (never deallocated; a heap's
     /// header page, a B-tree root, the tracker's item page). Refuses a file that already has one.
     pub fn alloc_sticky_first_page(&self, vfid: Vfid, ptype: PageType) -> io::Result<Vpid> {
+        self.allocated.fetch_add(1, Ordering::Relaxed);
         self.run(|op| alloc_user_page(op, vfid, ptype, true))
     }
 

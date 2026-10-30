@@ -466,9 +466,15 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         marker.record(p)?;
     }
     let catalog = catalog?;
+    // new pages of every file (B-trees, catalog, appended heap pages): written outside the space taken at the start
+    let allocated_pages = space.allocated_pages();
     drop(space);
     drop(vols);
     let added_volumes = added.len();
+    let added_bytes: u64 = added
+        .iter()
+        .map(|p| fs::metadata(p).map_or(0, |m| m.len()))
+        .sum();
     targets.extend(added);
     rep.lap("catalog_regeneration");
 
@@ -583,7 +589,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &catalog.json(),
         added_volumes,
         &format!(
-            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}}}",
+            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_added_volume_bytes\": {added_bytes}}}",
             temp_limit,
             limits.temp_disk.is_some(),
             TEMP_DISK.now_and_peak().1,
