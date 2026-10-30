@@ -30,6 +30,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// Memory one worker asks for at most; it gets less when the memory limit is smaller.
 pub const WORKER_SHARE: usize = 256 << 20;
 
+/// The least share a scan worker runs with: the spill write buffer and a run as large.
+pub const SCAN_MIN: usize = 2 * MERGE_BUFFER;
+
 /// Sectors per work unit (64 pages each at 16 KiB): small enough to spread a large heap, large enough that the
 /// queue costs nothing next to the pages.
 const UNIT_SECTORS: usize = 4;
@@ -93,9 +96,26 @@ where
                 .map(move |s| (c, s, (s + UNIT_SECTORS).min(n)))
         })
         .collect();
-    let permits = workers.acquire(units.len().max(1));
-    // half the limit for the workers' shares, the other half for finished runs kept in memory
+    let mut permits = workers.acquire(units.len().max(1));
+    // half the limit for the workers' shares, the other half for finished runs kept in memory; the shares are taken
+    // together and only as many workers run as get SCAN_MIN each: a worker with less spills one pair per run (the
+    // verifier at --mem 16M after its live row map: heap peak 1.1 GiB, workspace#526)
     let share = WORKER_SHARE.min(memory.limit() / (2 * permits.count));
+    let mut total = memory.try_acquire(share * permits.count);
+    let fed = (total.bytes / SCAN_MIN).min(permits.count);
+    if fed == 0 {
+        return Err(BuildError::Io(std::io::Error::other(format!(
+            "--mem leaves {} B for the heap scan, which needs at least {SCAN_MIN} B",
+            total.bytes
+        ))));
+    }
+    if fed < permits.count {
+        drop(permits);
+        permits = workers.acquire(fed);
+    }
+    let each = total.bytes / permits.count;
+    let grants: Mutex<Vec<_>> = Mutex::new((0..permits.count).map(|_| total.split(each)).collect());
+    drop(total);
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let first_err: Mutex<Option<BuildError>> = Mutex::new(None);
@@ -119,8 +139,9 @@ where
                 &page_rows,
                 &worker_state,
             );
+            let grants = &grants;
             s.spawn(move || {
-                let grant = memory.try_acquire(share);
+                let grant = grants.lock().unwrap().pop().unwrap();
                 let mut state = worker_state();
                 let mut done: Vec<(usize, Vec<IndexRuns<'m>>, Vec<u64>)> = Vec::new();
                 let mut cur: Option<Writers> = None;

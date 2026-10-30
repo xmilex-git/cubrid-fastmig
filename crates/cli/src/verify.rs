@@ -103,9 +103,14 @@ fn open(a: &DbArg, role: Role) -> io::Result<Database> {
     }
 }
 
-/// Spill bytes the verifier's source side takes when every pair spills (`fastmig_verify::run::heap_pair_bytes`), the
+/// Spill bytes the verifier's source side takes when every pair spills, and its heap pages
+/// (`fastmig_verify::run::heap_pair_bytes`), the
 /// log read through the header `src` holds locked (workspace#526: the temp disk `--verify` needs).
-pub fn source_pair_bytes(src: &OpenSource, locate: Locate, workers: usize) -> io::Result<u64> {
+pub fn source_pair_bytes(
+    src: &OpenSource,
+    locate: Locate,
+    workers: usize,
+) -> io::Result<(u64, usize)> {
     let db = Database::open_with_log(
         &src.entry.first_volume(),
         locate,

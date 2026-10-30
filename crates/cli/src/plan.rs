@@ -198,7 +198,9 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         limits::physical_memory()?,
     )?;
     if p.switch("--verify") {
-        est.verify_source = Some(verify::source_pair_bytes(&s, o.locate, est.workers)?);
+        let (bytes, pages) = verify::source_pair_bytes(&s, o.locate, est.workers)?;
+        est.verify_source = Some(bytes);
+        est.verify_heap_pages = Some(pages);
     }
     let t = target_space::bound(
         &plan,

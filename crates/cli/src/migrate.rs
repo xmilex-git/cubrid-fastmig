@@ -192,14 +192,22 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         o.worker_limit,
         limits::physical_memory()?,
     )?;
-    if o.verify {
-        est.verify_source = Some(verify::source_pair_bytes(
-            &src,
-            o.plan.locate,
-            o.worker_limit,
-        )?);
-    }
     let mem = o.limits.memory_limit_bytes;
+    if o.verify {
+        let (bytes, pages) = verify::source_pair_bytes(&src, o.plan.locate, o.worker_limit)?;
+        est.verify_source = Some(bytes);
+        est.verify_heap_pages = Some(pages);
+        // refused before anything is written: under it the verifier's scan workers get no share (workspace#526)
+        let need = est.verify_mem_min().unwrap_or(0);
+        if mem < need {
+            return Err(CliError::Failed(io::Error::other(format!(
+                "--verify with --workers {} needs --mem {} KiB at least (the verifier's live row map, merge floors and \
+                 scan shares)",
+                o.worker_limit,
+                need >> 10
+            ))));
+        }
+    }
     let target = target_space::bound(
         &plan,
         &est,

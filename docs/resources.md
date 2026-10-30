@@ -55,6 +55,10 @@ left. The first formula, `T − (mem/2 − share)`, was not a bound: T1 develop 
 - **mem min** = per worker the larger of the copy engine's 256 KiB I/O buffer and what the index build needs,
   449 KiB (`intermediate_merge::WORKER_MIN`: the merge floor, and a scan share holding the 64 KiB spill write buffer
   and a run as large); `migrate` refuses less (`limits::mem_min`). Above it the keys spill instead of failing.
+- **verify mem min** (`plan --verify`, `migrate --verify`): the verifier also reserves its live row map before its
+  scan (`ESTIMATE_PAGE_BYTES` per source heap page), so it needs that, the merge floors and one scan share
+  (`SCAN_MIN`, 128 KiB) per worker (`fastmig_verify::run::memory_min`); `migrate --verify` refuses less before
+  anything is written. Big develop DB, 16 workers: 11.4 MiB (mem min 7.0 MiB).
 - **mem recommended** = `2 × (Σ T_i + 256 MiB)`, at most the physical memory: room for every pair, counted in
   spill bytes, in finished runs. It spills less, not nothing; the temp figures do not depend on `--mem`.
 
@@ -64,14 +68,17 @@ Inside `--mem` (one `MemoryLimit`, grants returned on drop):
 
 - each scan worker's share, `min(256 MiB, mem / (2 × workers))`: its writers' runs (keys, radix words, entries and
   the sort's spare entries, `Run::bytes`) and the 64 KiB write buffer of the one spill it makes at a time;
+  the shares are taken together and only as many workers scan as get `SCAN_MIN` each (none: refused). The
+  verifier at `--mem 16M` on the big develop DB, its live row map taken first, left its 16 workers shares too small for
+  more than a few pairs per run: heap peak 1.1 GiB, 994 s in its run sort (target and source);
 - a finished run kept in memory: only with a grant of its size taken when the limit has room, else spilled;
 - the merges: a floor of three open runs per worker (`MERGE_FLOOR`, 193 KiB) taken before the scan, and after the
   scan everything the limit has free, split per worker (*merge memory*). One open spill run costs its 64 KiB read
   buffer, 256 B of cursor and its longest key (`open_cost`). An index with more spilled runs than one worker's merge
-  memory holds is first reduced by **intermediate merges**: its smallest runs, as many as fit, merged into one
-  until the rest fit (`intermediate_merge::bound_open_runs`). Each shard of the final merge holds a worker permit
+  memory holds is first reduced by **intermediate merges**: its smallest runs (a heap by size), as many as fit,
+  merged into one until the rest fit (`intermediate_merge::bound_open_runs`). Each shard of the final merge holds a worker permit
   and opens at most that many runs, so the merges running at once stay within the merge memory. The verifier does
-  the same before its check-2 merges.
+  the same before its check-2 merges, and gives the merge memory back before its root heap scan.
 
 An intermediate merge frees each range of its inputs as soon as it is in a read buffer and takes its output's
 space only as it writes (`SpillCursor::consume`, `SpillOut`): the bytes on disk never exceed the runs before the

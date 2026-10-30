@@ -12,6 +12,7 @@
 //! runs); engine counterpart `external_sort.c` `sort_exphase_merge` (merges runs in passes of the buffers it has).
 
 use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::io;
 
 use crate::key_order::KeyOrder;
@@ -32,7 +33,7 @@ pub const MERGE_FLOOR: usize = 3 * (MERGE_BUFFER + CURSOR_BYTES + 256);
 
 /// The memory limit per worker the index build needs at least: its merge floor, and a heap scan share (half the
 /// limit over the workers) that holds the spill write buffer and a run of as many bytes.
-pub const WORKER_MIN: usize = MERGE_FLOOR + 2 * (2 * MERGE_BUFFER);
+pub const WORKER_MIN: usize = MERGE_FLOOR + 2 * crate::heap_scan::SCAN_MIN;
 
 /// Memory one open spill run of `runs` takes in a merge: its read buffer, cursor and longest key.
 pub fn open_cost(runs: &IndexRuns) -> usize {
@@ -60,21 +61,47 @@ pub fn bound_open_runs(
     budget: usize,
 ) -> io::Result<()> {
     let cap = max_open(budget, open_cost(runs));
-    while runs.spilled.len() > cap {
+    if runs.spilled.len() <= cap {
+        return Ok(());
+    }
+    // smallest first, kept in a heap: re-sorting every round is O(n² log n) in the runs (workspace#526)
+    let mut heap: BinaryHeap<BySize> = std::mem::take(&mut runs.spilled)
+        .into_iter()
+        .map(BySize)
+        .collect();
+    while heap.len() > cap {
         // only as many as bring the count to the cap: the fewest bytes merged twice
-        let k = (cap - 1).min(runs.spilled.len() - cap + 1);
-        runs.spilled.sort_by_key(|r| Reverse(r.bytes()));
-        let group = runs.spilled.split_off(runs.spilled.len() - k);
-        let cursors = group
-            .into_iter()
-            .map(|r| SpillCursor::consume(r, MERGE_BUFFER).map(Cursor::File))
+        let k = (cap - 1).min(heap.len() - cap + 1);
+        let cursors = (0..k)
+            .map(|_| SpillCursor::consume(heap.pop().unwrap().0, MERGE_BUFFER).map(Cursor::File))
             .collect::<io::Result<Vec<_>>>()?;
         let mut stream = KwayMerge::new(cursors, order);
         let mut out = SpillOut::new(dir, MERGE_BUFFER)?;
         while let Some((key, oid)) = stream.next_pair()? {
             out.push(key, oid)?;
         }
-        runs.spilled.push(out.finish()?);
+        heap.push(BySize(out.finish()?));
     }
+    runs.spilled = heap.into_iter().map(|r| r.0).collect();
     Ok(())
+}
+
+/// A spilled run ordered smallest first in a max-heap.
+struct BySize(SpillRun);
+
+impl PartialEq for BySize {
+    fn eq(&self, o: &Self) -> bool {
+        self.0.bytes() == o.0.bytes()
+    }
+}
+impl Eq for BySize {}
+impl PartialOrd for BySize {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for BySize {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        Reverse(self.0.bytes()).cmp(&Reverse(o.0.bytes()))
+    }
 }

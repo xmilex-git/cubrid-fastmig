@@ -54,6 +54,8 @@ pub struct ResourceEstimate {
     pub physical_memory: u64,
     /// Spill bytes the verifier's source side takes (`verify::source_pair_bytes`), counted only for `--verify`.
     pub verify_source: Option<u64>,
+    /// Heap pages of the source the verifier reads (its live row map), counted with `verify_source`.
+    pub verify_heap_pages: Option<usize>,
 }
 
 fn invalid(e: impl std::fmt::Display) -> io::Error {
@@ -208,6 +210,7 @@ fn count(
         workers,
         physical_memory: 0,
         verify_source: None,
+        verify_heap_pages: None,
     })
 }
 
@@ -226,6 +229,13 @@ impl ResourceEstimate {
     /// then on the source; None when the source side was not counted.
     pub fn verify_min(&self) -> Option<u64> {
         self.verify_source.map(|s| s.max(self.temp_max()))
+    }
+
+    /// The least `--mem` `--verify` runs in (`fastmig_verify::run::memory_min` on the source's heap pages, at least
+    /// `mem_min`); None when the source side was not counted.
+    pub fn verify_mem_min(&self) -> Option<u64> {
+        self.verify_heap_pages
+            .map(|p| (fastmig_verify::run::memory_min(p, self.workers) as u64).max(self.mem_min()))
     }
 
     /// Batches a temp limit cuts the indexes into; None below `temp_min`.
@@ -266,7 +276,7 @@ impl ResourceEstimate {
             })
             .collect();
         format!(
-            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"indexes\": [{}]}}",
+            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_mem_min_bytes\": {}, \"indexes\": [{}]}}",
             self.scan_seconds,
             self.workers,
             self.extra_seconds(b),
@@ -274,6 +284,7 @@ impl ResourceEstimate {
             self.mem_recommended(),
             opt(self.verify_source),
             opt(self.verify_min()),
+            opt(self.verify_mem_min()),
             idx.join(", ")
         )
     }
@@ -285,10 +296,11 @@ impl ResourceEstimate {
         let b = self.batches(lo).unwrap_or(0);
         let verify = match self.verify_min() {
             Some(v) => format!(
-                "--verify needs >= {} MiB: the verifier spills every index in one scan, on the target ({} MiB) then on the source ({} MiB)",
+                "--verify needs >= {} MiB: the verifier spills every index in one scan, on the target ({} MiB) then on the source ({} MiB) and --mem >= {} MiB (its live row map, merge floors and scan shares)",
                 mib(v),
                 mib(hi),
-                mib(self.verify_source.unwrap_or(0))
+                mib(self.verify_source.unwrap_or(0)),
+                mib(self.verify_mem_min().unwrap_or(0))
             ),
             None => "--verify needs >= temp max and the source side (counted by plan --verify; docs/resources.md)".into(),
         };

@@ -211,11 +211,25 @@ fn heap_jobs<'a>(
 }
 
 /// The spill bytes the heap side of this verifier takes on `db` when every pair spills: the pairs its own reader
-/// extracts, counted without keeping them (workspace#526: the temp disk `--verify` needs on the source).
-pub fn heap_pair_bytes(db: &Database, workers: usize) -> std::io::Result<u64> {
+/// extracts, counted without keeping them (workspace#526: the temp disk `--verify` needs on the source); and the
+/// heap pages its live row map is reserved for.
+pub fn heap_pair_bytes(db: &Database, workers: usize) -> std::io::Result<(u64, usize)> {
     let x = open_indexes(db);
-    let (_, _, jobs) = heap_jobs(db, &x.specs, &x.trees);
-    crate::heap_pass::pair_bytes(db, &jobs, workers)
+    let (heap_classes, _, jobs) = heap_jobs(db, &x.specs, &x.trees);
+    Ok((
+        crate::heap_pass::pair_bytes(db, &jobs, workers)?,
+        heap_pages(db, &heap_classes),
+    ))
+}
+
+/// User pages of every heap the pass reads, the root heap included: what the live row map is reserved for.
+fn heap_pages(db: &Database, heap_classes: &[usize]) -> usize {
+    heap_classes
+        .iter()
+        .map(|&i| db.classes[i].class.heap)
+        .chain(std::iter::once(db.boot.rootclass_hfid))
+        .map(|h| FileTable::read(&db.vols, h.vfid).map_or(0, |ft| ft.user_pages().len()))
+        .sum()
 }
 
 pub fn verify_database(
@@ -244,13 +258,7 @@ pub fn verify_database(
     // one multi-class scan over every heap (workspace#503), then the class checks in class order
     let (heap_classes, feeds, jobs) = heap_jobs(db, &specs, &trees);
     // the live row map is reserved before the scan, from the heaps' page counts (workspace#509)
-    let heap_pages: usize = heap_classes
-        .iter()
-        .map(|&i| db.classes[i].class.heap)
-        .chain(std::iter::once(db.boot.rootclass_hfid))
-        .map(|h| FileTable::read(&db.vols, h.vfid).map_or(0, |ft| ft.user_pages().len()))
-        .sum();
-    let mut live = LiveRowMap::reserve(lim.memory, heap_pages)?;
+    let mut live = LiveRowMap::reserve(lim.memory, heap_pages(db, &heap_classes))?;
     // merge memory (fastmig_index::intermediate_merge): a floor per worker held from before the scan, which cannot
     // take it, and after the sorts all the limit has free; each check-2 job merges within one worker's part
     let floor = lim.memory.try_acquire(lim.workers.limit() * MERGE_FLOOR);
@@ -391,6 +399,8 @@ pub fn verify_database(
         r.index_pairs += sum.live_objects as u64;
     }
     phases.push(("index merge and foreign keys", t_merge.elapsed()));
+    // the keys are checked: their runs, spill space and the merge memory go back before the root heap's own scan
+    drop((plans, index_runs, free, floor));
 
     phase(&mut phases, "root heap", || -> std::io::Result<()> {
         let t = HeapTarget {
@@ -559,4 +569,11 @@ impl TreeJob<'_, '_, '_> {
             }
         }
     }
+}
+
+/// The least `--mem` the verifier runs `workers` workers in over `heap_pages` heap pages: the live row map's
+/// reservation, the merge floor of every worker, and one heap scan share per worker (workspace#526).
+pub fn memory_min(heap_pages: usize, workers: usize) -> usize {
+    heap_pages * crate::live_row_map::ESTIMATE_PAGE_BYTES
+        + workers * (MERGE_FLOOR + fastmig_index::heap_scan::SCAN_MIN)
 }
