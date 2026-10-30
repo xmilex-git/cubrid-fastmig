@@ -33,6 +33,7 @@ pub mod source_version;
 pub mod spage;
 pub mod tde_keys;
 pub mod tde_metadata;
+pub mod vacuum_data;
 pub mod value;
 pub mod version_line;
 pub mod volume_addition;

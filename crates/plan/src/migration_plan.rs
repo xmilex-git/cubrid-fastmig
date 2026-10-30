@@ -147,7 +147,7 @@ pub struct Plan {
     /// Pages the run may rewrite in place, an upper bound (workspace#526): what a cloned volume must unshare besides
     /// the new B-trees — every live heap page when the catalog is regenerated (11.4 → develop), else the treated
     /// pages and the root heap (class objects get the rebuilt BTIDs); and the pages single-page deallocations retype
-    /// (every overflow heap page, the file tracker).
+    /// (every overflow heap page, the file tracker, the vacuum data file).
     pub rewritten_pages_bound: u64,
     /// The target can unshare a clone's blocks (XFS) and a volume is cloned: `unshare_ranges` are taken at the
     /// start and the rewritten pages leave the reservation (workspace#526).
@@ -445,6 +445,9 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     }
     let trk = FileHeader::read(&i.vols.read_page(boot.trk_vfid.header_vpid())?);
     retyped_pages += (trk.n_page_user.max(0) + trk.n_page_ftab.max(0)) as u64;
+    // the vacuum data file: its first page is emptied in place and every later page deallocated (workspace#551)
+    let vacuum_data = FileHeader::read(&i.vols.read_page(boot.vacuum_data_vfid.header_vpid())?);
+    retyped_pages += (vacuum_data.n_page_user.max(0) + vacuum_data.n_page_ftab.max(0)) as u64;
 
     if matches!(
         version,
@@ -776,14 +779,14 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             .map(|(v, _, _)| *v),
     );
     // the heaps the run rewrites in place: every live heap when the catalog is regenerated, else every heap but the
-    // user classes' (catalog rows, boot parameters), the root heap and, with vacuum work pending, the treated heaps; and every live overflow heap and
-    // the tracker (retyped pages)
+    // user classes' (catalog rows, boot parameters), the root heap and, with vacuum work pending, the treated heaps; and every live overflow heap,
+    // the tracker and the vacuum data file (retyped pages)
     let user: HashSet<Oid> = treatments
         .iter()
         .filter(|t| !t.system)
         .map(|t| t.oid)
         .collect();
-    let mut rewritten_files: Vec<Vfid> = vec![boot.trk_vfid];
+    let mut rewritten_files: Vec<Vfid> = vec![boot.trk_vfid, boot.vacuum_data_vfid];
     rewritten_files.extend(
         class_files
             .iter()

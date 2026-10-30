@@ -32,8 +32,8 @@ use fastmig_ondisk::catalog_dir::{BtStats, PKEYS_NUM};
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::{HeapReport, VacuumHorizon};
 use fastmig_ondisk::log_header::LogHeader;
-use fastmig_ondisk::tde_metadata;
 use fastmig_ondisk::{Btid, Oid, SourceVersion, VersionLine};
+use fastmig_ondisk::{tde_metadata, vacuum_data};
 use fastmig_progress::Meter;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -128,6 +128,8 @@ pub fn prepare(
         ))
     })?;
     let horizon = VacuumHorizon::read(vols, src_log, boot.vacuum_data_vfid)?;
+    // its entries name source log blocks the target lacks; read into the horizon above, then emptied (workspace#551)
+    vacuum_data::empty(space, boot.vacuum_data_vfid)?;
     // every old file goes before the first new allocation (workspace#482 10.2), B-trees included (workspace#503)
     let freed_files = free_old_files(space, &source)?.len() + free_btree_files(space)?;
     // 10.2 has no TDE metadata; develop needs it to load its TDE module and run vacuum. Its heap must lie in volume 0,
@@ -300,6 +302,8 @@ pub fn same_version_prepare(
     let (_, boot) = BootDbParm::read(vols)?;
     let cat = SameVersionCatalog::read(vols, line)?;
     let horizon = VacuumHorizon::read(vols, src_log, boot.vacuum_data_vfid)?;
+    // its entries name source log blocks the target lacks; read into the horizon above, then emptied (workspace#551)
+    vacuum_data::empty(space, boot.vacuum_data_vfid)?;
     // every old file goes before the first new allocation (workspace#482 10.2)
     let freed_files = free_catalog_file(space)? + free_btree_files(space)?;
     let reports = patch_heaps(space, &cat, &horizon, treatment_meter)?;
