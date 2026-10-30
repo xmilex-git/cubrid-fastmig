@@ -204,6 +204,10 @@ _Avoid_: 쓰레기 파일, 누수 파일
 `--workers`로 정하는, 도구가 한꺼번에 쓰는 스레드 수의 상한. 볼륨 처리·카탈로그 재생성·인덱스 빌드·검증기가 나눠 쓴다.
 _Avoid_: 병렬도, 스레드 수
 
+**저장 장치 종류 (storage kind)**:
+한 디렉터리가 놓인 블록 장치의 부류: nvme, sata-ssd, hdd. sysfs로 정한다 — 회전 장치(`queue/rotational` = 1)는 hdd, 이름이 `nvme`로 시작하면 nvme, 나머지 비회전 장치는 sata-ssd. 파티션은 그 디스크로, device-mapper·md는 그 아래 장치 중 가장 느린 것으로 본다. 블록 장치가 없는 경로(tmpfs, NFS)는 nvme로 둔다. 출발 볼륨, 도착 디렉터리, `--spill-dir`(temp)을 따로 판별해 `plan`에 보이고, 기본 처리량과 I/O 동시성이 이것을 따른다([workspace#561](https://github.com/xmilex-git/workspace/issues/561)).
+_Avoid_: 디스크 타입, 매체
+
 **메모리 상한 (memory limit)**:
 `--mem`으로 정하는, 도구가 키·정렬·merge 버퍼 등에 쓰는 메모리의 상한. 모든 단계가 하나를 나눠 쓴다([ADR 0012](docs/adr/0012-one-memory-limit-with-spill.md)).
 _Avoid_: 버퍼 크기, sort buffer

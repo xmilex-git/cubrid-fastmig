@@ -13,9 +13,11 @@ pub mod monitor;
 pub mod render_line;
 pub mod render_screen;
 pub mod report;
+pub mod storage_kind;
 pub mod unit;
 
 pub use default_rates::DefaultRate;
 pub use meter::{Meter, PhaseSpec, Progress};
 pub use monitor::{HeapProbe, Mode, Monitor, TempProbe};
+pub use storage_kind::StorageKind;
 pub use unit::Unit;
