@@ -1,0 +1,30 @@
+
+Time: 10/29/26 23:05:28.365 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 3354  CODE = -972, Tran = -1, EID = 4
+Program 'csql' (pid 1410226) was connected from the host 'ilhansong_data3'. (transaction index 1)
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:28:58.145 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 3354  CODE = -972, Tran = -1, EID = 4
+Program 'csql' (pid 1494384) was connected from the host 'ilhansong_data3'. (transaction index 1)
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:29:13.265 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 3354  CODE = -972, Tran = -1, EID = 4
+Program 'csql' (pid 1494598) was connected from the host 'ilhansong_data3'. (transaction index 1)
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:48:20.949 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 3354  CODE = -972, Tran = -1, EID = 16
+Program 'csql' (pid 1538178) was connected from the host 'ilhansong_data3'. (transaction index 1)
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:52:45.400 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 3354  CODE = -972, Tran = -1, EID = 4
+Program 'csql' (pid 1555749) was connected from the host 'ilhansong_data3'. (transaction index 1)
+
+*** The previous error message is the last one. ***
+

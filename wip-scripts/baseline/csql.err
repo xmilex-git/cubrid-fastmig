@@ -1,0 +1,200 @@
+
+Time: 10/29/26 23:05:28.290 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 993  CODE = -1190, Tran = -1, EID = 1
+Stand-alone vacuum execution is started.
+
+Time: 10/29/26 23:05:28.341 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 1086  CODE = -1191, Tran = -1, EID = 2
+Stand-alone vacuum execution is ended.
+
+Time: 10/29/26 23:05:28.365 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = -1, EID = 3
+Server status is UP.
+
+Time: 10/29/26 23:05:29.313 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = 1, EID = 5
+Server status is DOWN.
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:06:13.716 - NOTIFICATION *** file /home/cubrid/dev/cubrid-worktree/fastmig-dev/src/transaction/boot_cl.c, line 888  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1411864) connected to database server 'fmbl' on the host 'localhost' (port 1711).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:07:00.590 - NOTIFICATION *** file /home/cubrid/dev/cubrid-worktree/fastmig-dev/src/transaction/boot_cl.c, line 888  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1412787) connected to database server 'fmbl' on the host 'localhost' (port 1711).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:07:35.993 - NOTIFICATION *** file /home/cubrid/dev/cubrid-worktree/fastmig-dev/src/transaction/boot_cl.c, line 888  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1414126) connected to database server 'fmbl' on the host 'localhost' (port 1711).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:28:57.108 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 993  CODE = -1190, Tran = -1, EID = 1
+Stand-alone vacuum execution is started.
+
+Time: 10/29/26 23:28:57.117 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 1086  CODE = -1191, Tran = -1, EID = 2
+Stand-alone vacuum execution is ended.
+
+Time: 10/29/26 23:28:58.145 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = -1, EID = 3
+Server status is UP.
+
+Time: 10/29/26 23:28:58.148 - SYNTAX ERROR *** file /home/jenkins/workspace/cubrid_release_11.4/src/parser/query_result.c, line 377 ERROR CODE = -494, Tran = 1, EID = 5
+Semantic: Data overflow on data type integer. select datetime '2020-01-01 00:00:00'+ mod(895000, 5000000)*...
+
+Time: 10/29/26 23:28:58.148 - SYNTAX ERROR *** file /home/jenkins/workspace/cubrid_release_11.4/src/compat/db_vdb.c, line 1051 ERROR CODE = -492, Tran = 1, EID = 6
+Data overflow on data type integer.
+
+Time: 10/29/26 23:28:58.202 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = 1, EID = 7
+Server status is DOWN.
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:29:13.239 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 993  CODE = -1190, Tran = -1, EID = 1
+Stand-alone vacuum execution is started.
+
+Time: 10/29/26 23:29:13.248 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 1086  CODE = -1191, Tran = -1, EID = 2
+Stand-alone vacuum execution is ended.
+
+Time: 10/29/26 23:29:13.265 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = -1, EID = 3
+Server status is UP.
+
+Time: 10/29/26 23:29:13.268 - SYNTAX ERROR *** file /home/jenkins/workspace/cubrid_release_11.4/src/compat/db_vdb.c, line 1051 ERROR CODE = -492, Tran = 1, EID = 5
+In line 1, column 2 before ' = (b.n - 1) * 65536 + a.n numbers up to 65536^2 rows.
+-- Inte...'
+Syntax error: unexpected 'm', expecting SELECT or VALUE or VALUES or '('
+
+Time: 10/29/26 23:29:16.017 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = 1, EID = 6
+Server status is DOWN.
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:30:48.607 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1495962) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:30:48.661 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1495966) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:30:49.046 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1495971) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:30:53.824 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1496026) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:44:39.855 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1524373) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:44:41.047 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1524395) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:44:41.351 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1524400) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:44:45.549 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1524462) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:44:45.731 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_cl.c, line 1085  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1524467) connected to database server 'fm114_clean' on the host 'localhost' (port 1708).
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:48:20.820 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 817  CODE = -1128, Tran = -1, EID = 1
+Log recovery is started.
+
+Time: 10/29/26 23:48:20.820 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 821  CODE = -1296, Tran = -1, EID = 2
+Log recovery: ANALYSIS Phase is started.
+
+Time: 10/29/26 23:48:20.821 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 826  CODE = -1300, Tran = -1, EID = 3
+Log recovery: ANALYSIS Phase is finished.
+
+Time: 10/29/26 23:48:20.821 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 862  CODE = -1297, Tran = -1, EID = 4
+Log recovery: REDO Phase is started. Log pages to redo: 1, Log records to redo: 2.
+
+Time: 10/29/26 23:48:20.821 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 3913  CODE = -1299, Tran = -1, EID = 5
+Log recovery: REDO Phase is being finished up.
+
+Time: 10/29/26 23:48:20.826 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 867  CODE = -1300, Tran = -1, EID = 6
+Log recovery: REDO Phase is finished.
+
+Time: 10/29/26 23:48:20.826 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 4511  CODE = -1298, Tran = -1, EID = 7
+Log recovery: UNDO Phase is started. Log pages to undo: 1, transactions to undo: 1.
+
+Time: 10/29/26 23:48:20.826 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 4955  CODE = -1299, Tran = -1, EID = 8
+Log recovery: UNDO Phase is being finished up.
+
+Time: 10/29/26 23:48:20.827 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 880  CODE = -1300, Tran = -1, EID = 9
+Log recovery: UNDO Phase is finished.
+
+Time: 10/29/26 23:48:20.827 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_page_buffer.c, line 7189  CODE = -977, Tran = -1, EID = 10
+Checkpoint started (previous checkpoint page id: 1250597, previous redo page id: 1250597).
+
+Time: 10/29/26 23:48:20.903 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_page_buffer.c, line 7622  CODE = -978, Tran = -1, EID = 11
+Checkpoint finished (checkpoint page id: 1250597, checkpoint redo page id: 1250597, flushed page count: 0).
+
+Time: 10/29/26 23:48:20.904 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/log_recovery.c, line 952  CODE = -1129, Tran = -1, EID = 12
+Log recovery is finished.
+
+Time: 10/29/26 23:48:20.928 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 993  CODE = -1190, Tran = -1, EID = 13
+Stand-alone vacuum execution is started.
+
+Time: 10/29/26 23:48:20.934 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 1086  CODE = -1191, Tran = -1, EID = 14
+Stand-alone vacuum execution is ended.
+
+Time: 10/29/26 23:48:20.949 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = -1, EID = 15
+Server status is UP.
+
+Time: 10/29/26 23:48:21.082 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = 1, EID = 17
+Server status is DOWN.
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/29/26 23:52:45.379 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 993  CODE = -1190, Tran = -1, EID = 1
+Stand-alone vacuum execution is started.
+
+Time: 10/29/26 23:52:45.385 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/query/vacuum.c, line 1086  CODE = -1191, Tran = -1, EID = 2
+Stand-alone vacuum execution is ended.
+
+Time: 10/29/26 23:52:45.400 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = -1, EID = 3
+Server status is UP.
+
+Time: 10/29/26 23:52:45.473 - NOTIFICATION *** file /home/jenkins/workspace/cubrid_release_11.4/src/transaction/boot_sr.c, line 240  CODE = -973, Tran = 1, EID = 5
+Server status is DOWN.
+
+*** The previous error message is the last one. ***
+
+
+Time: 10/30/26 00:05:28.267 - NOTIFICATION *** file /home/cubrid/dev/cubrid-worktree/fastmig-dev/src/transaction/boot_cl.c, line 888  CODE = -971, Tran = -1, EID = 1
+Program 'csql' (pid 1641116) connected to database server 'fmbl' on the host 'localhost' (port 1711).
+
+*** The previous error message is the last one. ***
+

@@ -1,0 +1,9 @@
+
+Start schema loading.
+Total        1 statements executed.Total        2 statements executed.       3 statements executed. Commit transaction at line 15
+Total        3 statements executed.Total        3 statements executed.
+Schema loading from /home/cubrid/dev/workspace/.git_ignored_dir/scratch/baseline/runs/big/SA-w1-r1/unload/fm114_clean_trigger finished.
+Statistics for Catalog classes have been updated.
+
+
+*** Closing the database ***
