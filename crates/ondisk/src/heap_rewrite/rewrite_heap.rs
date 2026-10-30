@@ -1,5 +1,6 @@
-//! Rewrites one heap file of the target in place into develop's format: the pages that need it are patched or
-//! re-encoded, then the header page becomes (11.4 source) or stays (develop source) develop's with its bestspace pages.
+//! Rewrites one heap file of the target in place into the target line's format: the pages that need it are patched or
+//! re-encoded, then the header page becomes (11.4 source, develop target) or stays (develop source) develop's with its
+//! bestspace pages; an 11.4 target keeps the 11.4 source's 296 B header with its counts written (workspace#533).
 //!
 //! Input: a [`SpaceManager`] over the target (a copy of the source volumes), the source's [`VacuumHorizon`] and a
 //! [`HeapJob`]. Output: the heap rewritten; a [`HeapReport`] with what changed and the statistics written.
@@ -11,8 +12,9 @@
 //! The isolated pages of a heap may have been rewritten already by the parallel first pass
 //! ([`crate::heap_rewrite::rewrite_isolated_pages`], `HeapJob::isolated`): the walk reads them in their chain place
 //! and rewrites the rest; the bytes are those of the walk alone (workspace#536).
-//! A develop source (the same-version path, workspace#501) has its bestspace pages in the chain already: they are
-//! never patched nor counted, and a heap that is not walked is left byte-identical, header included.
+//! A source of the target line (the same-version path, workspace#501, #533) that is not walked is left byte-identical,
+//! header included. A develop source has its bestspace pages in the chain already: they are
+//! never patched nor counted.
 //! Source: workspace#482 decision 10 (patch/transform after releases, before index builds), R2 § 3 R1-R7.
 
 use std::io;
@@ -71,7 +73,7 @@ pub struct HeapReport {
     pub stats: PageStats,
 }
 
-/// Rewrites heap `job.hfid` of the target `space` (`job.source_line` layout in, develop layout out).
+/// Rewrites heap `job.hfid` of the target `space` (`job.source_line` layout in, `space.line()` layout out).
 pub fn rewrite_heap(
     space: &SpaceManager,
     horizon: &VacuumHorizon,
@@ -97,14 +99,14 @@ pub fn rewrite_heap(
         src.last_vpid,
     );
     st.header_reserve =
-        HeapHdrStats::size(VersionLine::Develop) - HeapHdrStats::size(job.source_line);
+        HeapHdrStats::size(space.line()).saturating_sub(HeapHdrStats::size(job.source_line));
     let bestspace_pages: &[Vpid] = match &src.line {
         LineFields::Develop(d) => &d.pages,
         LineFields::V11_4(_) => &[],
     };
 
     let walk = job.re_encode.is_some() || horizon.pending;
-    if !walk && job.source_line == VersionLine::Develop {
+    if !walk && job.source_line == space.line() {
         // nothing to clean and nothing to convert: header and pages stay as the source wrote them (workspace#501)
         return Ok(untouched(job, &src, bestspace_pages));
     }
@@ -185,7 +187,7 @@ pub fn rewrite_heap(
             .map_or(PageTreatment::Patch, PageTreatment::Transform),
     )?);
     rewritten += 1;
-    let header = rewrite_header(&mut st, &src, walk, job.root)?;
+    let header = rewrite_header(&mut st, &src, walk, job.root, space.line())?;
     st.flush()?;
     Ok(HeapReport {
         hfid: job.hfid,

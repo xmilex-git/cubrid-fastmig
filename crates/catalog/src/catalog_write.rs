@@ -16,7 +16,7 @@ use std::io;
 
 use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::catalog_dir::{self, BtStats, CatalogItem};
-use fastmig_ondisk::class_object::{class_properties, decode, encode_develop};
+use fastmig_ondisk::class_object::{class_properties, decode, encode};
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::HeapWriter;
 use fastmig_ondisk::value::DecodeResult;
@@ -170,7 +170,7 @@ pub fn write_catalog(
     let (_, boot) = BootDbParm::read(vs)?;
     let mut root = HeapWriter::open(space, boot.rootclass_hfid)?;
     for t in &targets {
-        root.place(t.oid, &encode_develop(&t.class), false)?;
+        root.place(t.oid, &encode(&t.class, VersionLine::Develop), false)?;
     }
     let stats = root.finish()?;
     layout.heap_stats.insert(boot.rootclass_hfid, stats);
@@ -189,7 +189,7 @@ pub fn write_catalog(
             .copied()
             .unwrap_or_default();
         items.extend(
-            class_catalog_items(t, layout.records[&oid], stats)
+            class_catalog_items(t, layout.records[&oid], stats, layout.line)
                 .map_err(|e| invalid(format!("catalog records of {oid:?}: {e}")))?,
         );
     }
@@ -231,8 +231,10 @@ fn write_items(
     items: Vec<CatalogItem>,
 ) -> io::Result<()> {
     let vs = space.volumes();
-    let built = catalog_dir::build_pages(&items, vs.io_pagesize(), &layout.catalog_pages);
-    let planned = catalog_dir::build_pages(&layout.catalog_items, vs.io_pagesize(), &[]);
+    let built =
+        catalog_dir::build_pages(&items, layout.line, vs.io_pagesize(), &layout.catalog_pages);
+    let planned =
+        catalog_dir::build_pages(&layout.catalog_items, layout.line, vs.io_pagesize(), &[]);
     if built.at != planned.at || built.pages.len() != layout.catalog_pages.len() {
         return Err(invalid(
             "catalog records moved from their planned pages".into(),

@@ -65,6 +65,11 @@ pub struct SpaceManager<'v> {
 }
 
 impl<'v> SpaceManager<'v> {
+    /// The target line: the layout of file headers and of the heap headers written over this space (workspace#533).
+    pub fn line(&self) -> VersionLine {
+        self.line
+    }
+
     /// `line` is the layout new file headers are written in (the target's line). The target grows with the
     /// engine's default `db_volume_size`, added volumes next to volume 0 and no `_vinf` line; see
     /// [`Self::with_growth`].

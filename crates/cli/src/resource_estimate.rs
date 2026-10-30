@@ -22,7 +22,7 @@ use fastmig_catalog::catalog_layout::generated_rows;
 use fastmig_catalog::classify::ClassKind;
 use fastmig_catalog::page_treatment::appended_pages_bound;
 use fastmig_catalog::row_encode::encode_row;
-use fastmig_catalog::same_version_catalog::{DevelopCatalog, deferred_rows};
+use fastmig_catalog::same_version_catalog::{SameVersionCatalog, deferred_rows};
 use fastmig_catalog::source_catalog::SourceCatalog;
 use fastmig_catalog::target_classes::{Origin, TargetClass as CatalogClass};
 use fastmig_catalog::template_store::builtin;
@@ -102,7 +102,7 @@ pub fn estimate(
     let started = Instant::now();
     let mut e = match pair.source {
         VersionLine::Develop => {
-            let cat = DevelopCatalog::read(vols)?;
+            let cat = SameVersionCatalog::read(vols, pair.source)?;
             let classes: Vec<TargetClass> = cat
                 .classes
                 .iter()
@@ -146,8 +146,8 @@ pub fn estimate(
                 let t = by_name
                     .get(table.name().as_bytes())
                     .ok_or_else(|| invalid(format!("no target class {table}")))?;
-                let rec =
-                    encode_row(&t.class, row).map_err(|e| invalid(format!("{table}: {e}")))?;
+                let rec = encode_row(&t.class, VersionLine::Develop, row)
+                    .map_err(|e| invalid(format!("{table}: {e}")))?;
                 records.entry(t.oid).or_default().push((row.oid, rec));
             }
             let tables = |user: bool| -> Vec<TargetClass> {

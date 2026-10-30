@@ -15,7 +15,7 @@ use fastmig_ondisk::file_header::{FileDescriptor, FileHeader, FileType};
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine, file_tracker};
 
-use fastmig_ondisk::class_object::{class_properties, encode_develop, format_btid};
+use fastmig_ondisk::class_object::{class_properties, encode, format_btid};
 
 use crate::class_rewrite::{RewriteInputs, rewrite_user_class};
 use crate::class_rows::read_rows;
@@ -258,7 +258,7 @@ pub fn dry_run(
                         new_btid: &|_| None,
                     },
                 )
-                .map(|o| encode_develop(&o).len());
+                .map(|o| encode(&o, VersionLine::Develop).len());
                 target_atts += c.class.attributes.len()
                     + c.class.shared_attributes.len()
                     + c.class.class_attributes.len();

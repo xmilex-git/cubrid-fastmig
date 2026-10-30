@@ -2,7 +2,7 @@
 //!
 //! Input: the full bytes of one root-heap record (relocation and overflow already resolved) and its release line.
 //! Output: [`ClassObject`] and its substructures, or a [`crate::value::DecodeError`] naming the field; and the
-//! develop record of a [`ClassObject`] ([`encode_develop`]).
+//! record of a [`ClassObject`] in a target line ([`encode`]).
 //! Source: engine `src/object/transform_cl.c:disk_to_class` and the `disk_to_*` substructure readers,
 //! `src/object/transform.c` metaclass tables, `src/base/object_representation.h` ORC_* (release/11.4 @46212adcd,
 //! develop @5b1867174); R3 § 2.
@@ -27,7 +27,7 @@ pub use constraint::{
 };
 pub use deduplicate_key::{is_deduplicate_key, without_deduplicate_key};
 pub use domain::SchemaDomain;
-pub use encode::encode_develop;
+pub use encode::encode;
 pub use method::{Method, MethodArg, MethodFile, MethodSig, Resolution};
 pub use partition::Partition;
 pub use representation::{RepAttribute, Representation};

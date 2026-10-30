@@ -2,8 +2,8 @@
 //! attribute's default value and the statistics of the indexes on it. The record may run over several catalog
 //! pages as fragments.
 //!
-//! Input: the record's fragments in chain order, and the release line. Output: [`DiskRepr`], or the develop
-//! fragments for given fragment capacities.
+//! Input: the record's fragments in chain order, and the release line. Output: [`DiskRepr`], or its
+//! fragments in a target line for given fragment capacities.
 //! Source: engine `system_catalog.c` `catalog_store_disk_representation` / `_disk_attribute` /
 //! `_attribute_value` / `_btree_statistics` and the matching `catalog_fetch_*` (a structure never splits: if it
 //! does not fit the rest of a fragment, the fragment ends and the structure starts the next one; a default value
@@ -181,9 +181,9 @@ impl DiskRepr {
         })
     }
 
-    /// The develop record cut into fragments: the first holds at most `first_cap` bytes, every later one at most
+    /// The record of `line` cut into fragments: the first holds at most `first_cap` bytes, every later one at most
     /// `next_cap` (each `spage_max_space_for_new_record - CATALOG_MAX_SLOT_ID_SIZE` of its page).
-    pub fn encode_develop(&self, first_cap: usize, next_cap: usize) -> Vec<Vec<u8>> {
+    pub fn encode(&self, line: VersionLine, first_cap: usize, next_cap: usize) -> Vec<Vec<u8>> {
         let mut out = Frags {
             done: Vec::new(),
             cur: OrWriter::new(),
@@ -211,7 +211,7 @@ impl DiskRepr {
             out.structure(&w.buf);
             out.value(&a.value);
             for s in &a.bt_stats {
-                out.structure(&write_bt_stats_develop(s));
+                out.structure(&write_bt_stats(s, line));
             }
         }
         out.done.push(out.cur.buf);
@@ -289,18 +289,32 @@ fn read_bt_stats(mut r: OrReader, line: VersionLine) -> DecodeResult<BtStats> {
     })
 }
 
-fn write_bt_stats_develop(s: &BtStats) -> Vec<u8> {
+/// `catalog_put_btree_statistics` of `line`: 11.4 (V0) keeps the int counts (saturated), develop (V1) zeroes the int
+/// keys slot and writes INT64 counts after `has_function`.
+fn write_bt_stats(s: &BtStats, line: VersionLine) -> Vec<u8> {
+    let int = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     let mut w = OrWriter::new();
     write_btid(&mut w, s.btid);
     w.i32(s.leafs);
     w.i32(s.pages);
     w.i32(s.height);
-    w.i32(0); // the 32-bit keys slot is no longer read
-    w.i32(s.has_function);
-    w.i64(s.keys);
-    for p in s.pkeys {
-        w.i64(p);
+    match line {
+        VersionLine::V10_2 | VersionLine::V11_4 => {
+            w.i32(int(s.keys));
+            w.i32(s.has_function);
+            for p in s.pkeys {
+                w.i32(int(p));
+            }
+        }
+        VersionLine::Develop => {
+            w.i32(0); // the 32-bit keys slot is no longer read
+            w.i32(s.has_function);
+            w.i64(s.keys);
+            for p in s.pkeys {
+                w.i64(p);
+            }
+        }
     }
-    w.zeros(bt_stats_size(VersionLine::Develop) - w.len());
+    w.zeros(bt_stats_size(line) - w.len());
     w.buf
 }

@@ -1,7 +1,7 @@
-//! Builds a class's disk-representation record from its develop class object (R3 rule E1), the record the new
+//! Builds a class's disk-representation record from its class object (R3 rule E1), the record the new
 //! catalog file holds for the class's current repid.
 //!
-//! Input: the develop class object and, per attribute id, the BTIDs of the indexes whose first key is that
+//! Input: the class object and its line and, per attribute id, the BTIDs of the indexes whose first key is that
 //! attribute (with the function-index flag). Output: [`DiskRepr`] with empty B-tree statistics (rule E2).
 //! Source: engine develop @5b1867174 `object_representation_sr.c:orc_diskrep_from_record` and
 //! `or_get_current_representation` (attributes in stored order; the first `fixed_count` are fixed, located at the
@@ -13,9 +13,13 @@ use fastmig_ondisk::class_object::ClassObject;
 use fastmig_ondisk::value::{DecodeError, DecodeResult, OrReader, decode_value_tag};
 use fastmig_ondisk::{Btid, VersionLine};
 
-/// `btids(attr_id)` gives that attribute's indexes as `(btid, is function index on the first key)`.
-pub fn build(c: &ClassObject, btids: impl Fn(i32) -> Vec<(Btid, bool)>) -> DecodeResult<DiskRepr> {
-    let line = VersionLine::Develop;
+/// `btids(attr_id)` gives that attribute's indexes as `(btid, is function index on the first key)`; `c` is of `line`
+/// (11.4: CHAR is a fixed attribute, R15 § 4.1).
+pub fn build(
+    c: &ClassObject,
+    line: VersionLine,
+    btids: impl Fn(i32) -> Vec<(Btid, bool)>,
+) -> DecodeResult<DiskRepr> {
     let n_fixed = usize::try_from(c.fixed_count).unwrap_or(0);
     let mut fixed = Vec::new();
     let mut variable = Vec::new();
@@ -26,7 +30,7 @@ pub fn build(c: &ClassObject, btids: impl Fn(i32) -> Vec<(Btid, bool)>) -> Decod
                 .domain
                 .first()
                 .and_then(|d| d.to_value_domain(line))
-                .ok_or_else(|| err(&a.name, "no develop domain"))?;
+                .ok_or_else(|| err(&a.name, "no domain of its line"))?;
             let size = d
                 .disk_size(line)
                 .ok_or_else(|| err(&a.name, "a fixed attribute with a variable-size domain"))?;

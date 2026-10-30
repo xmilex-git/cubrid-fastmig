@@ -11,7 +11,8 @@
 //! `catalog_insert_representation_item` (a directory record adds one to the page's `dir_count`),
 //! `catalog_write_unwritten_portion` / `catalog_get_record_from_page` (a record longer than its page continues in
 //! slot 1 of the overflow pages the page header links). Which page a record goes to is ours: the current page while
-//! it fits, else a new one (workspace#504).
+//! it fits, else a new one (workspace#504). The page format is the same in release/11.4 @46212adcd; only the class
+//! info and B-tree statistics records differ by line (workspace#533).
 
 use std::io;
 
@@ -21,7 +22,7 @@ use crate::file_header::{FILE_DESCRIPTORS_SIZE, FileType};
 use crate::page::{self, PageType, db_area_mut};
 use crate::spage::{Anchor, RecordType, SpageBuilder, SpageEditor};
 use crate::volume_set::VolumeSet;
-use crate::{Vfid, Vpid};
+use crate::{VersionLine, Vfid, Vpid};
 
 /// Engine `MAX_ALIGNMENT` (`DOUBLE_ALIGNMENT`).
 const MAX_ALIGNMENT: usize = 8;
@@ -50,6 +51,7 @@ struct Page {
 }
 
 struct Builder<'a> {
+    line: VersionLine,
     io_pagesize: usize,
     vpids: &'a [Vpid],
     pages: Vec<Page>,
@@ -140,20 +142,20 @@ impl Builder<'_> {
                 (i, self.insert(i, &rec))
             }
             CatalogItem::ClsInfo(c) => {
-                let rec = c.encode_develop();
+                let rec = c.encode(self.line);
                 let i = self.page_for(rec.len());
                 (i, self.insert(i, &rec))
             }
             CatalogItem::DiskRepr(r) => {
                 let empty = self.empty_room();
-                let whole = r.encode_develop(usize::MAX, usize::MAX);
+                let whole = r.encode(self.line, usize::MAX, usize::MAX);
                 if whole.len() == 1 && whole[0].len() <= empty {
                     let i = self.page_for(whole[0].len());
                     return (i, self.insert(i, &whole[0]));
                 }
                 // longer than a page: a page of its own, then overflow pages (slot 1 each)
                 let first = self.new_page(false);
-                let frags = r.encode_develop(self.room(first), empty);
+                let frags = r.encode(self.line, self.room(first), empty);
                 let slot = self.insert(first, &frags[0]);
                 let mut prev = first;
                 for f in &frags[1..] {
@@ -169,10 +171,16 @@ impl Builder<'_> {
     }
 }
 
-/// Builds the pages of a catalog file holding `items` in this order; `vpids` names the pages (shorter than the
-/// page count while sizing: missing VPIDs are written as NULL).
-pub fn build(items: &[CatalogItem], io_pagesize: usize, vpids: &[Vpid]) -> CatalogPages {
+/// Builds the pages of a catalog file holding `items` in this order, in `line`'s record formats; `vpids` names the
+/// pages (shorter than the page count while sizing: missing VPIDs are written as NULL).
+pub fn build(
+    items: &[CatalogItem],
+    line: VersionLine,
+    io_pagesize: usize,
+    vpids: &[Vpid],
+) -> CatalogPages {
     let mut b = Builder {
+        line,
         io_pagesize,
         vpids,
         pages: Vec::new(),

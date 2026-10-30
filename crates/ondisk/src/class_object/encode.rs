@@ -1,15 +1,16 @@
-//! Writes a class object as develop's `tf_class_to_disk` would: the record that regeneration puts back in the
+//! Writes a class object as `tf_class_to_disk` of the target line would: the record that regeneration puts back in the
 //! class's root-heap slot.
 //!
-//! Input: a [`ClassObject`] already in develop shape (develop type ids, constraint sequences, partition type).
+//! Input: a [`ClassObject`] already in the target line's shape (type ids, constraint sequences) and that line.
 //! Output: the record bytes.
-//! Source: engine develop @5b1867174 `transform_cl.c` `tf_class_to_disk`, `put_class_varinfo`,
+//! Source: engine develop @5b1867174 and release/11.4 @46212adcd `transform_cl.c` `tf_class_to_disk`, `put_class_varinfo`,
 //! `put_class_attributes`, `put_substructure_set` (header `SEQUENCE | VARIABLE | DOMAIN | COMMON_SUB`, element
 //! offsets from the set start, domain length 4, `DB_TYPE_SUB` word, sub header = metaclass OID
 //! {`META_PAGE_*`, 0, `META_VOLUME` 256}, repid 0, flags 0), `put_object_set` (header `SEQUENCE | DOMAIN`, domain
 //! length 4, the built-in OBJECT domain), and the `*_to_disk` writers named in each substructure's module.
 //! Strings are written by `value::write_string` (develop's compression rule; LZ4 bytes may differ from the
-//! engine's, the decompressed string is the same, workspace#482 decision 9).
+//! engine's, the decompressed string is the same, workspace#482 decision 9). 11.4 differs only in the partition fixed
+//! area (no `class_partition_type`) and the built-in domain slots of the OID sets (workspace#533).
 
 use super::attribute::Attribute;
 use super::class_record::{ClassObject, ClassType};
@@ -99,7 +100,7 @@ fn sub_set(elems: Vec<Vec<u8>>, meta_page: i32) -> Vec<u8> {
 }
 
 /// An OID set; an empty list is stored as nothing.
-fn oid_set(oids: &[Oid]) -> Vec<u8> {
+fn oid_set(oids: &[Oid], line: VersionLine) -> Vec<u8> {
     if oids.is_empty() {
         return Vec::new();
     }
@@ -108,9 +109,9 @@ fn oid_set(oids: &[Oid]) -> Vec<u8> {
     w.i32(oids.len() as i32);
     w.i32(4);
     encode_packed_domain(
-        VersionLine::Develop,
+        line,
         &mut w,
-        &[Domain::builtin(VersionLine::Develop, DbType::Object)],
+        &[Domain::builtin(line, DbType::Object)],
         false,
         false,
     );
@@ -150,7 +151,7 @@ fn domains(ds: &[SchemaDomain]) -> Vec<u8> {
     sub_set(ds.iter().map(domain).collect(), meta_page::DOMAIN)
 }
 
-fn attribute(a: &Attribute) -> Vec<u8> {
+fn attribute(a: &Attribute, line: VersionLine) -> Vec<u8> {
     let mut f = OrWriter::new();
     f.i32(a.id);
     f.i32(a.type_id);
@@ -168,15 +169,18 @@ fn attribute(a: &Attribute) -> Vec<u8> {
             a.default_value.clone(),
             a.original_value.clone(),
             domains(&a.domain),
-            oid_set(&a.triggers),
+            oid_set(&a.triggers, line),
             a.properties.clone(),
             string(&a.comment),
         ],
     )
 }
 
-fn attributes(atts: &[Attribute]) -> Vec<u8> {
-    sub_set(atts.iter().map(attribute).collect(), meta_page::ATTRIBUTE)
+fn attributes(atts: &[Attribute], line: VersionLine) -> Vec<u8> {
+    sub_set(
+        atts.iter().map(|a| attribute(a, line)).collect(),
+        meta_page::ATTRIBUTE,
+    )
 }
 
 fn representation(r: &Representation) -> Vec<u8> {
@@ -248,14 +252,16 @@ fn methods(ms: &[Method]) -> Vec<u8> {
     sub_set(elems, meta_page::METHOD)
 }
 
-fn partition(p: &Partition) -> Vec<u8> {
+fn partition(p: &Partition, line: VersionLine) -> Vec<u8> {
     let mut f = OrWriter::new();
     f.i32(p.ptype);
-    // DB_PARTITIONED_CLASS (1) on the partitioned class, DB_PARTITION_CLASS (2) on a partition (R3 § 2.3)
-    f.i32(
-        p.class_partition_type
-            .unwrap_or(if p.pname.is_none() { 1 } else { 2 }),
-    );
+    // develop only: DB_PARTITIONED_CLASS (1) on the partitioned class, DB_PARTITION_CLASS (2) on a partition (R3 § 2.3)
+    if line == VersionLine::Develop {
+        f.i32(
+            p.class_partition_type
+                .unwrap_or(if p.pname.is_none() { 1 } else { 2 }),
+        );
+    }
     structure(
         f,
         &[
@@ -267,8 +273,8 @@ fn partition(p: &Partition) -> Vec<u8> {
     )
 }
 
-/// The develop record of `c`.
-pub fn encode_develop(c: &ClassObject) -> Vec<u8> {
+/// The record of `c` in target line `line` (11.4 or develop; the 10.2 layout is read, never written).
+pub fn encode(c: &ClassObject, line: VersionLine) -> Vec<u8> {
     let mut f = OrWriter::new();
     f.i32(c.att_ids);
     f.i32(c.method_ids);
@@ -329,21 +335,21 @@ pub fn encode_develop(c: &ClassObject) -> Vec<u8> {
                 c.representations.iter().map(representation).collect(),
                 meta_page::REPRESENTATION,
             ),
-            oid_set(&c.sub_classes),
-            oid_set(&c.super_classes),
-            attributes(&c.attributes),
-            attributes(&c.shared_attributes),
-            attributes(&c.class_attributes),
+            oid_set(&c.sub_classes, line),
+            oid_set(&c.super_classes, line),
+            attributes(&c.attributes, line),
+            attributes(&c.shared_attributes, line),
+            attributes(&c.class_attributes, line),
             methods(&c.methods),
             methods(&c.class_methods),
             sub_set(method_files, meta_page::METHFILE),
             sub_set(resolutions, meta_page::RESOLUTION),
             sub_set(query_specs, meta_page::QUERY_SPEC),
-            oid_set(&c.triggers),
+            oid_set(&c.triggers, line),
             c.properties.clone(),
             string(&c.comment),
             sub_set(
-                c.partitions.iter().map(partition).collect(),
+                c.partitions.iter().map(|p| partition(p, line)).collect(),
                 meta_page::PARTITION,
             ),
         ],

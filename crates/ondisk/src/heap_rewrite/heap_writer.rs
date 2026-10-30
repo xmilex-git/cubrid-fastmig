@@ -94,14 +94,15 @@ pub fn create_heap(space: &SpaceManager, class_oid: Oid, root: bool) -> io::Resu
     Ok(hfid)
 }
 
-/// An open develop heap: every page of its chain read, ready for inserts, rewrites and deletes.
+/// An open heap of the target line (develop, or 11.4 on the 11.4 same-version path): every page of its chain read,
+/// ready for inserts, rewrites and deletes.
 pub struct HeapWriter<'s, 'v> {
     st: HeapState<'s, 'v>,
     hdr: HeapHdrStats,
 }
 
 impl<'s, 'v> HeapWriter<'s, 'v> {
-    /// Reads the header and every data page of develop heap `hfid`.
+    /// Reads the header and every data page of heap `hfid` (in the layout of `space.line()`).
     pub fn open(space: &'s SpaceManager<'v>, hfid: Hfid) -> io::Result<Self> {
         let vs = space.volumes();
         let hv = hfid.vpid();
@@ -110,11 +111,8 @@ impl<'s, 'v> HeapWriter<'s, 'v> {
             .and_then(|sp| sp.record(0))
             .ok_or_else(|| invalid(format!("heap header {hv:?} has no slot 0")))?
             .1;
-        let hdr = HeapHdrStats::read(rec0, VersionLine::Develop)
+        let hdr = HeapHdrStats::read(rec0, space.line())
             .map_err(|e| invalid(format!("heap header {hv:?}: {e}")))?;
-        let LineFields::Develop(d) = &hdr.line else {
-            return Err(invalid(format!("heap {hv:?}: not a develop header")));
-        };
         let reuse_slots = FileHeader::read(&vs.read_page(hfid.vfid.header_vpid())?).file_type()
             == Some(FileType::HeapReuseSlots);
         let mut st = HeapState::new(
@@ -125,18 +123,23 @@ impl<'s, 'v> HeapWriter<'s, 'v> {
             hdr.ovf_vfid,
             hdr.last_vpid,
         );
-        st.bestspace_pages = d.pages.clone();
-        let last_bs = *d
-            .pages
-            .last()
-            .ok_or_else(|| invalid(format!("{hv:?}: develop header without bestspace pages")))?;
         st.load(hv)?;
+        // the first data page: after the bestspace pages (develop), right after the header (11.4)
+        let mut v = match &hdr.line {
+            LineFields::Develop(d) => {
+                st.bestspace_pages = d.pages.clone();
+                let last_bs = *d.pages.last().ok_or_else(|| {
+                    invalid(format!("{hv:?}: develop header without bestspace pages"))
+                })?;
+                st.peek(last_bs, |p| chain_of(p, last_bs))?.next_vpid
+            }
+            LineFields::V11_4(_) => hdr.next_vpid,
+        };
         let limit: u64 = vs
             .volumes()
             .iter()
             .map(|v| v.header.nsect_total.max(0) as u64 * v.header.sect_npgs.max(0) as u64)
             .sum();
-        let mut v = st.peek(last_bs, |p| chain_of(p, last_bs))?.next_vpid;
         let mut walked = 0u64;
         while !v.is_null() {
             walked += 1;
@@ -201,7 +204,8 @@ impl<'s, 'v> HeapWriter<'s, 'v> {
     pub fn finish(mut self) -> io::Result<PageStats> {
         self.st.flush()?;
         // a develop header keeps its shard count; `root` only picks it for an 11.4 header
-        let out = rewrite_header(&mut self.st, &self.hdr, true, false)?;
+        let line = self.st.space.line();
+        let out = rewrite_header(&mut self.st, &self.hdr, true, false, line)?;
         self.st.flush()?;
         Ok(out.stats)
     }

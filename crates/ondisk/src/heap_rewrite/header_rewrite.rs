@@ -80,10 +80,14 @@ pub(crate) fn rewrite_header(
     src: &HeapHdrStats,
     measured: bool,
     root: bool,
+    target_line: VersionLine,
 ) -> io::Result<HeaderOutcome> {
     let hv = st.hfid.vpid();
     let io_size = st.vs().io_pagesize();
     st.load(hv)?;
+    if target_line != VersionLine::Develop {
+        return write_header_114(st, src, measured);
+    }
     let evicted = make_room(st, hv)?;
     st.header_reserve = 0;
     // a develop source has its bestspace pages already: the first data page follows the last of them
@@ -120,6 +124,52 @@ pub(crate) fn rewrite_header(
         .collect::<io::Result<Vec<_>>>()?;
     let num_shards = if root { ROOT_SHARDS } else { DEFAULT_SHARDS };
     write_header_and_bestspace(st, src, measured, bs, old_first, num_shards, true, evicted)
+}
+
+/// An 11.4 target: the 11.4 source's 296 B header record stays in place with its best-page hints; the counts, the last
+/// page and the overflow file are written again (measured counts when every chain page was read). A hint names a page
+/// whose free space only grew (vacuum residue removed), and 11.4 checks a hinted page's free space before using it
+/// (workspace#533; R15 § 4.2: no bestspace pages in 11.4).
+fn write_header_114(
+    st: &mut HeapState,
+    src: &HeapHdrStats,
+    measured: bool,
+) -> io::Result<HeaderOutcome> {
+    let hv = st.hfid.vpid();
+    if !matches!(src.line, LineFields::V11_4(_)) {
+        return Err(invalid(format!(
+            "{hv:?}: a develop heap header cannot become 11.4's (downgrade, ADR 0003)"
+        )));
+    }
+    st.flush()?;
+    let stats = if measured {
+        let mut s = PageStats::default();
+        st.pages().iter().for_each(|p| s.add(p.stats));
+        s
+    } else {
+        PageStats {
+            pages: src.num_pages.max(0) as u64 + st.appended_pages,
+            recs: src.num_recs,
+            sumlen: src.recs_sumlen,
+        }
+    };
+    let hdr = HeapHdrStats {
+        ovf_vfid: st.ovf_vfid,
+        last_vpid: st.last_vpid,
+        num_pages: stats.pages.min(i32::MAX as u64) as i32,
+        num_recs: stats.recs,
+        recs_sumlen: stats.sumlen,
+        ..src.clone()
+    };
+    let mut rec = vec![0u8; HeapHdrStats::size(VersionLine::V11_4)];
+    hdr.write(&mut rec, VersionLine::V11_4);
+    st.edit_slot0(hv, |r| r.copy_from_slice(&rec))?;
+    st.flush()?;
+    Ok(HeaderOutcome {
+        bestspace_pages: Vec::new(),
+        evicted: 0,
+        stats,
+    })
 }
 
 /// Writes the develop header record and bestspace pages `bs` (shard entries and candidates from the pages read);

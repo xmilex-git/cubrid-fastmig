@@ -2,8 +2,8 @@
 //!
 //! Input: the source class, its classification, the class's new representation directory OID, the old → new
 //! BTID map of the rebuilt indexes, and the partition-stream transcoder.
-//! Output: the develop [`ClassObject`] (encode it with `class_object::encode_develop`), and the deferred
-//! function/filter indexes it no longer lists.
+//! Output: the develop [`ClassObject`] (encode it with `class_object::encode(.., VersionLine::Develop)`), and the
+//! deferred function/filter indexes it no longer lists.
 //! Source: R3 § 5 rules B (kept class: layout byte-equal), C (re-encoded class: develop storage order, counts,
 //! old representations removed, repid kept), F (BTIDs and rep_dir remapped; class OID, HFID, owner, triggers
 //! kept: the owner and trigger rows stay in their slots, workspace#482 1), R3 § 2.3-2.4 (partition type, constraint

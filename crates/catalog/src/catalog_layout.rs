@@ -20,7 +20,7 @@ use std::io;
 
 use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::catalog_dir::{self, CatalogItem, ClsInfo, ReprDir, ReprItem};
-use fastmig_ondisk::class_object::{ClassObject, class_properties, encode_develop};
+use fastmig_ondisk::class_object::{ClassObject, class_properties, encode};
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::{
     HeapJob, HeapWriter, PageStats, VacuumHorizon, create_heap, rewrite_heap,
@@ -82,6 +82,8 @@ pub struct CatalogRecords {
 
 /// Where the regenerated catalog lives. Placements are by name where the first pass did not know the class OID.
 pub struct CatalogLayout {
+    /// The target line: the format of the class objects and catalog records written (workspace#533).
+    pub line: VersionLine,
     /// New root-heap slot of a template class, by name.
     pub new_slots: HashMap<Vec<u8>, Oid>,
     /// New heap of a reallocated or new table, by name.
@@ -105,9 +107,10 @@ pub struct CatalogLayout {
 }
 
 impl CatalogLayout {
-    /// Nothing placed yet.
-    pub fn empty() -> Self {
+    /// Nothing placed yet, for a target of `line`.
+    pub fn empty(line: VersionLine) -> Self {
         CatalogLayout {
+            line,
             new_slots: HashMap::new(),
             new_heaps: HashMap::new(),
             users: HashMap::new(),
@@ -196,7 +199,7 @@ pub fn generated_rows(
     template: &CatalogTemplate,
     now: &Value,
 ) -> DecodeResult<Generated> {
-    let empty = CatalogLayout::empty();
+    let empty = CatalogLayout::empty(VersionLine::Develop);
     let mut places = Places {
         distinct_btids: true,
         ..Places::first_pass(&empty)
@@ -357,10 +360,14 @@ fn table_class<'t>(targets: &'t [TargetClass], table: &str) -> io::Result<&'t Ta
 }
 
 /// Per attribute id, the indexes whose first key it is (engine `or_install_btids_constraint`), in the engine's
-/// family order FK, PK, U, RU, I, RI (`or_install_btids`); a constraint sharing another's index has none.
-pub fn attribute_btids(c: &ClassObject) -> DecodeResult<HashMap<i32, Vec<(Btid, bool)>>> {
+/// family order FK, PK, U, RU, I, RI (`or_install_btids`); a constraint sharing another's index has none. `c` is of
+/// `line`.
+pub fn attribute_btids(
+    c: &ClassObject,
+    line: VersionLine,
+) -> DecodeResult<HashMap<i32, Vec<(Btid, bool)>>> {
     use fastmig_ondisk::class_object::ConstraintKind as K;
-    let props = class_properties(&c.properties, VersionLine::Develop)?;
+    let props = class_properties(&c.properties, line)?;
     let rank = |k: &K| match k {
         K::ForeignKey => 0,
         K::PrimaryKey => 1,
@@ -387,14 +394,17 @@ pub fn attribute_btids(c: &ClassObject) -> DecodeResult<HashMap<i32, Vec<(Btid, 
 }
 
 /// The three catalog records of target class `t`: disk representation, directory, class info (the order a new
-/// class gets them: `catalog_add_representation`, then `catalog_add_class_info`).
+/// class gets them: `catalog_add_representation`, then `catalog_add_class_info`), in `line`'s layout.
 pub fn class_catalog_items(
     t: &TargetClass,
     records: CatalogRecords,
     stats: PageStats,
+    line: VersionLine,
 ) -> DecodeResult<[CatalogItem; 3]> {
-    let btids = attribute_btids(&t.class)?;
-    let disk = disk_repr_build::build(&t.class, |id| btids.get(&id).cloned().unwrap_or_default())?;
+    let btids = attribute_btids(&t.class, line)?;
+    let disk = disk_repr_build::build(&t.class, line, |id| {
+        btids.get(&id).cloned().unwrap_or_default()
+    })?;
     let dir = ReprDir {
         items: vec![
             ReprItem {
@@ -434,11 +444,11 @@ pub fn plan_catalog(
     let (_, boot) = BootDbParm::read(vs)?;
     let mut layout = CatalogLayout {
         heap_stats: user_heap_stats,
-        ..CatalogLayout::empty()
+        ..CatalogLayout::empty(VersionLine::Develop)
     };
 
     // first pass: placeholders everywhere, real lengths
-    let empty = CatalogLayout::empty();
+    let empty = CatalogLayout::empty(VersionLine::Develop);
     let mut p1 = Places::first_pass(&empty);
     let g1 = generate(source, template, now, &mut p1).map_err(decode_err("catalog first pass"))?;
 
@@ -446,7 +456,7 @@ pub fn plan_catalog(
     let class_bytes: HashMap<Oid, Vec<u8>> = g1
         .targets
         .iter()
-        .map(|t| (t.oid, encode_develop(&t.class)))
+        .map(|t| (t.oid, encode(&t.class, VersionLine::Develop)))
         .collect();
     let root = boot.rootclass_hfid;
     rewrite_heap(
@@ -510,6 +520,7 @@ pub fn plan_catalog(
                     cls_info: Oid::NULL,
                 },
                 PageStats::default(),
+                layout.line,
             )
         })
         .collect::<DecodeResult<Vec<_>>>()
@@ -518,7 +529,7 @@ pub fn plan_catalog(
         .flatten()
         .collect();
     let io_size = vs.io_pagesize();
-    let sized = catalog_dir::build_pages(&sizing, io_size, &[]);
+    let sized = catalog_dir::build_pages(&sizing, layout.line, io_size, &[]);
     let (vfid, vpids) = catalog_dir::create_file(space, sized.pages.len())?;
     let at = |i: usize| {
         let (p, s) = sized.at[i];
@@ -542,8 +553,12 @@ pub fn plan_catalog(
 
     // row heaps: the same-slot tables in develop format first (first-pass rows at their final lengths)
     let encode = |targets: &[TargetClass], t: &SystemTable, r: &Row| -> io::Result<Vec<u8>> {
-        encode_row(&table_class(targets, t.name())?.class, r)
-            .map_err(|e| invalid(format!("{t} {:?}: {e}", r.oid)))
+        encode_row(
+            &table_class(targets, t.name())?.class,
+            VersionLine::Develop,
+            r,
+        )
+        .map_err(|e| invalid(format!("{t} {:?}: {e}", r.oid)))
     };
     let mut writers: HashMap<Vec<u8>, HeapWriter> = HashMap::new();
     for dev in same_slot(source.version) {

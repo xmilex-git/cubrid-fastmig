@@ -518,6 +518,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             // the same-version path: patch, deferred indexes out, every index rebuilt (workspace#501, #503, #504)
             let prepared = catalog_regeneration::same_version_prepare(
                 &space,
+                pair.source,
                 &src.log,
                 rep.progress.meter(PAGE_TREATMENT),
             )?;

@@ -15,7 +15,8 @@ use fastmig_catalog::catalog_write::{index_build_classes, write_bt_stats, write_
 use fastmig_catalog::free_old_files::free_old_files;
 use fastmig_catalog::page_treatment::treat_user_heaps;
 use fastmig_catalog::same_version_catalog::{
-    DevelopCatalog, free_catalog_file, patch_heaps, remove_deferred_rows, write_classes_and_catalog,
+    SameVersionCatalog, free_catalog_file, patch_heaps, remove_deferred_rows,
+    write_classes_and_catalog,
 };
 use fastmig_catalog::source_catalog::SourceCatalog;
 use fastmig_catalog::template::CatalogTemplate;
@@ -268,10 +269,10 @@ fn bt_stats(btid: Btid, s: &fastmig_index::bt_stats::BtStats) -> BtStats {
     }
 }
 
-/// The state between [`same_version_prepare`] and [`same_version_finish`]: the target's develop catalog read before
+/// The state between [`same_version_prepare`] and [`same_version_finish`]: the target's catalog read before
 /// the first write, and what the page treatment did.
 pub struct SameVersionPrepared {
-    cat: DevelopCatalog,
+    cat: SameVersionCatalog,
     freed_files: usize,
     reports: Vec<HeapReport>,
     deleted_rows: usize,
@@ -287,16 +288,17 @@ impl SameVersionPrepared {
     }
 }
 
-/// The same-version (develop → develop) first half: the catalog file and every B-tree freed, heaps patched
+/// The same-version (develop → develop, 11.4 → 11.4; `line` is both) first half: the catalog file and every B-tree freed, heaps patched
 /// (page-treatment phase), the deferred indexes' catalog rows removed.
 pub fn same_version_prepare(
     space: &SpaceManager,
+    line: VersionLine,
     src_log: &LogHeader,
     treatment_meter: Meter,
 ) -> io::Result<SameVersionPrepared> {
     let vols = space.volumes();
     let (_, boot) = BootDbParm::read(vols)?;
-    let cat = DevelopCatalog::read(vols)?;
+    let cat = SameVersionCatalog::read(vols, line)?;
     let horizon = VacuumHorizon::read(vols, src_log, boot.vacuum_data_vfid)?;
     // every old file goes before the first new allocation (workspace#482 10.2)
     let freed_files = free_catalog_file(space)? + free_btree_files(space)?;

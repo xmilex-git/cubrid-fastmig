@@ -1,6 +1,7 @@
-//! Encodes one generated catalog row as a heap record of its develop table.
+//! Encodes one generated catalog row as a heap record of its table (develop, or 11.4 on the 11.4 same-version path).
 //!
-//! Input: the table's develop class object (from the catalog template) and a [`Row`] whose values are keyed by
+//! Input: the table's class object (from the catalog template, or the target on the same-version path) and its
+//! line, and a [`Row`] whose values are keyed by
 //! attribute name. Output: the record bytes: the table's current repid, CHN 0, no MVCC fields (a target starts
 //! with no vacuum residue, workspace#472 Notes), values in the class's storage order; a missing name is NULL.
 //! Source: P1b `record::encode_record`; engine develop @682b080b2 `catalog_class.c:catcls_put_or_value_into_buffer`
@@ -14,10 +15,9 @@ use fastmig_ondisk::value::{DecodeError, DecodeResult, Value};
 
 use crate::class_rows::Row;
 
-const LINE: VersionLine = VersionLine::Develop;
-
-pub fn encode_row(table: &ClassObject, row: &Row) -> DecodeResult<Vec<u8>> {
-    let layout = RecordLayout::for_repid(LINE, table, table.repid as u32)?;
+/// `table` is of `line`; the record is written in that line's value encodings.
+pub fn encode_row(table: &ClassObject, line: VersionLine, row: &Row) -> DecodeResult<Vec<u8>> {
+    let layout = RecordLayout::for_repid(line, table, table.repid as u32)?;
     let name_of = |id: i32| {
         table
             .attributes
@@ -54,5 +54,5 @@ pub fn encode_row(table: &ClassObject, row: &Row) -> DecodeResult<Vec<u8>> {
         delid: None,
         prev_version_lsa: None,
     };
-    encode_record(LINE, &layout, &header, &values, true)
+    encode_record(line, &layout, &header, &values, true)
 }

@@ -1,6 +1,6 @@
 //! The class-info record of one class: heap, page and row counts, and the back link to its directory.
 //!
-//! Input: the 56-byte record and the release line. Output: [`ClsInfo`], or its develop bytes.
+//! Input: the 56-byte record and the release line. Output: [`ClsInfo`], or its bytes in a target line.
 //! Source: engine `system_catalog.c` `CATALOG_CLS_INFO_*_OFF`: HFID @0 (12 B), tot_pages @12, tot_objs @16 (11.4
 //! row count; develop writes 0 and does not read it), time_stamp @20, rep_dir OID @24, develop tot_objs INT64 @32
 //! (519cc1a43, PR #7856), zero to 56; release/11.4 @46212adcd, develop @5b1867174; R3 § 3, rule E3.
@@ -42,15 +42,23 @@ impl ClsInfo {
         })
     }
 
-    /// The develop record (`catalog_put_class_info_to_record`).
-    pub fn encode_develop(&self) -> Vec<u8> {
+    /// The record of `line` (`catalog_put_class_info_to_record`): 11.4 keeps the row count in the int @16 (saturated),
+    /// develop zeroes it and writes the INT64 @32.
+    pub fn encode(&self, line: VersionLine) -> Vec<u8> {
         let mut w = OrWriter::new();
         write_hfid(&mut w, self.hfid);
         w.i32(self.tot_pages);
-        w.i32(0);
+        match line {
+            VersionLine::V10_2 | VersionLine::V11_4 => {
+                w.i32(self.tot_objs.clamp(0, i32::MAX as i64) as i32)
+            }
+            VersionLine::Develop => w.i32(0),
+        }
         w.i32(self.time_stamp);
         write_oid(&mut w, self.rep_dir);
-        w.i64(self.tot_objs);
+        if line == VersionLine::Develop {
+            w.i64(self.tot_objs);
+        }
         w.zeros(Self::SIZE - w.len());
         w.buf
     }
