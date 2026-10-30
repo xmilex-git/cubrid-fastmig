@@ -131,3 +131,11 @@ their first partitioned table owned by APP_OWNER.
 [`partition-streams-102/`](partition-streams-102/README.md) builds the same partitioned tables on 10.2 and develop
 (the three 10.2 → develop opcode ranges, CHAR results, a TO_CHAR language flag, `BENCHMARK` and `CURRENT_DATE`), so
 `cubrid-fastmig partition-streams --from 10.2` compares each transcoded stream with develop's. It is not a baseline DB.
+
+### Remaining edge cases of a 10.2..11.3 source (T26, workspace#554)
+
+[`old-source-edge-cases/`](old-source-edge-cases/README.md) builds small 10.2, 11.2 and 11.3 fixtures for seven edge cases:
+system class domains, system names inside literals, system class grants, stored procedure names with a dot, OBJECT
+values on stored procedure rows, NCHAR HASH partitions and trailing 0x00. Each is taken to develop through
+cubrid-fastmig and through `unloaddb` → `loaddb`, and the develop checks are run on both targets. It is not a
+baseline DB.
