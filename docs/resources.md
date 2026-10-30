@@ -190,7 +190,12 @@ Right after the incomplete marker, before the first byte of the target, `migrate
   blocks of their own: the allocated pages with their content (`Plan::unshare_ranges`, `preallocate::unshare`,
   `FALLOC_FL_UNSHARE_RANGE`), the unallocated ones without a copy (`Plan::zero_ranges`, `preallocate::zero`,
   `FALLOC_FL_ZERO_RANGE`: unwritten blocks, no read of the clone's); one worker per volume, as XFS locks a file
-  for each call. Taken once, not held twice in the reservation. Another filesystem keeps them in the
+  for each call. The zeroed ranges and the ranges holding a volume's first page (written before the volume set
+  opens) are taken before the run goes on; the other rewritten pages are unshared in the background
+  (`unshare_gate`), and every page write passes `VolumeSet::write_page`'s write gate, which waits for the
+  range's worker or unshares the range itself when no worker has reached it: a failure comes before the range is
+  written (report.json `temp_disk.target_unshare_taken_by_writers`, `target_unshare_waits`,
+  `target_unshare_wait_seconds`). Taken once, not held twice in the reservation. Another filesystem keeps them in the
   reservation, and `plan` says so;
 - on XFS with a cloned volume, the sectors the run will take are listed once, here (listed sectors,
   `TargetSpace::sectors`; ADR 0013): the engine's reservation order replayed one sector at a time

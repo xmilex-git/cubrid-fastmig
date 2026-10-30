@@ -57,6 +57,7 @@ use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan
 use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
 use crate::target_space::{self, Reservation, TargetSpace};
+use crate::unshare_gate::{GateStats, UnshareGate};
 use crate::verify::{self, DbArg, run_verifier};
 use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
 use fastmig_index::spill_arena::SpillArena;
@@ -369,10 +370,15 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     if plan.unshare {
         // one worker per volume: XFS takes a file's lock for each fallocate, so volumes go in parallel
         let io = src.vols.io_pagesize() as u64;
-        // (a range whose content the run does not need is zeroed: blocks of its own without a copy)
+        // (a range whose content the run does not need is zeroed: blocks of its own without a copy); here only the
+        // ranges holding a volume's first page, which the run writes before the volume set opens; the rest below
         let mut by_volume: Vec<(&VolumeJob, Vec<(&PageRange, bool)>)> = Vec::new();
-        let ranges = (target.unshare_ranges.iter().map(|r| (r, false)))
-            .chain(target.zero_ranges.iter().map(|r| (r, true)));
+        let ranges = (target
+            .unshare_ranges
+            .iter()
+            .filter(|r| r.first == 0)
+            .map(|r| (r, false)))
+        .chain(target.zero_ranges.iter().map(|r| (r, true)));
         for (r, zero) in ranges {
             match by_volume.iter_mut().find(|(j, _)| j.volid == r.volid) {
                 Some((_, rs)) => rs.push((r, zero)),
@@ -404,6 +410,30 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     }
     rep.steps
         .push(("volumes.clone_unshare", t.elapsed().as_secs_f64()));
+    // the other rewritten pages unshared in the background; a write waits for its range (`unshare_gate`)
+    let gate = if plan.unshare {
+        let targets: Vec<(i16, &Path)> = jobs
+            .iter()
+            .zip(&plan.volumes)
+            .filter(|(_, v)| v.copy_method == CopyMethod::Clone)
+            .map(|(j, v)| (v.volid, j.target.as_path()))
+            .collect();
+        let background: Vec<PageRange> = target
+            .unshare_ranges
+            .iter()
+            .filter(|r| r.first != 0)
+            .copied()
+            .collect();
+        let g = Arc::new(UnshareGate::new(
+            &targets,
+            &background,
+            src.vols.io_pagesize() as u64,
+        )?);
+        let handles = g.spawn(o.worker_limit);
+        Some((g, handles))
+    } else {
+        None
+    };
     let reservation = Arc::new(Reservation::take(
         &marker,
         &fastmig_dir.join("reserve-target"),
@@ -469,6 +499,10 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         Access::ReadWrite,
         HeaderLayout::Since11_4,
     )?;
+    if let Some((g, _)) = &gate {
+        let g = g.clone();
+        vols.set_write_gate(Arc::new(move |v| g.ensure(v)))?;
+    }
     let trk = BootDbParm::read(&vols)?.1.trk_vfid;
     // a target out of space grows like the engine would: volumes added next to volume 0 (ADR 0013, workspace#508)
     let growth = VolumeGrowth {
@@ -571,6 +605,10 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         marker.record(p)?;
     }
     let catalog = catalog?;
+    let gate_stats = match gate {
+        Some((g, handles)) => g.join(handles)?,
+        None => GateStats::default(),
+    };
     // new pages of every file (B-trees, catalog, appended heap pages): written outside the space taken at the start
     let allocated_pages = space.allocated_pages();
     drop(space);
@@ -697,7 +735,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &catalog.json(),
         added_volumes,
         &format!(
-            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_btree_bound_pages\": {}, \"target_appended_bound_pages\": {}, \"target_added_volume_bytes\": {added_bytes}, \"target_listed_sectors\": {}, \"target_short_sectors\": {}, \"target_off_list_sectors\": {}}}",
+            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_btree_bound_pages\": {}, \"target_appended_bound_pages\": {}, \"target_added_volume_bytes\": {added_bytes}, \"target_listed_sectors\": {}, \"target_short_sectors\": {}, \"target_off_list_sectors\": {}, \"target_unshare_taken_by_writers\": {}, \"target_unshare_waits\": {}, \"target_unshare_wait_seconds\": {:.3}}}",
             temp_limit,
             limits.temp_disk.is_some(),
             TEMP_DISK.now_and_peak().1,
@@ -708,7 +746,10 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             b_appended,
             target.sectors.len(),
             target.short_sectors,
-            off_list.load(Ordering::Relaxed)
+            off_list.load(Ordering::Relaxed),
+            gate_stats.taken_by_writers,
+            gate_stats.waits,
+            gate_stats.wait_seconds
         ),
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;
