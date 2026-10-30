@@ -5,7 +5,7 @@
 //! Source: workspace#505 (target version `11.4|develop`, default develop, decided by the plan; relayed decision of
 //! the map supervisor 2026-10-29); ADR 0003 (direct pairs only, no downgrade); target 11.4 refused while the index
 //! builder writes the develop layout only (map supervisor 2026-10-29); an 11.4 source to an 11.4 target since
-//! workspace#530.
+//! workspace#530; 10.2..11.3 to 11.4 since workspace#552.
 
 use fastmig_ondisk::{SourceVersion, VersionLine};
 
@@ -20,34 +20,30 @@ impl VersionPair {
     /// Why the tool refuses this pair from source `version`; `None` when it migrates it.
     pub fn refusal(self, version: SourceVersion) -> Option<String> {
         match (self.source, self.target) {
-            // an 11.4 target: the same-version path only (11.4 B-tree layout workspace#530, catalog writer #533);
-            // 10.2..11.3 read with an 11.4 codec line are not the same version
-            (VersionLine::V11_4, VersionLine::V11_4) if version == SourceVersion::V11_4 => None,
-            (_, VersionLine::V11_4) => Some(format!(
-                "target 11.4 from source {}: only an 11.4 source is wired to an 11.4 target (workspace#472)",
-                version.name()
-            )),
             (s, t) if s == t => None,
+            // 10.2..11.3 to 11.4: the catalog regenerated from the 11.4 template, pages as they are (workspace#552)
+            (VersionLine::V10_2, VersionLine::V11_4) => None,
             // 10.2: values (workspace#520), names (#544), TDE metadata (#515), system classes (#549), partition streams
             // (#540)
             (VersionLine::V10_2 | VersionLine::V11_4, VersionLine::Develop) => None,
             (s, t) => Some(format!(
-                "version pair {} -> {} is a downgrade (ADR 0003)",
+                "version pair {} -> {} from source {} is a downgrade (ADR 0003)",
                 line_name(s),
-                line_name(t)
+                line_name(t),
+                version.name()
             )),
         }
     }
 
-    /// The pair whose catalog is regenerated and whose CHAR/NUMERIC/NCHAR records (from 10.2 also LZO1X strings,
-    /// workspace#520) are re-encoded (workspace#482).
-    pub fn regenerates_catalog(self) -> bool {
-        matches!(
-            (self.source, self.target),
-            (
-                VersionLine::V10_2 | VersionLine::V11_4,
-                VersionLine::Develop
-            )
+    /// Whether the run regenerates the catalog from the target's template: every source of another release than the
+    /// target (10.2..11.4 to develop, workspace#482; 10.2..11.3 to 11.4, workspace#552). A source of the target's own
+    /// release (develop → develop, 11.4 → 11.4) takes the same-version path. 11.2 and 11.3 share the 11.4 codec line,
+    /// so the source release decides, not the line.
+    pub fn regenerates_catalog(self, version: SourceVersion) -> bool {
+        !matches!(
+            (version, self.target),
+            (SourceVersion::Develop, VersionLine::Develop)
+                | (SourceVersion::V11_4, VersionLine::V11_4)
         )
     }
 }

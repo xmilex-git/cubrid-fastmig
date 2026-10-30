@@ -14,7 +14,7 @@
 //! `from [db_trig] [db_trig]` (class then alias, workspace#542 probe); develop splits `_db_class.is_system_class`
 //! (`catalog_class.c:1042-1045`, develop; 11.4 keeps every flag in it); workspace#542.
 
-use fastmig_ondisk::SourceVersion;
+use fastmig_ondisk::{SourceVersion, VersionLine};
 
 use crate::sql_text_tokens::{Token, tokens};
 
@@ -200,9 +200,16 @@ fn rewritable(o: &Occurrences) -> bool {
     !o.class_terms.is_empty() && o.unresolved == 0
 }
 
-/// Judges one text (see the module header).
-pub fn judge(version: SourceVersion, text: &[u8], owner_in_dba_group: bool) -> TextJudgement {
+/// Judges one text for a target of line `to` (see the module header). An 11.4 target has every system class and
+/// column a 10.2..11.4 text names but those 11.4 renamed: only the 11.4 renames refuse or warn (workspace#552).
+pub fn judge(
+    version: SourceVersion,
+    to: VersionLine,
+    text: &[u8],
+    owner_in_dba_group: bool,
+) -> TextJudgement {
     let mut j = TextJudgement::default();
+    let develop = to == VersionLine::Develop;
     if version == SourceVersion::Develop {
         return j;
     }
@@ -218,7 +225,7 @@ pub fn judge(version: SourceVersion, text: &[u8], owner_in_dba_group: bool) -> T
         SourceVersion::V10_2 | SourceVersion::V11_0 | SourceVersion::V11_2 | SourceVersion::V11_3
     );
 
-    for name in REMOVED {
+    for name in REMOVED.iter().filter(|_| develop) {
         if used(name) {
             j.refusals.push(format!(
                 "names system class {name}, which develop no longer has (workspace#519)"
@@ -242,6 +249,9 @@ pub fn judge(version: SourceVersion, text: &[u8], owner_in_dba_group: bool) -> T
         if used("db_auth") {
             j.warnings.push("names system view db_auth, whose class_name 11.4 split into object_type and object_name".into());
         }
+    }
+    if !develop {
+        return j;
     }
     if (used("db_user") || used("db_root")) && any_token("triggers") {
         j.refusals.push(

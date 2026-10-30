@@ -1,12 +1,14 @@
 //! What regeneration does with each system class: keep its slot, allocate it anew, create it, or drop it.
 //!
 //! Input: a system class name in the source (11.4; 11.2/11.3 lack one same-slot table, 10.2 three and `dual`) or
-//! target (develop) catalog, and the source version. Output: its [`SystemClassRole`]
-//! and, for a kept class, its develop name.
+//! target (develop or 11.4) catalog, the source version and the target line. Output: its [`SystemClassRole`]
+//! and, for a kept class, its name in the target.
 //! Source: decision workspace#482 1 (classification); names from the T1 11.4 DB and the develop catalog template
-//! (49 system classes in 11.4, 74 in develop: 30 tables, 25 system views, 19 `INFORMATION_SCHEMA` views); R4.
+//! (49 system classes in 11.4, 74 in develop: 30 tables, 25 system views, 19 `INFORMATION_SCHEMA` views); R4. An 11.4
+//! target has every 11.4 table: none is new or dropped, and `db_authorizations` (class methods only, no rows,
+//! release/11.4 `authenticate_context.cpp` `au_install`) takes the template class in its slot (workspace#552).
 
-use fastmig_ondisk::SourceVersion;
+use fastmig_ondisk::{SourceVersion, VersionLine};
 
 use crate::system_table::SystemTable;
 
@@ -65,10 +67,10 @@ pub const REALLOCATED: [SystemTable; 16] = [
     SystemTable::Dual,
 ];
 
-/// Develop tables 11.4 lacks.
+/// Develop tables 11.4 lacks: new on a develop target.
 pub const NEW: [SystemTable; 2] = [SystemTable::DbHistogram, SystemTable::DbGlobalTran];
 
-/// 11.4 tables develop lacks.
+/// 11.4 tables develop lacks: dropped on a develop target, reallocated on an 11.4 one.
 pub const DROPPED: [SystemTable; 1] = [SystemTable::DbAuthorizations];
 
 /// Tables of [`SAME_SLOT`] and [`REALLOCATED`] a source version does not have: 10.2 to 11.3 have no
@@ -97,8 +99,17 @@ pub fn same_slot(version: SourceVersion) -> impl Iterator<Item = SystemTable> {
         .filter(move |t| !absent_tables(version).contains(t))
 }
 
-/// Role of a system class of the source (11.4) catalog, by its name; `None` for a name this table does not know.
-pub fn source_role(name: &str, is_view: bool) -> Option<SystemClassRole> {
+/// The 11.4 tables develop lacks, as a target of `to` treats them: dropped on develop, reallocated on 11.4.
+fn old_tables_role(to: VersionLine) -> SystemClassRole {
+    match to {
+        VersionLine::Develop => SystemClassRole::Dropped,
+        VersionLine::V10_2 | VersionLine::V11_4 => SystemClassRole::Reallocated,
+    }
+}
+
+/// Role of a system class of the source (10.2..11.4) catalog, by its name, for a target of line `to`; `None` for a
+/// name this table does not know.
+pub fn source_role(name: &str, is_view: bool, to: VersionLine) -> Option<SystemClassRole> {
     if is_view {
         return Some(SystemClassRole::View);
     }
@@ -109,19 +120,21 @@ pub fn source_role(name: &str, is_view: bool) -> Option<SystemClassRole> {
     if REALLOCATED.iter().any(named) {
         return Some(SystemClassRole::Reallocated);
     }
-    DROPPED
-        .iter()
-        .any(named)
-        .then_some(SystemClassRole::Dropped)
+    DROPPED.iter().any(named).then(|| old_tables_role(to))
 }
 
-/// Role of a system class of the target (develop) template, by its name, for a source of `version`; `None` for a
+/// Role of a system class of the target template (line `to`), by its name, for a source of `version`; `None` for a
 /// name this table does not know.
-pub fn target_role(name: &str, is_view: bool, version: SourceVersion) -> Option<SystemClassRole> {
+pub fn target_role(
+    name: &str,
+    is_view: bool,
+    version: SourceVersion,
+    to: VersionLine,
+) -> Option<SystemClassRole> {
     if is_view {
         return Some(SystemClassRole::View);
     }
-    let named = |t: &SystemTable| t.develop_name() == Some(name);
+    let named = |t: &SystemTable| t.name_in(to) == Some(name);
     if absent_tables(version).iter().any(named) {
         return Some(SystemClassRole::New);
     }
@@ -130,6 +143,9 @@ pub fn target_role(name: &str, is_view: bool, version: SourceVersion) -> Option<
     }
     if REALLOCATED.iter().any(named) {
         return Some(SystemClassRole::Reallocated);
+    }
+    if DROPPED.iter().any(named) {
+        return Some(old_tables_role(to));
     }
     NEW.iter().any(named).then_some(SystemClassRole::New)
 }

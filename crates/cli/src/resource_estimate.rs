@@ -90,10 +90,10 @@ fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(format!("resource estimate: {e}"))
 }
 
-/// The estimate of a source: a develop source's classes are counted as they are. An 11.4 source is counted as the
-/// target will hold it, from the regeneration's first pass (`generated_rows`, nothing written): user classes through
-/// the class objects the run writes and, for a re-encoded class, each row through its re-encoder; system classes
-/// from the catalog rows the run generates, encoded as it encodes them (`encode_row`).
+/// The estimate of a source: a source of the target's release (same-version path) is counted as it is, in its line.
+/// Any other source is counted as the target will hold it, from the regeneration's first pass (`generated_rows`,
+/// nothing written): user classes through the class objects the run writes and, for a re-encoded class, each row through
+/// its re-encoder; system classes from the catalog rows the run generates, encoded as it encodes them (`encode_row`).
 pub fn estimate(
     vols: &VolumeSet,
     pair: VersionPair,
@@ -103,8 +103,8 @@ pub fn estimate(
     physical_memory: u64,
 ) -> io::Result<ResourceEstimate> {
     let started = Instant::now();
-    let mut e = match pair.source {
-        VersionLine::Develop => {
+    let mut e = match pair.regenerates_catalog(source) {
+        false => {
             let cat = SameVersionCatalog::read(vols, pair.source)?;
             let classes: Vec<TargetClass> = cat
                 .classes
@@ -119,11 +119,18 @@ pub fn estimate(
             // the run deletes the deferred indexes' catalog rows before the build
             let (index_rows, key_rows) = deferred_rows(vols, &cat)?;
             let skip: HashSet<Oid> = index_rows.into_iter().chain(key_rows).collect();
-            count(vols, &classes, Rows::Heaps(&HashMap::new(), &skip), workers)?.0
+            count(
+                vols,
+                &classes,
+                Rows::Heaps(&HashMap::new(), &skip),
+                pair.target,
+                workers,
+            )?
+            .0
         }
-        VersionLine::V10_2 | VersionLine::V11_4 => {
-            let src = SourceCatalog::read(vols, source, VersionLine::Develop)?;
-            let template = builtin(VersionLine::Develop, src.charset).ok_or_else(|| {
+        true => {
+            let src = SourceCatalog::read(vols, source, pair.target)?;
+            let template = builtin(pair.target, src.charset).ok_or_else(|| {
                 invalid(format!("no catalog template for charset {}", src.charset))
             })?;
             // the class objects and catalog rows the run writes, without writing them
@@ -146,9 +153,9 @@ pub fn estimate(
             let mut records: HashMap<Oid, Vec<(Oid, Vec<u8>)>> = HashMap::new();
             for (table, row) in &g.rows {
                 let t = by_name
-                    .get(table.name().as_bytes())
+                    .get(table.name_in(pair.target).unwrap_or_default().as_bytes())
                     .ok_or_else(|| invalid(format!("no target class {table}")))?;
-                let rec = encode_row(&t.class, VersionLine::Develop, row)
+                let rec = encode_row(&t.class, pair.target, row)
                     .map_err(|e| invalid(format!("{table}: {e}")))?;
                 records.entry(t.oid).or_default().push((row.oid, rec));
             }
@@ -167,9 +174,16 @@ pub fn estimate(
                 vols,
                 &tables(true),
                 Rows::Heaps(&re_encoders, &HashSet::new()),
+                pair.target,
                 workers,
             )?;
-            let (s, _) = count(vols, &tables(false), Rows::Records(&records), workers)?;
+            let (s, _) = count(
+                vols,
+                &tables(false),
+                Rows::Records(&records),
+                pair.target,
+                workers,
+            )?;
             // the re-encoded classes the pair count did not read (no index) get their own pass
             let t = std::time::Instant::now();
             let counted: HashSet<Oid> = growth.keys().copied().collect();
@@ -188,7 +202,7 @@ pub fn estimate(
     e.scan_seconds = started.elapsed().as_secs_f64();
     e.workers = workers;
     e.physical_memory = physical_memory;
-    e.regenerates = pair.regenerates_catalog();
+    e.regenerates = pair.regenerates_catalog(source);
     Ok(e)
 }
 
@@ -206,19 +220,14 @@ fn count(
     vols: &VolumeSet,
     classes: &[TargetClass],
     rows: Rows,
+    line: VersionLine,
     workers: usize,
 ) -> io::Result<(ResourceEstimate, HashMap<Oid, Growth>)> {
-    // the estimate is for a develop target; an 11.4 target is wired by workspace#533
-    let cons = class_constraints(classes, VersionLine::Develop).map_err(invalid)?;
+    // the keys as the target line builds them (workspace#552)
+    let cons = class_constraints(classes, line).map_err(invalid)?;
     let charset = vols.volume(0)?.header.db_charset as u8;
-    let (defs, _) = plain_index_defs(
-        classes,
-        &cons,
-        vols.io_pagesize(),
-        charset,
-        VersionLine::Develop,
-    )
-    .map_err(invalid)?;
+    let (defs, _) =
+        plain_index_defs(classes, &cons, vols.io_pagesize(), charset, line).map_err(invalid)?;
     let refs: Vec<&IndexDef> = defs.iter().collect();
     let from_heaps = matches!(rows, Rows::Heaps(..));
     let counted = match rows {

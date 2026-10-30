@@ -129,7 +129,7 @@ pub(crate) fn template_line(template: &CatalogTemplate) -> DecodeResult<VersionL
 }
 
 /// The name of `table` in the template's line.
-fn name_in(line: VersionLine, table: SystemTable) -> DecodeResult<&'static str> {
+pub(crate) fn name_in(line: VersionLine, table: SystemTable) -> DecodeResult<&'static str> {
     table
         .name_in(line)
         .ok_or_else(|| err(format!("{table} is not a table of the target line")))

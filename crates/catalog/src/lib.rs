@@ -7,6 +7,7 @@ pub mod auth_rows;
 pub mod catalog_layout;
 pub mod catalog_write;
 pub mod class_rewrite;
+pub mod class_rewrite_11_4;
 pub mod class_rows;
 pub mod classify;
 pub mod collation_check;

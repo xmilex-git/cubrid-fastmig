@@ -55,22 +55,6 @@ fn regu_value(v: &mut ReguValue) {
     }
 }
 
-/// Engine `LANG_LOADED_LOCALES_PARITY` and its mask (language_support.h): since 11.4 (CBRD-25302, 73cc3fd40) the
-/// compiler sets it in every language flag, and develop takes a flag without it for a host variable and refuses it.
-const LANG_PARITY: i32 = 0x75A5_C000;
-const LANG_PARITY_MASK: i32 = 0xFFFF_F000_u32 as i32;
-
-/// The develop language flag of a stored one. A source before 11.4 (10.2..11.3) stores the bare
-/// `lang id << 2 | has_user_lang << 1 | has_user_format`, the same bits develop keeps below the parity; an 11.4 flag
-/// already carries the parity and stays (workspace#540, ADR 0017).
-fn lang_flag(v: i32) -> i32 {
-    if v & LANG_PARITY_MASK == 0 {
-        v | LANG_PARITY
-    } else {
-        v
-    }
-}
-
 /// Engine `REGU_VARIABLE_INFER_COLLATION`: develop's unpack asserts it is absent (retired, no setter since 2015).
 const REGU_INFER_COLLATION: i32 = 0x20;
 
@@ -123,26 +107,6 @@ pub fn map_tree(from: VersionLine, tree: &mut StreamTree) -> DecodeResult<()> {
         }
     }
     // after the opcodes are develop numbers: the language flags of the TO_CHAR/TO_DATE family
-    let flags: Vec<_> = tree
-        .nodes
-        .iter()
-        .filter_map(|n| match n {
-            Node::Arith { opcode, third, .. } if opcode::takes_lang_flag(*opcode) => *third,
-            _ => None,
-        })
-        .collect();
-    for id in flags {
-        if let Node::Regu {
-            value:
-                ReguValue::DbVal {
-                    value: Value::Integer(v),
-                    ..
-                },
-            ..
-        } = &mut tree.nodes[id]
-        {
-            *v = lang_flag(*v);
-        }
-    }
+    super::lang_flag::add_parity(tree, |o| o);
     super::char_result::map_char_results(tree)
 }

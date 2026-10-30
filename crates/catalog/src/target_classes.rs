@@ -1,5 +1,6 @@
-//! Every class of the target catalog as a develop class object: the source's user classes rewritten, the system
-//! classes taken from the template (kept slots, reallocated tables, new tables, new views).
+//! Every class of the target catalog as a class object of the template's line (develop or 11.4): the source's user
+//! classes rewritten, the system classes taken from the template (kept slots, reallocated tables, new tables, new
+//! views).
 //!
 //! Input: the source classes and their plans, the target's catalog template, and the caller's placement: OIDs of
 //! new root-heap slots, heaps of reallocated and new tables, representation directories, rebuilt BTIDs, and user
@@ -14,6 +15,7 @@ use fastmig_ondisk::value::{DecodeError, DecodeResult};
 use fastmig_ondisk::{Btid, Hfid, Oid, SourceVersion, VersionLine};
 
 use crate::class_rewrite::{RewriteInputs, rewrite_user_class};
+use crate::class_rewrite_11_4::rewrite_user_class_11_4;
 use crate::classify::{ClassKind, ClassPlan};
 use crate::source_classes::SourceClass;
 use crate::system_classes::{SystemClassRole, target_role};
@@ -66,26 +68,41 @@ pub fn target_classes(
     let from = version
         .line()
         .ok_or_else(|| err(format!("source {} has no codec line", version.name())))?;
+    let to = template
+        .line()
+        .ok_or_else(|| err("catalog template without a known line".into()))?;
     let mut out = Vec::new();
-    // source system classes kept in place, by develop name
+    // source system classes kept in place, by target name
     let mut in_place: HashMap<Vec<u8>, (&SourceClass, SystemClassRole)> = HashMap::new();
     for (c, plan) in source.iter().zip(plans) {
         match plan.kind {
-            ClassKind::User => out.push(TargetClass {
-                oid: c.oid,
-                class: rewrite_user_class(
-                    c,
-                    plan,
-                    &RewriteInputs {
-                        from,
-                        rep_dir: (p.rep_dir)(c.oid)?,
-                        new_btid: p.source_btid,
-                    },
-                )?,
-                origin: Origin::User,
-            }),
+            ClassKind::User => {
+                let rep_dir = (p.rep_dir)(c.oid)?;
+                let class = match to {
+                    VersionLine::Develop => rewrite_user_class(
+                        c,
+                        plan,
+                        &RewriteInputs {
+                            from,
+                            rep_dir,
+                            new_btid: p.source_btid,
+                        },
+                    )?,
+                    VersionLine::V10_2 | VersionLine::V11_4 => {
+                        rewrite_user_class_11_4(c, plan, from, rep_dir, p.source_btid)?
+                    }
+                };
+                out.push(TargetClass {
+                    oid: c.oid,
+                    class,
+                    origin: Origin::User,
+                })
+            }
             ClassKind::System(r @ SystemClassRole::SameSlot { table }) => {
-                in_place.insert(table.name().as_bytes().to_vec(), (c, r));
+                let name = table
+                    .name_in(to)
+                    .ok_or_else(|| err(format!("{table} has no name in the target")))?;
+                in_place.insert(name.as_bytes().to_vec(), (c, r));
             }
             ClassKind::System(r @ SystemClassRole::Reallocated) => {
                 in_place.insert(c.class.name.clone(), (c, r));
@@ -96,7 +113,7 @@ pub fn target_classes(
     let tclasses = template
         .classes
         .iter()
-        .map(|r| decode(&r.bytes, VersionLine::Develop).map(|c| (r.oid, c)))
+        .map(|r| decode(&r.bytes, to).map(|c| (r.oid, c)))
         .collect::<DecodeResult<Vec<_>>>()?;
     // template class OID -> target class OID, fixed before any class is instantiated (domains name other classes)
     let mut map: HashMap<Oid, (Oid, Origin)> = HashMap::new();
@@ -104,7 +121,7 @@ pub fn target_classes(
         let name = String::from_utf8_lossy(&t.name).into_owned();
         let target = match in_place.get(&t.name) {
             Some((c, r)) => (c.oid, Origin::TemplateInPlace(*r)),
-            None => match target_role(&name, t.class_type == ClassType::Vclass, version) {
+            None => match target_role(&name, t.class_type == ClassType::Vclass, version, to) {
                 Some(r @ (SystemClassRole::New | SystemClassRole::View)) => {
                     ((p.new_slot)(&t.name)?, Origin::TemplateNewSlot(r))
                 }
@@ -129,6 +146,7 @@ pub fn target_classes(
         let class = crate::template_class::instantiate(
             t,
             &crate::template_class::Instance {
+                line: to,
                 class_oid: &|o| map.get(&o).map_or(o, |m| m.0),
                 heap,
                 rep_dir: (p.rep_dir)(oid)?,

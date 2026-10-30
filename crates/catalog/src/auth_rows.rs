@@ -12,8 +12,8 @@
 //! writes `is_grantable` 0 for every row; this follows `au_grant`, which a database built by GRANT statements
 //! shows (T1 develop: APP_GROUP's grantable SELECT/INSERT/UPDATE rows have 1).
 
-use fastmig_ondisk::Oid;
 use fastmig_ondisk::value::{DecodeError, DecodeResult, Value};
+use fastmig_ondisk::{Oid, VersionLine};
 
 use crate::class_rows::Row;
 use crate::ct_rows::{Sink, int, text};
@@ -34,10 +34,12 @@ fn err(what: String) -> DecodeError {
 
 pub fn auth_rows(
     authorizations: &[&Row],
+    line: VersionLine,
     now: &Value,
     alloc: &mut dyn FnMut(SystemTable) -> Oid,
 ) -> DecodeResult<Vec<(SystemTable, Row)>> {
     let mut s = Sink {
+        line,
         rows: Vec::new(),
         alloc,
     };

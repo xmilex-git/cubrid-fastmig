@@ -116,7 +116,8 @@ if [ $registered = 1 ]; then
   step smoke-sql 0 csql -C -u dba -i "$E2E/smoke.sql" "$DB"
   # LOB contents read through the engine: rows, BLOB equal, CLOB equal = the source's BLOB locator count
   step lob-sql 0 csql -C -u dba -i "$E2E/lob.sql" "$DB"
-  nlob=$(awk '/^%class \[app_owner\]\.\[product\]/ { p = 1; next } /^%class/ { p = 0 } p' "${REF}_objects" | grep -c "'B[0-9]*|file:")
+  # a 10.2 unload names classes without their owner
+  nlob=$(awk '/^%class (\[app_owner\]\.)?\[product\]/ { p = 1; next } /^%class/ { p = 0 } p' "${REF}_objects" | grep -c "'B[0-9]*|file:")
   step lob-contents 0 grep -q "lob-rows $nlob $nlob $nlob end" "$OUT/log/lob-sql.log"
   step server-stop 0 bash "$CTL" stop "$DB"
   cubrid service stop >"$OUT/log/service-stop.log" 2>&1

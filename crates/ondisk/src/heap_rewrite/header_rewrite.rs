@@ -19,7 +19,7 @@ use crate::heap_rewrite::heap_state::{HeapState, PageStats, chain_of, editor, in
 use crate::page::{self, PageType, db_area, db_area_mut};
 use crate::record::bestspace_page::{self, DEFAULT_SHARDS, ENTRIES_PER_SHARD, ROOT_SHARDS};
 use crate::record::heap_hdr_stats::{
-    BestspaceDir, BestspaceEntry, HeapHdrStats, LineFields, MAX_CANDIDATES,
+    BestspaceDir, BestspaceEntry, HeapHdrStats, HeapHdrStatsHeadLe, LineFields, MAX_CANDIDATES,
 };
 use crate::spage::{RecordType, SlottedPage};
 use crate::{VersionLine, Vpid};
@@ -161,9 +161,12 @@ fn write_header_114(
         recs_sumlen: stats.sumlen,
         ..src.clone()
     };
-    let mut rec = vec![0u8; HeapHdrStats::size(VersionLine::V11_4)];
-    hdr.write(&mut rec, VersionLine::V11_4);
-    st.edit_slot0(hv, |r| r.copy_from_slice(&rec))?;
+    // the link to the first data page as the page now holds it: pages appended to a new heap's lone header page
+    // were linked there after `src` was read (workspace#552)
+    st.edit_slot0(hv, |r| {
+        let next_vpid = HeapHdrStatsHeadLe::of(r).next_vpid.get();
+        HeapHdrStats { next_vpid, ..hdr }.write(r, VersionLine::V11_4);
+    })?;
     st.flush()?;
     Ok(HeaderOutcome {
         bestspace_pages: Vec::new(),

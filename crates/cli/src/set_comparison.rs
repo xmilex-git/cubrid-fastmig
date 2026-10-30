@@ -24,8 +24,9 @@ const HELP: &str = "\
 cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix> [--diff <file>]
   <prefix>         <dir>/<db name> as unloaddb -O <dir> wrote it (files <prefix>_schema, _objects, ...)
   --diff <file>    write every differing entry (< source only, > target only)
-  --source-version <11.2|11.3|11.4|develop> --target-version <11.4|develop>
-                   the engine lines that wrote each side; both or neither (default: one line, no normalization)
+  --source-version <10.2|11.2|11.3|11.4|develop> --target-version <11.4|develop>
+                   the engine lines that wrote each side; both or neither (default: one line, no normalization);
+                   a 10.2 source gets no rules: compare against the official path's target-line unload
   exit 0 = same entries, 1 = differ, 2 = usage or I/O error";
 
 /// Differing entries printed per file on stdout; `--diff` has all of them.
@@ -150,6 +151,7 @@ fn version_line(v: &str) -> Result<VersionLine, CliError> {
 /// The source version as `plan.json` names it (`SourceVersion::name`).
 fn source_version(v: &str) -> Result<SourceVersion, CliError> {
     [
+        SourceVersion::V10_2,
         SourceVersion::V11_2,
         SourceVersion::V11_3,
         SourceVersion::V11_4,
@@ -159,7 +161,7 @@ fn source_version(v: &str) -> Result<SourceVersion, CliError> {
     .find(|s| s.name() == v)
     .ok_or_else(|| {
         CliError::Usage(format!(
-            "unknown source version {v} (11.2, 11.3, 11.4 or develop)"
+            "unknown source version {v} (10.2, 11.2, 11.3, 11.4 or develop)"
         ))
     })
 }

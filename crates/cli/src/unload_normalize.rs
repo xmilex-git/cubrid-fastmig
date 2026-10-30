@@ -52,17 +52,29 @@ pub struct Rule {
     pub rewrite: Rewrite,
 }
 
-/// The rules of one version pair, applied in order.
+/// The rules of one version pair, applied in order. A 10.2 source has none: its unload prints names without owners,
+/// so its reference is the official path's target-line unload (10.2 unloaddb → target loaddb
+/// `--no-user-specified-name` → target unloaddb), compared as it is (workspace#552).
 pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
     match (source, target) {
         (SourceVersion::V11_4, VersionLine::Develop) => V11_4_TO_DEVELOP.iter().collect(),
         (SourceVersion::V11_3, VersionLine::Develop) => {
-            V11_4_TO_DEVELOP.iter().chain(PRE_11_4_TO_DEVELOP).collect()
+            V11_4_TO_DEVELOP.iter().chain(BEFORE_11_4).collect()
         }
         (SourceVersion::V11_2, VersionLine::Develop) => V11_4_TO_DEVELOP
             .iter()
-            .chain(PRE_11_4_TO_DEVELOP)
-            .chain(V11_2_TO_DEVELOP)
+            .chain(BEFORE_11_4)
+            .chain(V11_2_SOURCE)
+            .collect(),
+        // 11.4 prints what develop does in these: the rules are the source's (workspace#552)
+        (SourceVersion::V11_3, VersionLine::V11_4) => {
+            BEFORE_11_4.iter().chain(BEFORE_11_4_TO_11_4).collect()
+        }
+        (SourceVersion::V11_2, VersionLine::V11_4) => BEFORE_11_4
+            .iter()
+            .chain(BEFORE_11_4_TO_11_4)
+            .chain(V11_2_SOURCE)
+            .chain(V11_2_TO_11_4)
             .collect(),
         // one line prints alike; a downgrade is out of scope (ADR 0003)
         _ => Vec::new(),
@@ -70,9 +82,9 @@ pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
 }
 
 // 11.2 and 11.3 print stored procedures, function/filter index text, synonym owners and absolute LOB locators their
-// own way; 11.2 also its
-// serials, auto_increment state and trigger owners (T4 baselines -> develop, workspace#529; `unload_rules_before_11_4`)
-const PRE_11_4_TO_DEVELOP: &[Rule] = &[
+// own way; 11.2 also its serials, auto_increment state and trigger owners (T4 baselines -> develop, workspace#529;
+// -> 11.4, workspace#552; `unload_rules_before_11_4`)
+const BEFORE_11_4: &[Rule] = &[
     Rule {
         name: "sp-owner-authid",
         files: &["schema"],
@@ -99,7 +111,7 @@ const PRE_11_4_TO_DEVELOP: &[Rule] = &[
     },
 ];
 
-const V11_2_TO_DEVELOP: &[Rule] = &[
+const V11_2_SOURCE: &[Rule] = &[
     Rule {
         name: "serial-11-2",
         files: &["schema"],
@@ -119,6 +131,24 @@ const V11_2_TO_DEVELOP: &[Rule] = &[
         rewrite: Rewrite::AutoIncrement11_2,
     },
 ];
+
+// 11.2 and 11.3 lack `_db_stored_procedure_code` (1ea4a86e0 #5438), which an 11.4 target has, so user class ids shift
+// by one (workspace#552)
+const BEFORE_11_4_TO_11_4: &[Rule] = &[Rule {
+    name: "class-id-names",
+    files: &["objects"],
+    side: Side::Both,
+    rewrite: Rewrite::ClassIdNames,
+}];
+
+// 11.4 prints `WITH DEDUPLICATE=0` on every index and FK it did not deduplicate; 11.2 has no DEDUPLICATE indexes (R16
+// workspace#532), so the target's level 0 is the only level there (workspace#552)
+const V11_2_TO_11_4: &[Rule] = &[Rule {
+    name: "with-deduplicate",
+    files: &["schema", "indexes"],
+    side: Side::Target,
+    rewrite: Rewrite::DeduplicateLevel,
+}];
 
 const V11_4_TO_DEVELOP: &[Rule] = &[
     // CBRD-27324 (develop 5de66400a, CUBRID/cubrid#8104) removed the DEDUPLICATE index feature; 11.4 prints level 0,

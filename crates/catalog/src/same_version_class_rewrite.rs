@@ -79,23 +79,24 @@ fn map_info(
     Ok(())
 }
 
-/// The property sequence without the deferred indexes, BTIDs replaced.
-fn rewrite_properties(
+/// The property sequence without the deferred indexes, BTIDs replaced; read as `from` wrote it, written in `to`.
+pub(crate) fn rewrite_properties(
     c: &ClassObject,
-    line: VersionLine,
+    from: VersionLine,
+    to: VersionLine,
     new_btid: &dyn Fn(Btid) -> Option<Btid>,
 ) -> DecodeResult<Vec<u8>> {
     if c.properties.is_empty() {
         return Ok(Vec::new());
     }
-    let props = class_properties(&c.properties, line)?;
+    let props = class_properties(&c.properties, from)?;
     let deferred = |name: &[u8]| {
         props
             .constraints
             .iter()
             .any(|k| k.name == name && (k.has_filter || k.has_function))
     };
-    let set = decode_set(line, &mut OrReader::new(&c.properties), None)?;
+    let set = decode_set(from, &mut OrReader::new(&c.properties), None)?;
     let mut elements = Vec::new();
     for pair in set.elements.chunks(2) {
         let [name, value] = pair else {
@@ -121,7 +122,7 @@ fn rewrite_properties(
             let Value::Set(mut info_set) = info.value.clone() else {
                 return Err(err("constraint info is not a sequence".into()));
             };
-            map_info(kind, &mut info_set, new_btid, line)?;
+            map_info(kind, &mut info_set, new_btid, from)?;
             kept.push(cname.clone());
             kept.push(SetElement {
                 tag: info.tag.clone(),
@@ -142,7 +143,7 @@ fn rewrite_properties(
     }
     let mut w = OrWriter::new();
     encode_set(
-        line,
+        to,
         &mut w,
         None,
         &SetValue {
@@ -162,7 +163,7 @@ pub fn rewrite_same_version_class(
     new_btid: &dyn Fn(Btid) -> Option<Btid>,
 ) -> DecodeResult<ClassObject> {
     let mut o = c.clone();
-    o.properties = rewrite_properties(c, line, new_btid)?;
+    o.properties = rewrite_properties(c, line, line, new_btid)?;
     o.rep_dir = rep_dir;
     Ok(o)
 }

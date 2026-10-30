@@ -1,6 +1,6 @@
 //! Derives the rows of the 11 ct tables (`_db_class`, `_db_attribute`, `_db_domain`, `_db_method`, `_db_meth_sig`,
 //! `_db_meth_arg`, `_db_meth_file`, `_db_query_spec`, `_db_index`, `_db_index_key`, `_db_partition`) from the
-//! target class objects, as the develop engine writes them when it creates each class.
+//! target class objects, as the develop or 11.4 engine writes them when it creates each class.
 //!
 //! Input: every target class (develop class objects with their class OIDs), the migrate start time, and the
 //! caller's row allocator (`table name -> new row OID`; the real page placement is P1 integration, workspace#484).
@@ -11,7 +11,9 @@
 //! holds its children's OIDs in order; in a direct child of a `_db_class` row an OID equal to that row is NULL; a
 //! `DB_TYPE_VARIABLE` domain class becomes the tree's `_db_class` row), `catcls_convert_class_oid_to_oid` (a class
 //! OID in a ct row is that class's `_db_class` row), `catcls_set_or_value_timestamps`; `transform.c` `ct_*_atts`
-//! (column names); R4 § 6, § 7 R4-R5, R7; workspace#482 decision 8 (created/updated time = migrate start).
+//! (column names); R4 § 6, § 7 R4-R5, R7; workspace#482 decision 8 (created/updated time = migrate start). An 11.4
+//! target (release/11.4 `catalog_class.c`, `transform.c`): the same rows without the columns develop added, and
+//! `_db_class.is_system_class` holding every class flag (workspace#552).
 
 use std::collections::HashMap;
 
@@ -30,8 +32,29 @@ use crate::ct_index_rows::index_rows;
 use crate::system_table::SystemTable;
 use crate::target_classes::TargetClass;
 
-const LINE: VersionLine = VersionLine::Develop;
 use fastmig_ondisk::class_object::CLASSFLAG_SYSTEM;
+/// The ct and `_db_auth` columns develop added: an 11.4 target's tables lack them (`transform.c` `ct_*_atts`, release/11.4
+/// against develop 682b080b2; the 11.4 and develop catalog templates compared, workspace#552).
+const DEVELOP_ONLY_COLUMNS: [(SystemTable, &str); 18] = [
+    (SystemTable::DbClass, "flags"),
+    (SystemTable::DbClass, "created_time"),
+    (SystemTable::DbClass, "updated_time"),
+    (SystemTable::DbAttribute, "flags"),
+    (SystemTable::DbIndex, "referential_class"),
+    (SystemTable::DbIndex, "delete_rule"),
+    (SystemTable::DbIndex, "update_rule"),
+    (SystemTable::DbIndex, "referential_match_option"),
+    (SystemTable::DbIndex, "index_type"),
+    (SystemTable::DbIndex, "options"),
+    (SystemTable::DbIndex, "created_time"),
+    (SystemTable::DbIndex, "updated_time"),
+    (SystemTable::DbPartition, "class_partition_type"),
+    (SystemTable::DbQuerySpec, "invalidated_time"),
+    (SystemTable::DbClass, "checked_time"),
+    (SystemTable::DbClass, "statistics_strategy"),
+    (SystemTable::DbAuth, "created_time"),
+    (SystemTable::DbAuth, "updated_time"),
+];
 /// Engine `SM_ATTFLAG_*` and the `DB_ATTOPT_*` bits `catcls_filter_attflag` maps them to.
 const ATTFLAG_NON_NULL: i32 = 4;
 const ATTFLAG_AUTO_INCREMENT: i32 = 256;
@@ -42,16 +65,20 @@ const INSTANCE: i32 = 0;
 const CLASS: i32 = 1;
 const SHARED: i32 = 2;
 
-/// Where generated rows go: the allocator and the rows so far.
+/// Where generated rows go: the target line, the allocator and the rows so far.
 pub(crate) struct Sink<'a> {
+    pub line: VersionLine,
     pub rows: Vec<(SystemTable, Row)>,
     pub alloc: &'a mut dyn FnMut(SystemTable) -> Oid,
 }
 
 impl Sink<'_> {
+    /// Keeps the columns the target line's table has.
     pub fn emit(&mut self, table: SystemTable, oid: Oid, values: Vec<(&str, Value)>) {
+        let develop = self.line == VersionLine::Develop;
         let values = values
             .into_iter()
+            .filter(|(n, _)| develop || !DEVELOP_ONLY_COLUMNS.contains(&(table, n)))
             .map(|(n, v)| (n.to_string(), v))
             .collect();
         self.rows.push((table, Row { oid, values }));
@@ -78,18 +105,19 @@ pub(crate) fn obj(o: Oid) -> Value {
     }
 }
 
-/// A sequence column the way catcls writes it: the set carries its built-in domain and tags each element.
+/// A sequence column the way catcls writes it: the set carries its built-in domain and tags each element (the
+/// built-in SEQUENCE, OBJECT, VARCHAR and INTEGER domains are the same in 11.4 and develop).
 pub(crate) fn seq(ty: DbType, values: Vec<Value>) -> Value {
     if values.is_empty() {
         return Value::Null;
     }
     Value::Set(SetValue {
         ty: DbType::Sequence,
-        domain: Some(Domain::builtin(LINE, DbType::Sequence)),
+        domain: Some(Domain::builtin(VersionLine::Develop, DbType::Sequence)),
         elements: values
             .into_iter()
             .map(|value| SetElement {
-                tag: Some(Domain::builtin(LINE, ty)),
+                tag: Some(Domain::builtin(VersionLine::Develop, ty)),
                 value,
             })
             .collect(),
@@ -193,7 +221,7 @@ impl Tree<'_> {
                     e.what
                 ))
             };
-            let default = default_value(a).map_err(ctx)?;
+            let default = default_value(a, s.line).map_err(ctx)?;
             let domains = self.domains(s, me, &a.domain)?;
             let flags = (a.flags & ATTFLAG_AUTO_INCREMENT != 0) as i32
                 | ((a.flags & ATTFLAG_INVISIBLE_COLUMN != 0) as i32) << 1
@@ -350,7 +378,12 @@ impl Tree<'_> {
             let pvalues = if p.pvalues.is_empty() {
                 Value::Null
             } else {
-                decode_tagged(LINE, &mut OrReader::new(&p.pvalues), Some(p.pvalues.len()))?.1
+                decode_tagged(
+                    s.line,
+                    &mut OrReader::new(&p.pvalues),
+                    Some(p.pvalues.len()),
+                )?
+                .1
             };
             s.emit(
                 SystemTable::DbPartition,
@@ -379,7 +412,14 @@ impl Tree<'_> {
                 ("inst_meth_count", int(c.method_count)),
                 ("class_meth_count", int(c.class_method_count)),
                 ("class_attr_count", int(c.class_attribute_count)),
-                ("is_system_class", int(c.flags & CLASSFLAG_SYSTEM)),
+                // develop splits the flags: the system bit here, the rest in `flags`; 11.4 keeps them all here
+                (
+                    "is_system_class",
+                    int(match s.line {
+                        VersionLine::Develop => c.flags & CLASSFLAG_SYSTEM,
+                        VersionLine::V10_2 | VersionLine::V11_4 => c.flags,
+                    }),
+                ),
                 ("class_type", int(class_type)),
                 ("owner", obj(c.owner)),
                 ("collation_id", int(c.collation_id)),
@@ -418,13 +458,16 @@ fn resolved_name(c: &ClassObject, name: &[u8], kind: i32) -> Value {
         .map_or(Value::Null, |r| opt_text(r.name.as_deref()))
 }
 
-/// The ct rows of every class. `now` is the migrate start time (a `Value::Datetime`).
+/// The ct rows of every class, for a target of `line` (the class objects' line). `now` is the migrate start time (a
+/// `Value::Datetime`).
 pub fn ct_rows(
     classes: &[TargetClass],
+    line: VersionLine,
     now: &Value,
     alloc: &mut dyn FnMut(SystemTable) -> Oid,
 ) -> DecodeResult<Vec<(SystemTable, Row)>> {
     let mut s = Sink {
+        line,
         rows: Vec::new(),
         alloc,
     };

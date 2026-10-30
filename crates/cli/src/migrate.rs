@@ -66,8 +66,8 @@ const HELP: &str = "\
 cubrid-fastmig migrate <db> --dest <dir> [options]
   --dest <dir>                   target directory for the volumes (must be empty or hold FASTMIG_INCOMPLETE;
                                  refused while another migrate holds its lock)
-  --target-version 11.4|develop  target release line (default: develop; 11.4 is refused: no 11.4 layout
-                                 B-tree builder)
+  --target-version 11.4|develop  target release line (default: develop; 11.4 takes a 10.2, 11.2, 11.3 or 11.4
+                                 source)
   --log-dir <dir>                target log directory (default: --dest)
   --workers <n>                  worker limit: thread cap for the whole run (default: CPUs / 2)
   --target-name <name>           target DB name (default: <db>)
@@ -519,7 +519,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     // laps: page_treatment after prepare, index_build after the rebuild; the catalog writes and BT_STATS of finish
     // fall in catalog_regeneration, lapped after the closure
     let mut regenerate = || {
-        if pair.regenerates_catalog() {
+        if pair.regenerates_catalog(src.version) {
             let prepared = catalog_regeneration::prepare(
                 &space,
                 src.version,

@@ -1,6 +1,7 @@
-//! Records in a develop-format heap that the source never had: create an empty heap file as the engine's
-//! `heap_create` does, insert records first fit, put a new record under an existing OID, delete a record, and end
-//! with the develop header statistics and bestspace entries measured on every page.
+//! Records in a heap of the target line that the source never had: create an empty heap file as the engine's
+//! `heap_create` does (develop: header and bestspace pages; 11.4: the header page alone), insert records first fit, put
+//! a new record under an existing OID, delete a record, and end with the target's header statistics (and develop's
+//! bestspace entries) measured on every page.
 //!
 //! Input: a [`SpaceManager`] over the target and a develop heap (one [`create_heap`] made, or one [`rewrite_heap`]
 //! already turned into develop's format). Output: the records written; [`PageStats`] of the whole heap.
@@ -24,7 +25,9 @@ use crate::heap_rewrite::placement::{max_slotted_len, place, release_target};
 use crate::heap_rewrite::record_patch::{residue_free_overflow_header, with_header};
 use crate::page::{self, PageType, db_area, db_area_mut, db_pagesize};
 use crate::record::bestspace_page::{self, DEFAULT_SHARDS, ROOT_SHARDS};
-use crate::record::heap_hdr_stats::{BestspaceDir, HeapHdrStats, LineFields};
+use crate::record::heap_hdr_stats::{
+    BestPage, BestspaceDir, Estimates114, HeapHdrStats, LineFields, NUM_BEST_11_4,
+};
 use crate::record::mvcc_header::RecordHeader;
 use crate::spage::{Anchor, RecordType, SlottedPage, SpageBuilder};
 use crate::{Hfid, Oid, VersionLine, Vpid};
@@ -49,6 +52,10 @@ pub fn create_heap(space: &SpaceManager, class_oid: Oid, root: bool) -> io::Resu
     };
     hfid.write(&mut des, 8);
     space.set_descriptor(vfid, des)?;
+    if space.line() != VersionLine::Develop {
+        write_header_page_114(space, hfid, class_oid)?;
+        return Ok(hfid);
+    }
 
     let bs = (0..bestspace_page::page_count(io_size))
         .map(|_| space.alloc_page(vfid, PageType::Heap))
@@ -92,6 +99,60 @@ pub fn create_heap(space: &SpaceManager, class_oid: Oid, root: bool) -> io::Resu
     b.finish();
     vs.write_page(hv, &p)?;
     Ok(hfid)
+}
+
+/// The header page of a new 11.4 heap: the 296 B header alone, its best-page hint the header page itself (release/11.4
+/// heap_file.c `heap_create_internal`: `best[0]` = the header page with `spage_max_space_for_new_record` taken before
+/// the header goes in, `head` 1, `num_high_best` 1, `last_vpid` and `full_search_vpid` the header page; no bestspace
+/// pages, workspace#552).
+fn write_header_page_114(space: &SpaceManager, hfid: Hfid, class_oid: Oid) -> io::Result<()> {
+    let vs = space.volumes();
+    let io_size = vs.io_pagesize();
+    let hv = hfid.vpid();
+    let mut p = vec![0u8; io_size];
+    page::init_header(&mut p, hv, PageType::Heap);
+    let mut b = SpageBuilder::new(
+        db_area_mut(&mut p),
+        Anchor::AnchoredDontReuseSlots,
+        HEAP_MAX_ALIGN,
+        true,
+    );
+    let mut best = [BestPage {
+        vpid: Vpid::NULL,
+        freespace: 0,
+    }; NUM_BEST_11_4];
+    best[0] = BestPage {
+        vpid: hv,
+        freespace: b.max_space_for_new_record() as i32,
+    };
+    let hdr = HeapHdrStats {
+        class_oid,
+        ovf_vfid: crate::Vfid::NULL,
+        next_vpid: Vpid::NULL,
+        last_vpid: hv,
+        unfill_space: (db_pagesize(io_size) as f32 * UNFILL_FACTOR) as i32,
+        num_pages: 1,
+        num_recs: 0,
+        recs_sumlen: 0,
+        line: LineFields::V11_4(Estimates114 {
+            num_other_high_best: 0,
+            num_high_best: 1,
+            num_substitutions: 0,
+            num_second_best: 0,
+            head_second_best: 0,
+            tail_second_best: 0,
+            head: 1,
+            full_search_vpid: hv,
+            second_best: [Vpid::NULL; NUM_BEST_11_4],
+            best,
+        }),
+    };
+    let mut rec = vec![0u8; HeapHdrStats::size(VersionLine::V11_4)];
+    hdr.write(&mut rec, VersionLine::V11_4);
+    b.insert(RecordType::Home, &rec)
+        .ok_or_else(|| invalid(format!("{hv:?}: the heap header does not fit")))?;
+    b.finish();
+    vs.write_page(hv, &p)
 }
 
 /// An open heap of the target line (develop, or 11.4 on the 11.4 same-version path): every page of its chain read,

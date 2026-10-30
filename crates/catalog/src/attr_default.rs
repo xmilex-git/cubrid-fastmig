@@ -1,12 +1,13 @@
 //! The `_db_attribute.default_value` string of one attribute: its default value or default expression as text.
 //!
-//! Input: a develop attribute (packed current default value and packed property sequence). Output: the string, or
-//! `None` for no default.
+//! Input: an attribute of a develop or 11.4 class object (packed current default value and packed property sequence) and
+//! its line. Output: the string, or `None` for no default.
 //! Source: engine develop @682b080b2 `catalog_class.c:catcls_get_or_value_from_attribute` (the `default_expr`
 //! property wins over the value: `<expr>` or `TO_CHAR(<expr>[, '<format>'])`; `update_default` appends
 //! `ON UPDATE <expr>`; else the value through `valcnv_convert_value_to_string`), `db_macro.c`
 //! `db_default_expression_string`, `valcnv_convert_data_to_string` (integers in decimal, float/double `%.17g`, NUMERIC `numeric_db_value_print`, DATE/TIME/DATETIME `db_date.c` `db_*_to_string`, CHAR/VARCHAR bare with `'`
-//! doubled); R4 § 7 R4 (2048-byte cut).
+//! doubled); R4 § 7 R4 (2048-byte cut). release/11.4 writes the same text (the function differs only in its string
+//! building, workspace#552).
 
 use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::class_object::Attribute;
@@ -14,7 +15,6 @@ use fastmig_ondisk::value::{
     DecodeError, DecodeResult, Numeric, OrReader, SetValue, Value, decode_set, decode_tagged,
 };
 
-const LINE: VersionLine = VersionLine::Develop;
 /// Engine `DB_MAX_DEFAULT_EXPR_LENGTH`.
 const MAX_DEFAULT_LENGTH: usize = 2048;
 /// Engine `DB_MAX_IDENTIFIER_LENGTH`.
@@ -82,7 +82,10 @@ fn value_string(v: &Value) -> DecodeResult<Option<String>> {
         Value::Integer(i) => i.to_string(),
         Value::Short(i) => i.to_string(),
         Value::Bigint(i) => i.to_string(),
-        Value::Char(b) | Value::Varchar(b) => String::from_utf8_lossy(b).replace('\'', "''"),
+        // an 11.4 target keeps NCHAR, printed as CHAR (release/11.4 db_macro.c `valcnv_convert_data_to_string`)
+        Value::Char(b) | Value::Varchar(b) | Value::Nchar(b) | Value::Varnchar(b) => {
+            String::from_utf8_lossy(b).replace('\'', "''")
+        }
         Value::Double(d) => g17(if d.is_infinite() {
             f64::MAX.copysign(*d)
         } else {
@@ -123,17 +126,18 @@ fn value_string(v: &Value) -> DecodeResult<Option<String>> {
     }))
 }
 
-pub fn default_value(a: &Attribute) -> DecodeResult<Option<String>> {
+/// `a` is an attribute of a class object of `line`.
+pub fn default_value(a: &Attribute, line: VersionLine) -> DecodeResult<Option<String>> {
     let value = if a.default_value.is_empty() {
         Value::Null
     } else {
         let p = &a.default_value;
-        decode_tagged(LINE, &mut OrReader::new(p), Some(p.len()))?.1
+        decode_tagged(line, &mut OrReader::new(p), Some(p.len()))?.1
     };
     let props = if a.properties.is_empty() {
         None
     } else {
-        Some(decode_set(LINE, &mut OrReader::new(&a.properties), None)?)
+        Some(decode_set(line, &mut OrReader::new(&a.properties), None)?)
     };
     let mut s = match props.as_ref().and_then(|p| property(p, b"default_expr")) {
         Some(e) => Some(default_expr(e)?),

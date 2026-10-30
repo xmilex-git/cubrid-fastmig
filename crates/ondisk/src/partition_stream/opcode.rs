@@ -84,6 +84,17 @@ pub fn to_develop(from: VersionLine, opcode: i32) -> i32 {
     }
 }
 
+/// The 11.4 opcode of an opcode `from` (10.2 or 11.4) wrote (workspace#552).
+pub fn to_11_4(from: VersionLine, opcode: i32) -> i32 {
+    match from {
+        VersionLine::V10_2 => from_10_2_to_11_4(opcode),
+        VersionLine::V11_4 => opcode,
+        VersionLine::Develop => {
+            unreachable!("develop to 11.4 is a downgrade the transcoder refuses first")
+        }
+    }
+}
+
 /// Engine 10.2 `F_BENCHMARK`: the first function code 11.0 moves (it inserts the five `F_REGEXP_*` at 963). Below it
 /// the codes are the same in 10.2, 11.4 and develop, and every function the 10.2 partition check allows is there.
 const F_BENCHMARK_10_2: i32 = 963;

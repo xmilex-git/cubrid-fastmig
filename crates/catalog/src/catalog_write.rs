@@ -20,13 +20,13 @@ use fastmig_ondisk::class_object::{class_properties, decode, encode};
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::HeapWriter;
 use fastmig_ondisk::value::DecodeResult;
-use fastmig_ondisk::{Btid, Oid, VersionLine};
+use fastmig_ondisk::{Btid, Oid};
 
 use crate::catalog_layout::{
     CatalogLayout, class_catalog_items, placed_heap, placed_rep_dir, placed_slot,
 };
 use crate::classify::ClassKind;
-use crate::same_slot_rows::template_rows;
+use crate::same_slot_rows::{name_in, template_rows};
 use crate::source_catalog::SourceCatalog;
 use crate::system_classes::SystemClassRole;
 use crate::system_rows::user;
@@ -60,7 +60,7 @@ fn btid_maps(
                 }
             }
             ClassKind::System(SystemClassRole::SameSlot { table }) => {
-                target_of.insert(table.name().as_bytes().to_vec(), c.oid);
+                target_of.insert(name_in(layout.line, *table)?.as_bytes().to_vec(), c.oid);
             }
             ClassKind::System(SystemClassRole::Reallocated) => {
                 target_of.insert(c.class.name.clone(), c.oid);
@@ -70,11 +70,11 @@ fn btid_maps(
     }
     let mut tpl = HashMap::new();
     for r in &template.classes {
-        let t = decode(&r.bytes, VersionLine::Develop)?;
+        let t = decode(&r.bytes, layout.line)?;
         let Some(&oid) = target_of.get(&t.name) else {
             continue;
         };
-        for k in class_properties(&t.properties, VersionLine::Develop)?.constraints {
+        for k in class_properties(&t.properties, layout.line)?.constraints {
             if let (Some(old), Some(new)) = (k.btid, new_btid(oid, &k.name)) {
                 tpl.insert(old, new);
             }
@@ -170,7 +170,7 @@ pub fn write_catalog(
     let (_, boot) = BootDbParm::read(vs)?;
     let mut root = HeapWriter::open(space, boot.rootclass_hfid)?;
     for t in &targets {
-        root.place(t.oid, &encode(&t.class, VersionLine::Develop), false)?;
+        root.place(t.oid, &encode(&t.class, layout.line), false)?;
     }
     let stats = root.finish()?;
     layout.heap_stats.insert(boot.rootclass_hfid, stats);

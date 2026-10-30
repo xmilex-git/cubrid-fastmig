@@ -36,7 +36,9 @@ use crate::ct_rows::ct_rows;
 use crate::disk_repr_build;
 use crate::record_map::{RecordMap, Unmapped};
 use crate::row_encode::encode_row;
-use crate::same_slot_rows::{SameSlotInputs, same_slot_rows, template_rows};
+use crate::same_slot_rows::{
+    SameSlotInputs, name_in, same_slot_rows, template_line, template_rows,
+};
 use crate::source_catalog::SourceCatalog;
 use crate::static_rows::static_rows;
 use crate::system_classes::{SystemClassRole, same_slot};
@@ -199,7 +201,7 @@ pub fn generated_rows(
     template: &CatalogTemplate,
     now: &Value,
 ) -> DecodeResult<Generated> {
-    let empty = CatalogLayout::empty(VersionLine::Develop);
+    let empty = CatalogLayout::empty(template.line().unwrap_or(VersionLine::Develop));
     let mut places = Places {
         distinct_btids: true,
         ..Places::first_pass(&empty)
@@ -213,6 +215,7 @@ fn generate(
     now: &Value,
     places: &mut Places,
 ) -> DecodeResult<Generated> {
+    let line = template_line(template)?;
     let tusers = template_rows(template, SystemTable::DbUser)?;
     let first = places.first_pass;
     let distinct_btids = places.distinct_btids;
@@ -295,7 +298,7 @@ fn generate(
         t
     };
     let mut alloc = |t: SystemTable| places.alloc(t);
-    let mut rows = ct_rows(&targets, now, &mut alloc)?;
+    let mut rows = ct_rows(&targets, line, now, &mut alloc)?;
     let same = same_slot_rows(
         &SameSlotInputs {
             source: &source.same_slot,
@@ -312,7 +315,7 @@ fn generate(
         .filter(|(t, _)| *t == SystemTable::DbAuthorization)
         .map(|(_, r)| r)
         .collect();
-    let auth = auth_rows(&auths, now, &mut alloc)?;
+    let auth = auth_rows(&auths, line, now, &mut alloc)?;
     rows.extend(same);
     rows.extend(auth);
     let src = |t: SystemTable| {
@@ -442,21 +445,22 @@ pub fn plan_catalog(
 ) -> io::Result<CatalogLayout> {
     let vs = space.volumes();
     let (_, boot) = BootDbParm::read(vs)?;
+    let line = template_line(template).map_err(decode_err("catalog template"))?;
     let mut layout = CatalogLayout {
         heap_stats: user_heap_stats,
-        ..CatalogLayout::empty(VersionLine::Develop)
+        ..CatalogLayout::empty(line)
     };
 
     // first pass: placeholders everywhere, real lengths
-    let empty = CatalogLayout::empty(VersionLine::Develop);
+    let empty = CatalogLayout::empty(line);
     let mut p1 = Places::first_pass(&empty);
     let g1 = generate(source, template, now, &mut p1).map_err(decode_err("catalog first pass"))?;
 
-    // root heap: develop format with every kept class object at its final length, then deletions and new slots
+    // root heap: the target format with every kept class object at its final length, then deletions and new slots
     let class_bytes: HashMap<Oid, Vec<u8>> = g1
         .targets
         .iter()
-        .map(|t| (t.oid, encode(&t.class, VersionLine::Develop)))
+        .map(|t| (t.oid, encode(&t.class, line)))
         .collect();
     let root = boot.rootclass_hfid;
     rewrite_heap(
@@ -551,14 +555,10 @@ pub fn plan_catalog(
     layout.catalog_pages = vpids;
     layout.catalog_items = sizing;
 
-    // row heaps: the same-slot tables in develop format first (first-pass rows at their final lengths)
+    // row heaps: the same-slot tables in the target format first (first-pass rows at their final lengths)
     let encode = |targets: &[TargetClass], t: &SystemTable, r: &Row| -> io::Result<Vec<u8>> {
-        encode_row(
-            &table_class(targets, t.name())?.class,
-            VersionLine::Develop,
-            r,
-        )
-        .map_err(|e| invalid(format!("{t} {:?}: {e}", r.oid)))
+        encode_row(&table_class(targets, table_name(*t, line)?)?.class, line, r)
+            .map_err(|e| invalid(format!("{t} {:?}: {e}", r.oid)))
     };
     let mut writers: HashMap<Vec<u8>, HeapWriter> = HashMap::new();
     for dev in same_slot(source.version) {
@@ -595,7 +595,7 @@ pub fn plan_catalog(
         )
         .map_err(|e| invalid(format!("{dev} heap: {e}")))?;
         writers.insert(
-            dev.name().as_bytes().to_vec(),
+            table_name(dev, line)?.as_bytes().to_vec(),
             HeapWriter::open(space, sc.class.heap)?,
         );
     }
@@ -608,7 +608,7 @@ pub fn plan_catalog(
     for (t, r) in &g1.rows {
         if is_placeholder(r.oid) {
             let bytes = encode(&g1.targets, t, r)?;
-            let oid = writer(&mut writers, t)?.insert(&bytes, mvcc_table(*t))?;
+            let oid = writer(&mut writers, t, line)?.insert(&bytes, mvcc_table(*t))?;
             real_row.insert(r.oid, oid);
         }
     }
@@ -644,8 +644,8 @@ pub fn plan_catalog(
     let g2 = generate(source, template, now, &mut p2).map_err(decode_err("catalog second pass"))?;
     let mut written: BTreeMap<&'static str, usize> = BTreeMap::new();
     for (t, r) in &g2.rows {
-        writer(&mut writers, t)?.place(r.oid, &encode(&g2.targets, t, r)?, mvcc_table(*t))?;
-        *written.entry(t.name()).or_default() += 1;
+        writer(&mut writers, t, line)?.place(r.oid, &encode(&g2.targets, t, r)?, mvcc_table(*t))?;
+        *written.entry(table_name(*t, line)?).or_default() += 1;
     }
     for (_, w) in writers {
         let hfid = w.hfid();
@@ -656,14 +656,20 @@ pub fn plan_catalog(
     Ok(layout)
 }
 
-/// The open heap of table `t`'s rows.
+/// The open heap of table `t`'s rows, keyed by its name in `line`.
 fn writer<'m, 's, 'v>(
     writers: &'m mut HashMap<Vec<u8>, HeapWriter<'s, 'v>>,
     t: &SystemTable,
+    line: VersionLine,
 ) -> io::Result<&'m mut HeapWriter<'s, 'v>> {
     writers
-        .get_mut(t.name().as_bytes())
+        .get_mut(table_name(*t, line)?.as_bytes())
         .ok_or_else(|| invalid(format!("no heap for rows of {t}")))
+}
+
+/// The name of `t` in the target line's catalog.
+fn table_name(t: SystemTable, line: VersionLine) -> io::Result<&'static str> {
+    name_in(line, t).map_err(decode_err("system table"))
 }
 
 /// The root-heap slot the layout gave the template class `name`; every new class has one after the first pass.

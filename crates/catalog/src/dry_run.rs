@@ -89,7 +89,7 @@ pub fn dry_run(
 ) -> io::Result<DryRun> {
     let (_, boot) = BootDbParm::read(vs)?;
     let classes = read_classes(vs, line)?;
-    let plans = classify(&classes, line);
+    let plans = classify(&classes, line, VersionLine::Develop);
     let tclasses = template_classes(template)?;
     let mut d = DryRun::default();
 
@@ -300,6 +300,7 @@ pub fn dry_run(
             &name,
             t.class.class_type == ClassType::Vclass,
             SourceVersion::V11_4,
+            VersionLine::Develop,
         );
         if matches!(role, Some(SystemClassRole::New | SystemClassRole::View)) {
             targets += 1;

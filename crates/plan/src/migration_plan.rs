@@ -14,6 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use fastmig_catalog::class_rewrite::{RewriteInputs, rewrite_user_class};
+use fastmig_catalog::class_rewrite_11_4::rewrite_user_class_11_4;
 use fastmig_catalog::class_rows::{Row, read_rows};
 use fastmig_catalog::classify::{ClassKind, classify};
 use fastmig_catalog::collation_check::check_collations;
@@ -324,7 +325,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         source: line,
         target: i.target_line,
     };
-    let regenerates = pair.regenerates_catalog();
+    let regenerates = pair.regenerates_catalog(version);
     refusals.extend(pair.refusal(version));
     // the tool orders VARCHAR keys with trailing spaces counted; a target comparing without them reads its indexes
     // out of order (G10 workspace#541: refused, not a warning)
@@ -468,7 +469,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             }
         }
     }
-    let class_plans = regenerates.then(|| classify(&classes, line));
+    let class_plans = regenerates.then(|| classify(&classes, line, i.target_line));
     let mut treatments = Vec::new();
     for (n, c) in classes.iter().enumerate() {
         let name = String::from_utf8_lossy(&c.class.name).into_owned();
@@ -596,15 +597,20 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             if p.kind != ClassKind::User {
                 continue;
             }
-            let rewritten = rewrite_user_class(
-                c,
-                p,
-                &RewriteInputs {
-                    from: line,
-                    rep_dir: Oid::NULL,
-                    new_btid: &|_| None,
-                },
-            );
+            let rewritten = match i.target_line {
+                VersionLine::Develop => rewrite_user_class(
+                    c,
+                    p,
+                    &RewriteInputs {
+                        from: line,
+                        rep_dir: Oid::NULL,
+                        new_btid: &|_| None,
+                    },
+                ),
+                VersionLine::V10_2 | VersionLine::V11_4 => {
+                    rewrite_user_class_11_4(c, p, line, Oid::NULL, &|_| None)
+                }
+            };
             match rewritten {
                 Ok(o) => {
                     for a in o
@@ -613,7 +619,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                         .chain(&o.shared_attributes)
                         .chain(&o.class_attributes)
                     {
-                        if let Err(e) = attr_default::default_value(a) {
+                        if let Err(e) = attr_default::default_value(a, i.target_line) {
                             refusals.push(format!(
                                 "{}.{}: default value: {} (workspace#498)",
                                 p.name,
@@ -631,7 +637,9 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         let mut mapped = classes.clone();
         let users = rows_of(i.vols, line, &classes, SystemTable::DbUser)?;
         let mut triggers = rows_of(i.vols, line, &classes, SystemTable::DbTrigger)?;
-        for (object, j) in map_stored_texts(version, &mut mapped, &users, &mut triggers) {
+        for (object, j) in
+            map_stored_texts(version, i.target_line, &mut mapped, &users, &mut triggers)
+        {
             for r in &j.renames {
                 system_name_rewrites
                     .push(format!("{object}: {} -> {} at byte {}", r.from, r.to, r.at));
@@ -671,7 +679,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             let Some(t) = stored_procedure_code::scode(&r.values) else {
                 continue;
             };
-            let j = judge(version, t, false);
+            let j = judge(version, i.target_line, t, false);
             let object = format!("stored procedure code {name}");
             refusals.extend(j.renames.iter().map(|r| {
                 format!(
@@ -713,8 +721,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             None
         }
     };
-    let lob = lob_scan::scan(i.vols, line, &classes, lob_base.as_deref(), regenerates)?;
-    // 11.4 → develop re-encodes LOB classes and rewrites these locators (workspace#507); the same-version path
+    // develop keeps LOB files per (heap, attribute) directory; an 11.4 target keeps them at their path below the base
+    let develop_dirs = regenerates && i.target_line == VersionLine::Develop;
+    let lob = lob_scan::scan(i.vols, line, &classes, lob_base.as_deref(), develop_dirs)?;
+    // a regenerating run re-encodes LOB classes and rewrites these locators (workspace#507, #552); the same-version path
     // copies pages as they are
     if lob.absolute_under_base > 0 && !regenerates {
         // shortcut: the same-version path has no record rewrite; 11.4 written by unloaddb/loaddb from 11.3 or

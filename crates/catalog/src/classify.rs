@@ -92,14 +92,18 @@ fn holds_lzo1x_strings(d: &Domain) -> bool {
         || d.set_domain.iter().any(holds_lzo1x_strings)
 }
 
-/// Classifies the source classes, written by `line`.
-pub fn classify(classes: &[SourceClass], line: VersionLine) -> Vec<ClassPlan> {
+/// Classifies the source classes, written by `line`, for a target of line `to`. An 11.4 target keeps CHAR, NUMERIC and
+/// NCHAR as they are (10.2..11.3 write them as 11.4 does, R8); it re-encodes only LOB classes and 10.2 strings
+/// (workspace#552).
+pub fn classify(classes: &[SourceClass], line: VersionLine, to: VersionLine) -> Vec<ClassPlan> {
+    let develop = to == VersionLine::Develop;
     let role_of = |oid: Oid| {
         classes.iter().find(|c| c.oid == oid).and_then(|c| {
             c.class.is_system_class().then(|| {
                 source_role(
                     &String::from_utf8_lossy(&c.class.name),
                     c.class.class_type == ClassType::Vclass,
+                    to,
                 )
             })
         })
@@ -111,7 +115,7 @@ pub fn classify(classes: &[SourceClass], line: VersionLine) -> Vec<ClassPlan> {
             let mut refusals = Vec::new();
             let mut warnings = Vec::new();
             let kind = if c.class.is_system_class() {
-                match source_role(&name, c.class.class_type == ClassType::Vclass) {
+                match source_role(&name, c.class.class_type == ClassType::Vclass, to) {
                     Some(r) => ClassKind::System(r),
                     None => {
                         refusals.push(format!("system class {name} is not in the 11.4 catalog this tool knows"));
@@ -124,9 +128,10 @@ pub fn classify(classes: &[SourceClass], line: VersionLine) -> Vec<ClassPlan> {
             let mut re_encoded = false;
             for (att, chain) in attribute_domains(c) {
                 match schema_domain(line, chain) {
-                    // a LOB locator moves to develop's per-attribute directory (workspace#507)
+                    // a LOB locator moves to develop's per-attribute directory (workspace#507) or, on 11.4, from an
+                    // absolute path under the base to a relative one (workspace#552)
                     Ok(d) => {
-                        re_encoded |= changes_in_develop(&d)
+                        re_encoded |= develop && changes_in_develop(&d)
                             || matches!(d.ty, DbType::Blob | DbType::Clob)
                             || line == VersionLine::V10_2 && holds_lzo1x_strings(&d)
                     }
@@ -134,7 +139,7 @@ pub fn classify(classes: &[SourceClass], line: VersionLine) -> Vec<ClassPlan> {
                 }
             }
             for (att, d) in all_domains(c) {
-                if d.type_id == DbType::Nchar as i32 && d.precision > MAX_CHAR_PRECISION {
+                if develop && d.type_id == DbType::Nchar as i32 && d.precision > MAX_CHAR_PRECISION {
                     refusals.push(format!(
                         "{name}: attribute id {att} is NCHAR({}), above CHAR's {MAX_CHAR_PRECISION}",
                         d.precision
@@ -154,7 +159,7 @@ pub fn classify(classes: &[SourceClass], line: VersionLine) -> Vec<ClassPlan> {
             let nchar = all_domains(c)
                 .iter()
                 .any(|(_, d)| d.type_id == DbType::Nchar as i32 || d.type_id == DbType::Varnchar as i32);
-            if nchar && kind == ClassKind::User {
+            if develop && nchar && kind == ClassKind::User {
                 warnings.push(format!(
                     "{name}: NCHAR/VARNCHAR attributes become CHAR/VARCHAR (develop has no national character types)"
                 ));

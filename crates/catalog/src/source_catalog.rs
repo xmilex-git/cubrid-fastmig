@@ -27,6 +27,8 @@ pub struct SourceCatalog {
     /// The release that wrote the source (which same-slot tables it has, workspace#529).
     pub version: SourceVersion,
     pub line: VersionLine,
+    /// The line regeneration writes (develop or 11.4, workspace#552).
+    pub target: VersionLine,
     pub classes: Vec<SourceClass>,
     /// One per class, same order.
     pub plans: Vec<ClassPlan>,
@@ -52,7 +54,7 @@ impl SourceCatalog {
             io::Error::other(format!("source {} has no codec line", version.name()))
         })?;
         let mut classes = read_classes(vs, line)?;
-        let plans = classify(&classes, line);
+        let plans = classify(&classes, line, target);
         let rows = |name: &str| -> io::Result<Vec<Row>> {
             let c = classes
                 .iter()
@@ -69,8 +71,8 @@ impl SourceCatalog {
             .iter()
             .map(|t| Ok((*t, rows(t.name())?)))
             .collect::<io::Result<_>>()?;
-        // old system class names in view and trigger texts become develop names (workspace#542); a text the mapping
-        // refuses stays as it is: the plan reports it and migrate does not start
+        // old system class names in view and trigger texts become develop names on a develop target (workspace#542); a
+        // text the mapping refuses stays as it is: the plan reports it and migrate does not start
         let mut triggers = same_slot
             .remove(&SystemTable::DbTrigger)
             .unwrap_or_default();
@@ -78,7 +80,7 @@ impl SourceCatalog {
             .get(&SystemTable::DbUser)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        map_stored_texts(version, &mut classes, users, &mut triggers);
+        map_stored_texts(version, target, &mut classes, users, &mut triggers);
         same_slot.insert(SystemTable::DbTrigger, triggers);
         // a source before user schema gets owner-qualified names and texts (workspace#544); the plan reports the
         // other-owner procedure calls and writes their GRANT statements (workspace#545)
@@ -88,6 +90,7 @@ impl SourceCatalog {
         Ok(SourceCatalog {
             version,
             line,
+            target,
             plans,
             same_slot,
             static_source,

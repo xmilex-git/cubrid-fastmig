@@ -1,6 +1,6 @@
-//! Derives a class's `_db_index` and `_db_index_key` rows from the constraints in its develop property sequence.
+//! Derives a class's `_db_index` and `_db_index_key` rows from the constraints in its property sequence (develop or 11.4).
 //!
-//! Input: the class's `_db_class` row (the rows' parent), the develop class object, the migrate start time.
+//! Input: the class's `_db_class` row (the rows' parent), the class object of the sink's line, the migrate start time.
 //! Output: the rows, pushed into the caller's sink; the value of the `_db_class.indexes` column.
 //! Source: engine develop @682b080b2 `catalog_class.c`: `catcls_get_property_set` (families in the order primary
 //! key, unique, reverse unique, index, reverse index, foreign key; constraints in stored order inside a family),
@@ -8,17 +8,16 @@
 //! optional element of other indexes: a list of prefix lengths, or named `*PLID*` prefix / `*FP*` filter / `*FI*`
 //! function entries), `catcls_convert_attr_id_to_name` (key attribute ids → names of the instance attributes),
 //! `catcls_set_or_value_timestamps`; R4 § 7 R5-R6. Filter and function indexes never reach here: they leave the
-//! target catalog (workspace#486), and the template's system classes have none.
+//! target catalog (workspace#486), and the template's system classes have none. An 11.4 target: release/11.4
+//! `catcls_get_or_value_from_indexes` (the columns develop added left out by the sink; a DEDUPLICATE index's hidden key
+//! as its last key row, workspace#552).
 
-use fastmig_ondisk::Oid;
-use fastmig_ondisk::VersionLine;
 use fastmig_ondisk::class_object::{ClassObject, ConstraintKind, class_properties};
 use fastmig_ondisk::value::{DecodeError, DecodeResult, SetElement, SetValue, Value};
+use fastmig_ondisk::{Oid, VersionLine};
 
 use crate::ct_rows::{Sink, int, obj, oid_seq, opt_text, text};
 use crate::system_table::SystemTable;
-
-const LINE: VersionLine = VersionLine::Develop;
 
 /// `(family, is_unique, is_reverse, is_primary_key, is_foreign_key)` in catcls order.
 const FAMILIES: [(ConstraintKind, i32, i32, i32, i32); 6] = [
@@ -83,7 +82,7 @@ pub(crate) fn index_rows(
     c: &ClassObject,
     now: &Value,
 ) -> DecodeResult<Value> {
-    let props = class_properties(&c.properties, LINE)?;
+    let props = class_properties(&c.properties, s.line)?;
     let attr_name = |id: i32| -> DecodeResult<Value> {
         c.attributes
             .iter()
@@ -132,6 +131,28 @@ pub(crate) fn index_rows(
                     ],
                 );
             }
+            // an 11.4 target lists a DEDUPLICATE index's hidden key last, named `_dedup_NN` (release/11.4
+            // `catcls_convert_attr_id_to_name`, `dk_get_deduplicate_key_attr_name`); develop has no such key
+            // shortcut: its prefix length is written -1, as for every key of an index without prefix lengths; check the
+            // engine row once an 11.3 source with a DEDUPLICATE prefix index exists
+            if let Some(d) = k.deduplicate_key.filter(|_| s.line != VersionLine::Develop) {
+                let ko = (s.alloc)(SystemTable::DbIndexKey);
+                s.emit(
+                    SystemTable::DbIndexKey,
+                    ko,
+                    vec![
+                        ("index_of", Value::Object(me)),
+                        (
+                            "key_attr_name",
+                            text(format!("_dedup_{:02}", d.level).as_bytes()),
+                        ),
+                        ("key_order", int(key_oids.len() as i32)),
+                        ("asc_desc", int(d.desc as i32)),
+                        ("key_prefix_length", int(-1)),
+                    ],
+                );
+                key_oids.push(ko);
+            }
             let fk = k.foreign_key.as_ref();
             s.emit(
                 SystemTable::DbIndex,
@@ -140,7 +161,7 @@ pub(crate) fn index_rows(
                     ("class_of", Value::Object(class_row)),
                     ("index_name", text(&k.name)),
                     ("is_unique", int(is_unique)),
-                    ("key_count", int(k.keys.len() as i32)),
+                    ("key_count", int(key_oids.len() as i32)),
                     ("key_attrs", oid_seq(&key_oids)),
                     ("is_reverse", int(is_reverse)),
                     ("is_primary_key", int(is_pk)),

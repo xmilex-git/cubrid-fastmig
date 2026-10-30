@@ -108,7 +108,7 @@ pub fn encoder_of(
     let c = &source.classes[i];
     let plan = &source.plans[i];
     plan.re_encoded
-        .then(|| ClassReEncoder::new(&c.class, source.line, true))
+        .then(|| ClassReEncoder::new(&c.class, source.line, source.target, true))
         .transpose()
         .map(|r| {
             r.map(|r| {

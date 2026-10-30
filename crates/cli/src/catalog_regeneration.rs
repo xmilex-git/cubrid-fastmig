@@ -1,11 +1,12 @@
-//! The 11.4 → develop part of `migrate` between the volume copy and the new log: old catalog files freed, user heaps
+//! The catalog-regenerating part of `migrate` (10.2..11.4 → develop, 10.2..11.3 → 11.4: the target line is
+//! `SpaceManager::line`) between the volume copy and the new log: old catalog files freed, user heaps
 //! patched or re-encoded, the catalog regenerated (system rows, class objects, catalog file, `ctid`).
 //!
 //! Input: the [`SpaceManager`] over the target volumes, the source's log header, the worker limit and the
 //! phase meters; the caller laps a phase after each of [`prepare`] (page treatment, catalog placement and system rows),
 //! [`build_indexes`] (B-tree files, workspace#503) and [`finish`] (class objects, catalog file, BT_STATS); the
 //! same-version path has the same three steps. Output: the target volumes in
-//! develop's catalog format; a [`CatalogOutcome`] for report.json.
+//! the target line's catalog format; a [`CatalogOutcome`] for report.json.
 //! Source: workspace#482 decision 10 (order: free, page treatment, index build, class objects and catalog);
 //! workspace#504 (catalog writer: `plan_catalog` before the BTIDs exist, `write_catalog` after, `write_bt_stats` once
 //! the B-trees are filled).
@@ -120,8 +121,9 @@ pub fn prepare(
     let vols = space.volumes();
     let (_, boot) = BootDbParm::read(vols)?;
     // everything the regeneration reads from the source catalog, before the first write
-    let source = SourceCatalog::read(vols, src_version, VersionLine::Develop)?;
-    let template = builtin(VersionLine::Develop, source.charset).ok_or_else(|| {
+    let target = space.line();
+    let source = SourceCatalog::read(vols, src_version, target)?;
+    let template = builtin(target, source.charset).ok_or_else(|| {
         io::Error::other(format!(
             "no catalog template for charset {}",
             source.charset

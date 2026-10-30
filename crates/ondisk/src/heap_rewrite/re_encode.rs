@@ -1,11 +1,12 @@
 //! Re-encodes one record of a re-encoded class: decoded under the 10.2/11.4 representation it was written with, written
-//! in develop's encoding under the class's current representation, with a header free of vacuum residue.
+//! in the target line's encoding under the class's current representation, with a header free of vacuum residue.
 //!
-//! Input: the 10.2/11.4 class object (current attributes and older representations) and whether the class is MVCC; then
-//! one record at a time. Output: the develop record bytes.
+//! Input: the 10.2/11.4 class object (current attributes and older representations), the target line and whether the
+//! class is MVCC; then one record at a time. Output: the target record bytes.
 //! Source: workspace#482 decision 4 (every record goes to the current repid, repid number kept), R2 § 3 R7.2-R7.3
-//! (header after cleanup: 8 B, MVCC flags 0, CHN kept); `RecordLayout::to_develop` (the attribute order the class
-//! object writer uses); engine `object_representation_sr.c` `or_get_current_representation` (:2540-2552): an
+//! (header after cleanup: 8 B, MVCC flags 0, CHN kept); `RecordLayout::to_develop` (the attribute order the develop
+//! class object writer uses; an 11.4 target keeps the source order and domains, workspace#552); engine
+//! `object_representation_sr.c` `or_get_current_representation` (:2540-2552): an
 //! attribute missing from an older representation reads as its original default value (`ORC_ATT_ORIGINAL_VALUE`),
 //! NULL when it has none; `mvcc.c` `mvcc_is_mvcc_disabled_class` (root class, `db_serial`, `_db_collation`,
 //! `db_ha_apply_info` in 11.4).
@@ -50,22 +51,43 @@ struct SourceRepr {
 pub struct ClassReEncoder {
     /// The source line records are decoded with.
     line: VersionLine,
+    /// The target line records are written in.
+    to: VersionLine,
+    /// A decoded value in the target form, chosen once per class (BR-04).
+    value_map: fn(Value) -> Value,
     /// The current representation first; a class has a handful.
     source: Vec<SourceRepr>,
     target: RecordLayout,
-    /// Original default value of each target attribute, in target order (`Value::Null` when it has none), develop
+    /// Original default value of each target attribute, in target order (`Value::Null` when it has none), target
     /// form.
     defaults: Vec<Value>,
     mvcc: bool,
-    /// The class heap and the source lob-base-path, when LOB locators move to develop's per-attribute directories.
+    /// The class heap and the source lob-base-path, when LOB locators are rewritten (see [`Self::with_lob_dirs`]).
     lob_dirs: Option<(Hfid, Option<PathBuf>)>,
 }
 
+/// The decoded value in the target line's form: develop renames NCHAR/VARNCHAR; an 11.4 target keeps it.
+fn value_map(to: VersionLine) -> fn(Value) -> Value {
+    match to {
+        VersionLine::Develop => value_to_develop,
+        VersionLine::V10_2 | VersionLine::V11_4 => std::convert::identity,
+    }
+}
+
 impl ClassReEncoder {
-    /// Prepares the layouts of every representation of `class`, a class object of source line `line` (10.2 or 11.4).
-    pub fn new(class: &ClassObject, line: VersionLine, mvcc: bool) -> DecodeResult<ClassReEncoder> {
+    /// Prepares the layouts of every representation of `class`, a class object of source line `line` (10.2 or 11.4),
+    /// for records written in target line `to`.
+    pub fn new(
+        class: &ClassObject,
+        line: VersionLine,
+        to: VersionLine,
+        mvcc: bool,
+    ) -> DecodeResult<ClassReEncoder> {
         let current = RecordLayout::for_repid(line, class, class.repid as u32)?;
-        let target = current.to_develop();
+        let target = match to {
+            VersionLine::Develop => current.to_develop(),
+            VersionLine::V10_2 | VersionLine::V11_4 => current.clone(),
+        };
         let repr = |layout: RecordLayout| SourceRepr {
             positions: target
                 .attrs
@@ -86,7 +108,7 @@ impl ClassReEncoder {
                 Value::Null
             } else {
                 let mut r = OrReader::new(&a.original_value);
-                value_to_develop(decode_tagged(line, &mut r, Some(a.original_value.len()))?.1)
+                value_map(to)(decode_tagged(line, &mut r, Some(a.original_value.len()))?.1)
             };
             defaults.insert(a.id, v);
         }
@@ -97,6 +119,8 @@ impl ClassReEncoder {
             .collect();
         Ok(ClassReEncoder {
             line,
+            to,
+            value_map: value_map(to),
             source,
             target,
             defaults,
@@ -105,9 +129,10 @@ impl ClassReEncoder {
         })
     }
 
-    /// Rewrites each LOB locator to its file's place in develop's directory of (`heap`, attribute): a relative
-    /// locator or an absolute one under `lob_base`; an absolute locator outside it stays (G6 workspace#488).
-    /// The copy step puts the files there (workspace#507, CBRD-23700).
+    /// Rewrites each LOB locator to its file's place: on develop in its directory of (`heap`, attribute), a relative
+    /// locator or an absolute one under `lob_base` (workspace#507, CBRD-23700); on an 11.4 target an absolute one
+    /// under `lob_base` becomes relative, at the same path below the base (workspace#552). An absolute locator
+    /// outside the base stays (G6 workspace#488). The copy step puts the files there.
     pub fn with_lob_dirs(mut self, heap: Hfid, lob_base: Option<PathBuf>) -> Self {
         self.lob_dirs = Some((heap, lob_base));
         self
@@ -116,7 +141,10 @@ impl ClassReEncoder {
     fn relocate_lob(&self, attrid: i32, v: Value) -> Value {
         match (v, &self.lob_dirs) {
             (Value::Elo(mut e), Some((heap, base))) => {
-                let dir = develop_lob_dir(*heap, attrid);
+                let dir = match self.to {
+                    VersionLine::Develop => develop_lob_dir(*heap, attrid),
+                    VersionLine::V10_2 | VersionLine::V11_4 => String::new(),
+                };
                 if let Some(rel) = develop_lob_rel_path(&e.lob_path(), base.as_deref(), &dir) {
                     e.locator = format!("file:{}", rel.display()).into_bytes();
                 }
@@ -126,7 +154,7 @@ impl ClassReEncoder {
         }
     }
 
-    /// The develop layout records are written under.
+    /// The target layout records are written under.
     pub fn target(&self) -> &RecordLayout {
         &self.target
     }
@@ -157,7 +185,7 @@ impl ReEncode for ClassReEncoder {
                 |((a, p), default)| match p.and_then(|j| d.values.get_mut(j)) {
                     // moved, not copied: the decoded record is dropped after this
                     Some(v) => {
-                        self.relocate_lob(a.id, value_to_develop(std::mem::replace(v, Value::Null)))
+                        self.relocate_lob(a.id, (self.value_map)(std::mem::replace(v, Value::Null)))
                     }
                     None => default.clone(),
                 },
@@ -173,13 +201,7 @@ impl ReEncode for ClassReEncoder {
             delid: None,
             prev_version_lsa: None,
         };
-        encode_record(
-            VersionLine::Develop,
-            &self.target,
-            &header,
-            &values,
-            self.mvcc,
-        )
+        encode_record(self.to, &self.target, &header, &values, self.mvcc)
     }
 
     fn mvcc(&self) -> bool {

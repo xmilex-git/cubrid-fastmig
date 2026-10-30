@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use fastmig_ondisk::class_object::ClassType;
 use fastmig_ondisk::value::Value;
-use fastmig_ondisk::{Oid, SourceVersion};
+use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 
 use crate::class_rows::Row;
 use crate::source_classes::SourceClass;
@@ -42,12 +42,13 @@ pub fn dba_group(users: &[Row]) -> HashSet<Oid> {
 /// Judges `text`, replaces it with the rewrite when there is one and nothing refuses, and records the judgement.
 fn map_one(
     version: SourceVersion,
+    to: VersionLine,
     object: String,
     text: &mut Vec<u8>,
     owner_in_dba_group: bool,
     out: &mut Vec<(String, TextJudgement)>,
 ) {
-    let j = judge(version, text, owner_in_dba_group);
+    let j = judge(version, to, text, owner_in_dba_group);
     if j.renames.is_empty() && j.refusals.is_empty() && j.warnings.is_empty() {
         return;
     }
@@ -60,6 +61,7 @@ fn map_one(
 /// Maps every stored user text (see the module header).
 pub fn map_stored_texts(
     version: SourceVersion,
+    to: VersionLine,
     classes: &mut [SourceClass],
     users: &[Row],
     triggers: &mut [Row],
@@ -73,7 +75,7 @@ pub fn map_stored_texts(
         let object = format!("view {}", String::from_utf8_lossy(&c.class.name));
         let in_dba = dba.contains(&c.class.owner);
         for q in &mut c.class.query_specs {
-            map_one(version, object.clone(), q, in_dba, &mut out);
+            map_one(version, to, object.clone(), q, in_dba, &mut out);
         }
     }
     for r in triggers {
@@ -84,6 +86,7 @@ pub fn map_stored_texts(
             if let Some(Value::Varchar(t) | Value::Char(t)) = r.values.get_mut(col) {
                 map_one(
                     version,
+                    to,
                     format!("trigger {name} {col}"),
                     t,
                     in_dba,

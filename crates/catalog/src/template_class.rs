@@ -1,8 +1,8 @@
 //! Instantiates a system class object of the catalog template for one target database: the template database's
 //! OIDs replaced by the target's.
 //!
-//! Input: a template class object (develop), the template → target class OID map, and the target's heap,
-//! representation directory, owner and rebuilt BTIDs. Output: the develop class object for the target slot.
+//! Input: a template class object (develop or 11.4) and its line, the template → target class OID map, and the target's heap,
+//! representation directory, owner and rebuilt BTIDs. Output: the class object for the target slot, in that line.
 //! Source: ADR 0011 (only class OIDs and owner OIDs are remapped), workspace#482 decisions 1-2, R3 § 5 rule F
 //! (rep_dir, BTIDs and owner are per database; attribute `class_oid` and domain class OIDs name classes).
 
@@ -14,6 +14,8 @@ use fastmig_ondisk::{Btid, Hfid, Oid, VersionLine};
 
 /// What a template class becomes in the target.
 pub struct Instance<'a> {
+    /// The template's line (`CatalogTemplate::line`).
+    pub line: VersionLine,
     /// Template class OID → target class OID; the template's own class OIDs only.
     pub class_oid: &'a dyn Fn(Oid) -> Oid,
     pub heap: Hfid,
@@ -47,16 +49,20 @@ fn map_btids(v: &mut Value, new_btid: &dyn Fn(Btid) -> Option<Btid>) {
     }
 }
 
-fn map_properties(packed: &[u8], new_btid: &dyn Fn(Btid) -> Option<Btid>) -> DecodeResult<Vec<u8>> {
+fn map_properties(
+    line: VersionLine,
+    packed: &[u8],
+    new_btid: &dyn Fn(Btid) -> Option<Btid>,
+) -> DecodeResult<Vec<u8>> {
     if packed.is_empty() {
         return Ok(Vec::new());
     }
-    let set: SetValue = decode_set(VersionLine::Develop, &mut OrReader::new(packed), None)?;
+    let set: SetValue = decode_set(line, &mut OrReader::new(packed), None)?;
     let mut v = Value::Set(set);
     map_btids(&mut v, new_btid);
     let Value::Set(set) = v else { unreachable!() };
     let mut w = OrWriter::new();
-    encode_set(VersionLine::Develop, &mut w, None, &set);
+    encode_set(line, &mut w, None, &set);
     Ok(w.buf)
 }
 
@@ -85,6 +91,6 @@ pub fn instantiate(t: &ClassObject, i: &Instance) -> DecodeResult<ClassObject> {
     for f in &mut o.method_files {
         f.class_oid = (i.class_oid)(f.class_oid);
     }
-    o.properties = map_properties(&t.properties, i.new_btid)?;
+    o.properties = map_properties(i.line, &t.properties, i.new_btid)?;
     Ok(o)
 }

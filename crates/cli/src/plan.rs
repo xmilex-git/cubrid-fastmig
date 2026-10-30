@@ -28,8 +28,8 @@ use crate::{plan_report, resource_estimate, target_space, verify, volume_dirs};
 const HELP: &str = "\
 cubrid-fastmig plan <db> --dest <dir> [options]
   --dest <dir>                   target directory migrate would write
-  --target-version 11.4|develop  target release line (default: develop; 11.4 is refused: no 11.4 layout
-                                 B-tree builder)
+  --target-version 11.4|develop  target release line (default: develop; 11.4 takes a 10.2, 11.2, 11.3 or 11.4
+                                 source)
   --target-name <name>           target DB name (default: <db>)
   --source-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --target-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
