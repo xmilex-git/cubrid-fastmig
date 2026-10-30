@@ -145,6 +145,7 @@ dependencies = [
  "fastmig-catalog",
  "fastmig-index",
  "fastmig-ondisk",
+ "fastmig-progress",
 ]
 
 [[package]]

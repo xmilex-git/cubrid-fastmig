@@ -39,10 +39,7 @@ impl PhaseSpec {
         PhaseSpec {
             name,
             unit: Unit::Step,
-            rate: DefaultRate {
-                per_worker: 0.0,
-                max_workers: 1,
-            },
+            rate: DefaultRate { points: &[] },
         }
     }
 
@@ -82,9 +79,15 @@ pub struct Progress {
 }
 
 impl Progress {
-    /// Starts the run: the clock and the first phase.
-    pub fn new(title: &str, specs: &[PhaseSpec], worker_limit: usize) -> Arc<Progress> {
-        let now = Instant::now();
+    /// Starts the run at `started` (the clock and the first phase): a command that worked before its display began
+    /// (the plan, its precheck) passes when that work began, so the estimate and the total time include it.
+    pub fn new(
+        title: &str,
+        specs: &[PhaseSpec],
+        worker_limit: usize,
+        started: Instant,
+    ) -> Arc<Progress> {
+        let now = started;
         let phases: Vec<Phase> = specs
             .iter()
             .map(|&spec| Phase {

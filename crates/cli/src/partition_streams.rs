@@ -36,8 +36,7 @@ const PHASES: &[PhaseSpec] = &[
         "transcode",
         Unit::Count("classes"),
         default_rates::DefaultRate {
-            per_worker: 1.0 / default_rates::STEP.as_secs_f64(),
-            max_workers: 1,
+            points: &[(1, 1.0 / default_rates::STEP.as_secs_f64())],
         },
     ),
 ];
@@ -89,7 +88,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             .ok_or_else(|| CliError::Usage("partition-streams needs --out".into()))?,
     );
     std::fs::create_dir_all(out)?;
-    let progress = Progress::new("partition-streams", PHASES, 1);
+    let progress = Progress::new("partition-streams", PHASES, 1, std::time::Instant::now());
     let monitor = progress_args::start(&p, progress.clone(), None, None)?;
     // 11.2 and 11.3 use the 11.4 codecs in the older header layout (R8)
     let (from, layout) = match p.value("--from").unwrap_or("11.4") {

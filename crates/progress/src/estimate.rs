@@ -85,7 +85,9 @@ impl Estimator {
         } else if ph.spec.unit == Unit::Step {
             (STEP.as_secs_f64() - el).max(0.0)
         } else {
-            default_secs(p, ph, remaining(ph)) * factor
+            // the whole phase's scaled default minus its time so far: counts down while the phase adds nothing yet
+            // (the verifier's heap pass) instead of standing still (workspace#560)
+            (scaled_default(p, ph, factor) - el).max(0.0)
         };
         let pending: f64 = p.phases[cur + 1..]
             .iter()

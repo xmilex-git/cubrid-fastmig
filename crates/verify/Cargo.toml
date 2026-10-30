@@ -9,3 +9,4 @@ repository.workspace = true
 fastmig-catalog = { path = "../catalog" }
 fastmig-index = { path = "../index" }
 fastmig-ondisk = { path = "../ondisk" }
+fastmig-progress = { path = "../progress" }

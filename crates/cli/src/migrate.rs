@@ -47,7 +47,7 @@ use fastmig_ondisk::{Oid, SourceVersion, Vsid};
 use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
-use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
+use fastmig_progress::{Meter, PhaseSpec, Progress, Unit, default_rates};
 use fastmig_verify::Role;
 
 use crate::args::{CliError, parse};
@@ -101,7 +101,11 @@ const FLAGS: &[&str] = &[
 /// The run's phases, one per `Report::lap` in `migrate`, in order (GLOSSARY "phase").
 const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("precheck"),
-    PhaseSpec::step("open-sources"),
+    PhaseSpec::work(
+        "open-sources",
+        Unit::Bytes,
+        default_rates::CLONED_RANGE_BYTES,
+    ),
     PhaseSpec::work("volume-copy", Unit::Bytes, default_rates::COPY_BYTES),
     PhaseSpec::step("volume-paths"),
     PhaseSpec::work(
@@ -118,15 +122,23 @@ const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("out-of-volume-assets"),
     PhaseSpec::step("new-log"),
     PhaseSpec::work("durable-sync", Unit::Bytes, default_rates::FSYNC_BYTES),
-    PhaseSpec::step("verifier"),
+    PhaseSpec::work(
+        "verifier",
+        Unit::Count("pairs"),
+        default_rates::VERIFY_PAIRS,
+    ),
     PhaseSpec::step("register"),
 ];
+/// Meter of taking the rewritten ranges of the clones (workspace#556, #560): bytes written, 0 on a byte copy.
+const OPEN_SOURCES: usize = 1;
 const VOLUME_COPY: usize = 2;
 /// Meter of the heap patch and re-encoding (workspace#503, #504): heap pages walked, total from the plan (#508).
 const PAGE_TREATMENT: usize = 4;
 /// Meter of the index build (workspace#503): keys done.
 const INDEX_BUILD: usize = 5;
 const DURABLE_SYNC: usize = 9;
+/// Meter of the verifier (workspace#560): index pairs merged, target and source.
+const VERIFIER: usize = 10;
 
 const SWITCHES: &[&str] = &["--help", "--verify"];
 
@@ -229,6 +241,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         }
     }
     let target = target_space::bound(&plan, &est, &src.vols, new_log::file_bytes(&src.log))?;
+    let asked = Instant::now();
     let temp_limit = temp_disk_choice::choose(
         temp_disk,
         &est,
@@ -239,7 +252,8 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         &o.limits.spill_dir,
         &o.plan.target_dir,
     )?;
-    let progress = Progress::new("migrate", PHASES, o.worker_limit);
+    // the run's clock starts with the precheck, less the time a terminal question waited for its answer (workspace#560)
+    let progress = Progress::new("migrate", PHASES, o.worker_limit, started + asked.elapsed());
     let monitor = progress_args::start(
         &p,
         progress.clone(),
@@ -322,6 +336,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let temp_limit = b.temp_limit;
     let target = b.target;
     let b_appended = b.est.appended_pages;
+    let b_pairs: u64 = b.est.indexes.iter().map(|i| i.stats.pairs).sum();
     for w in &plan.warnings {
         rep.progress.warn(format!("warning: {w}"));
     }
@@ -329,6 +344,29 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let src_lob_base = lob_base_dir(&src.entry).map_err(io::Error::other)?;
     let npages = BootDbParm::read(&src.vols)?.1.vacuum_log_block_npages;
     let first_pageid = new_log_start::first_log_pageid(src.log.append_lsa.pageid, npages as i64);
+    // every phase total before the precheck ends: the start estimate is made when the next phase begins
+    let bytes: u64 = plan.volumes.iter().map(|v| v.bytes).sum();
+    // a cloned volume costs its clone in open-sources, not a copy (workspace#560)
+    let copy_bytes = (plan.volumes.iter())
+        .filter(|v| v.copy_method == CopyMethod::Copy)
+        .map(|v| v.bytes)
+        .sum();
+    rep.progress.set_total(VOLUME_COPY, copy_bytes);
+    rep.progress.set_total(PAGE_TREATMENT, plan.treated_pages);
+    // the sync goes over every file the run created, cloned volumes too (workspace#560)
+    rep.progress
+        .set_total(DURABLE_SYNC, bytes + new_log::file_bytes(&src.log));
+    rep.progress.set_total(INDEX_BUILD, b_pairs);
+    if o.verify {
+        // the verifier merges the target's pairs and the source's, about as many
+        rep.progress.set_total(VERIFIER, 2 * b_pairs);
+    }
+    if plan.unshare {
+        let io = src.vols.io_pagesize() as u64;
+        // the rewritten ranges: zeroing a range is one fallocate, not counted
+        let pages: u64 = (target.unshare_ranges.iter()).map(|r| r.pages as u64).sum();
+        rep.progress.set_total(OPEN_SOURCES, pages * io);
+    }
     rep.lap("precheck");
 
     let mut jobs = Vec::new();
@@ -348,11 +386,6 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             precloned: false,
         });
     }
-    let bytes = plan.volumes.iter().map(|v| v.bytes).sum();
-    rep.progress.set_total(VOLUME_COPY, bytes);
-    rep.progress.set_total(PAGE_TREATMENT, plan.treated_pages);
-    // until the copy shows what was cloned, assume every byte is written and synced
-    rep.progress.set_total(DURABLE_SYNC, bytes);
     let marker = IncompleteMarker::prepare(&po.target_dir)?;
     marker.create_dir_all(&o.log_dir)?;
     let fastmig_dir = po.target_dir.join("fastmig");
@@ -373,6 +406,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             &target,
             src.vols.io_pagesize() as u64,
             o.worker_limit,
+            rep.progress.meter(OPEN_SOURCES),
         )?;
     }
     rep.steps
@@ -417,12 +451,6 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &marker,
         rep.progress.meter(VOLUME_COPY),
     )?;
-    let copied = outcomes
-        .iter()
-        .filter(|v| v.method == CopyMethod::Copy)
-        .map(|v| v.bytes)
-        .sum();
-    rep.progress.set_total(DURABLE_SYNC, copied);
     rep.lap("volumes");
     let mut targets: Vec<PathBuf> = jobs.iter().map(|j| j.target.clone()).collect();
     if src.version.header_layout() == HeaderLayout::Before11_4 {
@@ -632,6 +660,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
                 ..limits.clone()
             },
             &verify_report,
+            Some(rep.progress.meter(VERIFIER)),
         )?;
         (code == 0, summary)
     } else {
@@ -815,6 +844,7 @@ fn take_cloned_ranges(
     target: &TargetSpace,
     io: u64,
     worker_limit: usize,
+    meter: Meter,
 ) -> io::Result<()> {
     let files = jobs
         .iter()
@@ -851,7 +881,9 @@ fn take_cloned_ranges(
                 start,
                 end,
             };
-            copy_range(&range, &mut buf, &AsIs)
+            let done = copy_range(&range, &mut buf, &AsIs);
+            meter.add(end - start);
+            done
         };
         done.map_err(|e| {
             io::Error::new(

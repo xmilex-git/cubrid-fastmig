@@ -29,6 +29,7 @@ use fastmig_ondisk::class_object::{Constraint, class_properties};
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::value::KeyDomain;
 use fastmig_ondisk::{Btid, Oid, Vpid};
+use fastmig_progress::Meter;
 
 use crate::btree_walk::{IndexTree, LeafCounts, LeafPairs, ShardEnd, join_shards, leaf_counts};
 use crate::catalog_refs::{CatalogInput, check_catalog};
@@ -50,6 +51,8 @@ pub struct Limits<'a> {
     pub spill: &'a SpillDir,
     /// Bytes spill files may hold at once (`--temp-disk`); None: every index in one heap pass (workspace#553).
     pub temp_disk: Option<u64>,
+    /// Index pairs merged, added per shard and per deferred index: the run's verifier phase (workspace#560).
+    pub pairs: Option<Meter<'a>>,
 }
 
 #[derive(Default)]
@@ -464,6 +467,9 @@ pub fn verify_database(
             let mut lp = LeafPairs::new(&t);
             let mut d = check_oids(&mut lp, &live, &|c| owners.contains(&c));
             r.index_pairs += lp.counts.live_objects as u64;
+            if let Some(m) = lim.pairs {
+                m.add(lp.counts.live_objects as u64);
+            }
             d.extend(lp.finish(None));
             r.defects.extend(d);
         }
@@ -570,6 +576,9 @@ fn check_batch(
             let mut lp = LeafPairs::shard(tree, leaves);
             let mut d = merge_pairs(runs, slice, &mut lp)?;
             let (ld, counts, end) = lp.into_shard();
+            if let Some(m) = lim.pairs {
+                m.add(counts.live_objects as u64);
+            }
             d.extend(ld);
             Ok::<_, std::io::Error>((d, Some((index, shard, counts, end))))
         }

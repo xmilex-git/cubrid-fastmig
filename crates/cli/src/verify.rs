@@ -18,6 +18,7 @@ use fastmig_ondisk::Oid;
 use fastmig_ondisk::databases_txt;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::volume_set::Locate;
+use fastmig_progress::Meter;
 use fastmig_verify::btree_walk::LeafCounts;
 use fastmig_verify::report::{defect_line, exit_code, summary_line};
 use fastmig_verify::{Database, Role, classify, verify_database};
@@ -221,6 +222,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         worker_limit,
         &lim,
         &report,
+        None,
     )?;
     println!("{summary}");
     Ok(code)
@@ -236,6 +238,7 @@ pub fn run_verifier(
     worker_limit: usize,
     lim: &Limits,
     report: &Path,
+    pairs: Option<Meter>,
 ) -> io::Result<(u8, String)> {
     let wb = WorkerLimit::new(worker_limit);
     let mb = MemoryLimit::new(usize::try_from(lim.memory_limit_bytes).unwrap_or(usize::MAX));
@@ -248,6 +251,7 @@ pub fn run_verifier(
         memory: &mb,
         spill: &spill,
         temp_disk: lim.temp_disk,
+        pairs,
     };
     let mut tdb = open(target, role)?;
     if let Some(s) = source {
