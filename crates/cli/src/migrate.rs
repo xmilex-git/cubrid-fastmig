@@ -30,7 +30,6 @@ use fastmig_copy::{
     lob_manifest, new_log, new_log_start, open_source, register_db, volinfo,
     volume_header_transform, volume_paths,
 };
-use fastmig_ondisk::Oid;
 use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::databases_txt::DatabaseEntry;
 use fastmig_ondisk::file_alloc::SpaceManager;
@@ -39,6 +38,7 @@ use fastmig_ondisk::sector_reserve::{VolumeGrowth, sectors_of_bytes};
 use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::volume_addition::VolumePlace;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
+use fastmig_ondisk::{Oid, SourceVersion};
 use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
@@ -347,6 +347,11 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         b.target.extra_bytes,
     )?;
     marker.create_dir_all(&limits.spill_dir)?;
+    let target_keys = po.target_dir.join(format!("{}_keys", po.target_name));
+    if src.version == SourceVersion::V10_2 {
+        // written by the catalog regeneration (TDE metadata, workspace#515)
+        marker.record(&target_keys)?;
+    }
     let arena = limits.spill_dir.join("arena");
     marker.record_scratch(&arena)?;
     limits.arena = Some(Arc::new(SpillArena::create(&arena, temp_limit).map_err(
@@ -420,6 +425,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             let prepared = catalog_regeneration::prepare(
                 &space,
                 src.version,
+                &target_keys,
                 &src.log,
                 src_lob_base.as_deref(),
                 o.worker_limit,
@@ -492,7 +498,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     )?;
     let keys = out_of_volume_asset::copy_one(
         &src.entry.vol_path.join(format!("{}_keys", po.db)),
-        &po.target_dir.join(format!("{}_keys", po.target_name)),
+        &target_keys,
         &marker,
     )?;
     let lob = match &src_lob_base {

@@ -6,5 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+aes = "=0.8.4"
+ctr = "=0.9.2"
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+sha2 = "=0.10.9"
 zerocopy = { version = "0.8", features = ["derive"] }

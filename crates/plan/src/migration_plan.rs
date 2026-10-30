@@ -242,8 +242,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     };
     let regenerates = pair.regenerates_catalog();
     refusals.extend(pair.refusal());
-    // 10.2 values read (workspace#520), names and texts owner-qualified (workspace#544); still open: workspace#515,
-    // #540, #548, #549
+    // 10.2 values read (workspace#520), names and texts owner-qualified (workspace#544), TDE metadata written
+    // (workspace#515); still open: workspace#540, #548, #549
     if pair.source == VersionLine::V10_2 {
         return Err(io::Error::other(Refused(refusals)));
     }

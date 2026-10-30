@@ -169,8 +169,24 @@ impl BootDbParm {
         })
     }
 
+    /// Sets `tde_keyinfo_hfid`; a 10.2 record (124 B) grows to the 136 B layout in its slot first, as 11.0 added the
+    /// field at the end (workspace#515).
+    pub fn write_tde_keyinfo_hfid(vols: &VolumeSet, hfid: Hfid) -> io::Result<()> {
+        Self::update_resized(vols, |rec| {
+            rec.resize(BOOT_DB_PARM_SIZE, 0);
+            let (h, _) = FileAndPageLe::mut_from_prefix(&mut rec[BOOT_DB_PARM_SIZE_10_2..])
+                .expect("the record is 136 B");
+            h.set(hfid);
+        })
+    }
+
     /// Rewrites the record in place (same length, same slot) through `f`.
     fn update(vols: &VolumeSet, f: impl FnOnce(&mut [u8])) -> io::Result<()> {
+        Self::update_resized(vols, |rec| f(rec))
+    }
+
+    /// Rewrites the record in its slot through `f`, which may change its length (the slotted page moves it).
+    fn update_resized(vols: &VolumeSet, f: impl FnOnce(&mut Vec<u8>)) -> io::Result<()> {
         let (oid, _) = Self::read(vols)?;
         let mut page = vols.read_page(oid.vpid())?;
         let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());

@@ -159,6 +159,10 @@ _Avoid_: 통합 테스트, e2e 테스트
 DB에 속하지만 볼륨 파일 바깥에 있는 파일. LOB 외부 파일(lob-base-path 아래)과 Java SP 클래스·jar(`java`, `java_static` 디렉터리)가 여기에 든다. PL/CSQL 컴파일 결과는 카탈로그 안에 있으므로 여기에 들지 않는다.
 _Avoid_: 외부 파일(LOB 파일만 가리키는 것으로 읽힌다), 부속 파일
 
+**빈 TDE 메타데이터 (empty TDE metadata)**:
+11.0부터 엔진이 createdb 때 모든 DB에 만드는 TDE 키 자산 세 가지: `<db>_keys` 파일(마스터 키 1개, 0600), keyinfo heap(클래스 없는 heap, 레코드 1개 156 B: 데이터 키 3개를 마스터 키로 암호화한 것), 그것을 가리키는 `BOOT_DB_PARM.tde_keyinfo_hfid`. 암호화된 페이지는 없다. 10.2 출발에는 없으므로 도구가 새 키로 만든다(`ondisk::tde_metadata`). 이것이 없으면 develop은 부팅은 하지만 TDE 모듈을 올리지 못하고, 그 때문에 CS 서버의 vacuum이 전혀 돌지 않는다. keyinfo heap은 volume 0에 있어야 한다. 엔진이 다른 볼륨을 붙이기 전에 읽기 때문이다([workspace#515](https://github.com/xmilex-git/workspace/issues/515)). TDE 지원이 아니다: 암호화 출발은 plan이 거부하고, 도착에서 `ENCRYPT=` 테이블을 만들 수 있게 되는 것은 develop 엔진 자체의 기능이다.
+_Avoid_: TDE 지원, 암호화 키 이관
+
 **참조 LOB 파일 (referenced LOB file)**:
 출발 DB의 레코드에 있는 LOB 로케이터가 가리키는 lob-base-path 아래의 파일. 도구가 옮기고, 나중에 지우는 단위다. 11.4 → develop에서는 도착의 속성별 LOB 디렉터리(`<힙 헤더 pageid><volid><fileid><attrid>`)로 옮긴다.
 

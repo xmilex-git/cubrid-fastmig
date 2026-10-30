@@ -31,6 +31,7 @@ use fastmig_ondisk::catalog_dir::{BtStats, PKEYS_NUM};
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::heap_rewrite::{HeapReport, VacuumHorizon};
 use fastmig_ondisk::log_header::LogHeader;
+use fastmig_ondisk::tde_metadata;
 use fastmig_ondisk::{Btid, Oid, SourceVersion, VersionLine};
 use fastmig_progress::Meter;
 use std::collections::{BTreeMap, HashMap};
@@ -97,9 +98,11 @@ impl Prepared {
 }
 
 /// Frees the old catalog files, treats the user heaps (page-treatment phase), places the catalog and writes its rows.
+/// `tde_keys`: where a source without TDE metadata (10.2) gets its new `_keys` file.
 pub fn prepare(
     space: &SpaceManager,
     src_version: SourceVersion,
+    tde_keys: &Path,
     src_log: &LogHeader,
     src_lob_base: Option<&Path>,
     worker_limit: usize,
@@ -118,6 +121,15 @@ pub fn prepare(
     let horizon = VacuumHorizon::read(vols, src_log, boot.vacuum_data_vfid)?;
     // every old file goes before the first new allocation (workspace#482 10.2), B-trees included (workspace#503)
     let freed_files = free_old_files(space, &source)?.len() + free_btree_files(space)?;
+    // 10.2 has no TDE metadata; develop needs it to load its TDE module and run vacuum. Its heap must lie in volume 0,
+    // which the B-trees just freed leave room in (workspace#515)
+    if src_version == SourceVersion::V10_2 {
+        // time(NULL), as the engine stamps a new master key
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        tde_metadata::create(space, tde_keys, now)?;
+    }
     let reports = treat_user_heaps(space, &source, &horizon, src_lob_base, worker_limit, meter)?;
     let stats: HashMap<_, _> = reports.iter().map(|r| (r.hfid, r.stats)).collect();
     let layout = plan_catalog(space, &source, &template, &horizon, &now_datetime(), stats)?;
