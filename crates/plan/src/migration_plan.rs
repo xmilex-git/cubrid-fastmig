@@ -559,7 +559,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         .filter_map(|(c, k)| report_name(c, k))
         .collect();
     let items: Vec<_> = deferred.iter().map(|(c, k)| (*c, k)).collect();
-    let deferred_indexes_sql = deferred_indexes_sql(&items, line).map_err(invalid)?;
+    let mut deferred_sql = deferred_indexes_sql(&items, line).map_err(invalid)?;
     for n in &deferred_names {
         warnings.push(format!(
             "deferred index {n}: not built; run fastmig/deferred-indexes.sql on the target (workspace#486)"
@@ -675,6 +675,11 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                 .map_err(|e| invalid(format!("owner-qualified names: {}", e.what)))?,
         );
         warnings.extend(grants.warning.clone());
+        // the index DDL names its class as the target does: run as dba, a 10.2/11.0 source's bare class name finds no
+        // class of another owner (workspace#555)
+        let qualified = deferred_indexes(&mapped, line)?;
+        let items: Vec<_> = qualified.iter().map(|(c, k)| (*c, k)).collect();
+        deferred_sql = deferred_indexes_sql(&items, line).map_err(invalid)?;
         // PL/CSQL keeps its compiled code, which develop cannot recompile from a rewritten source (workspace#542)
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedureCode)? {
             let name = stored_procedure_code::name(&r.values)
@@ -929,7 +934,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         classes: treatments,
         treated_pages,
         deferred_indexes: deferred_names,
-        deferred_indexes_sql,
+        deferred_indexes_sql: deferred_sql,
         post_migration_fixes_sql: post_migration_fixes_sql(&[
             &mismatch.post_migration_fixes_sql,
             &grants.fix_sql,
