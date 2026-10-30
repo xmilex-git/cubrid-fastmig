@@ -11,7 +11,7 @@ use fastmig_ondisk::Oid;
 use fastmig_ondisk::value::{DecodeError, DecodeResult, Value};
 
 use crate::class_rows::Row;
-use crate::same_slot_rows::{rewrite, template_rows};
+use crate::same_slot_rows::{rewrite, template_line, template_rows};
 use crate::system_table::SystemTable;
 use crate::target_classes::TargetClass;
 use crate::template::CatalogTemplate;
@@ -52,7 +52,7 @@ pub fn static_rows(
             .ok_or_else(|| err(format!("no target class {table}")))?
             .class;
         for r in source(table) {
-            let mut row = rewrite(table, t, &r, now)?;
+            let mut row = rewrite(template_line(template)?, table, t, &r, now)?;
             row.oid = alloc(table);
             out.push((table, row));
         }

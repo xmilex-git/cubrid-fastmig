@@ -4,6 +4,8 @@
 //! Source: names from the T1 11.4 DB and the develop catalog template (R4); 10.2..11.3 use the 11.4 names
 //! (R8 § 2.11); develop renamed the `db_*` original-data tables to `_db_*` (CBRD-25862, develop 8ba543178).
 
+use fastmig_ondisk::VersionLine;
+
 /// A system table (not a view) of the source or the develop catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SystemTable {
@@ -90,6 +92,14 @@ impl SystemTable {
     /// Name in the develop catalog; `None` for a table develop dropped.
     pub const fn develop_name(self) -> Option<&'static str> {
         self.names().1
+    }
+
+    /// Name in a catalog of `line`; `None` where that catalog has no such table.
+    pub const fn name_in(self, line: VersionLine) -> Option<&'static str> {
+        match line {
+            VersionLine::V10_2 | VersionLine::V11_4 => self.source_name(),
+            VersionLine::Develop => self.develop_name(),
+        }
     }
 
     /// Develop name of a table develop has: every table regeneration writes rows into or reads from the template.

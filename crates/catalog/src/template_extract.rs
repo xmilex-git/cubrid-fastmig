@@ -45,7 +45,12 @@ pub fn extract(
         ..Default::default()
     };
     for table in ROW_CLASSES {
-        let name = table.name();
+        let name = table.name_in(line).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{table} has no name in the template line"),
+            )
+        })?;
         let c = classes
             .iter()
             .find(|c| c.class.name == name.as_bytes())

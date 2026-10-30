@@ -1,10 +1,13 @@
-//! Rewrites the rows of the original-data system tables in the develop layout, each staying in its slot, and adds
-//! the rows a develop database has that 11.4 lacks (the `INFORMATION_SCHEMA` user and its authorization).
+//! Rewrites the rows of the original-data system tables in the layout of the target line (the template's: develop or
+//! 11.4), each staying in its slot, and adds the rows a fresh target database has that the source lacks (develop:
+//! the `INFORMATION_SCHEMA` user and its authorization; from a pre-11.4 source: the built-in procedures).
 //!
 //! Input: the source rows of each same-slot table keyed by develop name (`class_rows::read_rows`), the target
 //! classes, the catalog template, the template-user → target-user map (the same one `target_classes` placed the
 //! new users with), the database charset, the migrate start time, the row allocator.
-//! Output: `(develop table, Row)`s: one per source row with the source OID, then the new rows.
+//! Output: `(table, Row)`s: one per source row with the source OID, then the new rows.
+//! One mapping for both target lines (workspace#534): an 11.4 target keeps the source values (11.4 encoding) and
+//! names; develop alone re-encodes values, fills its new columns and renames auto_increment serials (R12 § 5.3).
 //! Source: workspace#482 decisions 1 (same slot, row OIDs kept), 2 (system users and grants from the template),
 //! 8 (new columns: created/updated time = migrate start; invalidated/expire time NULL; `start_val` = `current_val`
 //! when not started, else NULL; `is_loginable` 1; `is_system_created` 1 for DBA, PUBLIC, INFORMATION_SCHEMA only;
@@ -30,7 +33,6 @@ use crate::system_table::SystemTable;
 use crate::target_classes::{Origin, TargetClass};
 use crate::template::CatalogTemplate;
 
-const LINE: VersionLine = VersionLine::Develop;
 /// Users develop marks `is_system_created` (`authenticate_context.hpp:get_system_users`).
 const SYSTEM_USERS: [&[u8]; 3] = [b"DBA", b"PUBLIC", b"INFORMATION_SCHEMA"];
 /// Source columns develop no longer has; any other missing column is an error.
@@ -81,14 +83,16 @@ fn new_column(
         },
         _ => {
             return Err(err(format!(
-                "{table}.{col}: no rule for a column 11.4 lacks"
+                "{table}.{col}: no rule for a column the source lacks"
             )));
         }
     })
 }
 
-/// A develop row from a source row: shared columns re-encoded, new columns by rule, dropped columns checked.
+/// A target row from a source row: shared columns re-encoded for develop, new columns by rule, dropped columns
+/// checked.
 pub(crate) fn rewrite(
+    line: VersionLine,
     table: SystemTable,
     t: &ClassObject,
     r: &Row,
@@ -102,13 +106,14 @@ pub(crate) fn rewrite(
     for n in r.values.keys() {
         if !names.contains(n) && !DROPPED_COLUMNS.contains(&(table, n.as_str())) {
             let src_name = table.source_name().unwrap_or(table.name());
-            return Err(err(format!("{src_name}.{n} has no develop column")));
+            return Err(err(format!("{src_name}.{n} has no target column")));
         }
     }
     let mut values = HashMap::new();
     for n in &names {
         let v = match r.values.get(n) {
-            Some(v) => value_to_develop(v.clone()),
+            Some(v) if line == VersionLine::Develop => value_to_develop(v.clone()),
+            Some(v) => v.clone(),
             None => new_column(table, n, &r.values, now)?,
         };
         values.insert(n.clone(), v);
@@ -116,14 +121,29 @@ pub(crate) fn rewrite(
     Ok(Row { oid: r.oid, values })
 }
 
+/// The template's target line.
+pub(crate) fn template_line(template: &CatalogTemplate) -> DecodeResult<VersionLine> {
+    template
+        .line()
+        .ok_or_else(|| err(format!("template line {:?}", template.meta("line"))))
+}
+
+/// The name of `table` in the template's line.
+fn name_in(line: VersionLine, table: SystemTable) -> DecodeResult<&'static str> {
+    table
+        .name_in(line)
+        .ok_or_else(|| err(format!("{table} is not a table of the target line")))
+}
+
 /// The rows of a template class, decoded with the template's class object.
 pub fn template_rows(template: &CatalogTemplate, table: SystemTable) -> DecodeResult<Vec<Row>> {
-    let name = table.name();
+    let line = template_line(template)?;
+    let name = name_in(line, table)?;
     let rec = template
         .classes
         .iter()
         .find_map(|r| {
-            let c = decode(&r.bytes, LINE).ok()?;
+            let c = decode(&r.bytes, line).ok()?;
             (c.name == name.as_bytes()).then_some(c)
         })
         .ok_or_else(|| err(format!("template has no class {name}")))?;
@@ -131,8 +151,8 @@ pub fn template_rows(template: &CatalogTemplate, table: SystemTable) -> DecodeRe
         .rows_of(name)
         .map(|r| {
             let h = RecordHeader::read(&r.bytes)?;
-            let layout = RecordLayout::for_repid(LINE, &rec, h.repid)?;
-            let d = decode_record(LINE, &layout, &r.bytes)?;
+            let layout = RecordLayout::for_repid(line, &rec, h.repid)?;
+            let d = decode_record(line, &layout, &r.bytes)?;
             let values = layout
                 .attrs
                 .iter()
@@ -160,16 +180,16 @@ fn grant_entries(v: Option<&Value>) -> DecodeResult<Vec<Vec<Value>>> {
 }
 
 /// The `grants` sequence of `entries`, each element tagged with its type (integers and objects mix).
-fn grant_value(entries: Vec<Vec<Value>>) -> Value {
+fn grant_value(line: VersionLine, entries: Vec<Vec<Value>>) -> Value {
     Value::Set(SetValue {
         ty: DbType::Sequence,
-        domain: Some(Domain::builtin(LINE, DbType::Sequence)),
+        domain: Some(Domain::builtin(line, DbType::Sequence)),
         elements: entries
             .into_iter()
             .flatten()
             .map(|value| SetElement {
                 tag: Some(Domain::builtin(
-                    LINE,
+                    line,
                     if matches!(value, Value::Integer(_)) {
                         DbType::Integer
                     } else {
@@ -186,33 +206,30 @@ pub fn same_slot_rows(
     i: &SameSlotInputs,
     alloc: &mut dyn FnMut(SystemTable) -> Oid,
 ) -> DecodeResult<Vec<(SystemTable, Row)>> {
+    let line = template_line(i.template)?;
     let target = |table: SystemTable| {
+        let name = name_in(line, table)?;
         i.targets
             .iter()
-            .find(|t| t.class.name == table.name().as_bytes())
-            .ok_or_else(|| err(format!("no target class {table}")))
+            .find(|t| t.class.name == name.as_bytes())
+            .ok_or_else(|| err(format!("no target class {name}")))
     };
     let mut out = Vec::new();
-    for dev_name in SAME_SLOT {
-        let t = &target(dev_name)?.class;
-        for r in i
-            .source
-            .get(&dev_name)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-        {
-            let mut row = rewrite(dev_name, t, r, &i.now)?;
-            if dev_name == SystemTable::DbSerial {
+    for table in SAME_SLOT {
+        let t = &target(table)?.class;
+        for r in i.source.get(&table).map(Vec::as_slice).unwrap_or_default() {
+            let mut row = rewrite(line, table, t, r, &i.now)?;
+            if line == VersionLine::Develop && table == SystemTable::DbSerial {
                 rename_serial(&mut row, i.charset);
             }
-            out.push((dev_name, row));
+            out.push((table, row));
         }
     }
 
     // template class OID -> target class OID, by name (system classes only)
     let mut class_of: HashMap<Oid, Oid> = HashMap::new();
     for r in &i.template.classes {
-        let c = decode(&r.bytes, LINE)?;
+        let c = decode(&r.bytes, line)?;
         if let Some(t) = i.targets.iter().find(|t| t.class.name == c.name) {
             class_of.insert(r.oid, t.oid);
         }
@@ -257,21 +274,25 @@ pub fn same_slot_rows(
         }
         let auth = alloc(SystemTable::DbAuthorization);
         new_auths.push(auth);
-        let mut values = rewrite(SystemTable::DbUser, &ut.class, u, &i.now)?.values;
+        let mut values = rewrite(line, SystemTable::DbUser, &ut.class, u, &i.now)?.values;
         values.insert("authorization".into(), Value::Object(auth));
         values.insert("groups".into(), user_seq(user::groups(&u.values)));
         values.insert(
             "direct_groups".into(),
             user_seq(user::direct_groups(&u.values)),
         );
-        values.insert("created_time".into(), i.now.clone());
-        values.insert("updated_time".into(), i.now.clone());
+        // the template's times are its createdb's; a target line with these columns gets the migrate start
+        for col in ["created_time", "updated_time"] {
+            if let Some(v) = values.get_mut(col) {
+                *v = i.now.clone();
+            }
+        }
         out.push((SystemTable::DbUser, Row { oid, values }));
         let ta = tauths
             .iter()
             .find(|a| authorization::owner(&a.values) == Some(&Value::Object(u.oid)))
             .ok_or_else(|| err("template user without authorization row".into()))?;
-        let mut values = rewrite(SystemTable::DbAuthorization, &at.class, ta, &i.now)?.values;
+        let mut values = rewrite(line, SystemTable::DbAuthorization, &at.class, ta, &i.now)?.values;
         values.insert("owner".into(), Value::Object(oid));
         out.push((SystemTable::DbAuthorization, Row { oid: auth, values }));
     }
@@ -293,7 +314,14 @@ pub fn same_slot_rows(
             continue;
         }
         let oid = alloc(SystemTable::DbStoredProcedure);
-        let mut values = rewrite(SystemTable::DbStoredProcedure, &spt.class, &sp, &i.now)?.values;
+        let mut values = rewrite(
+            line,
+            SystemTable::DbStoredProcedure,
+            &spt.class,
+            &sp,
+            &i.now,
+        )?
+        .values;
         if let Some(Value::Object(o)) = stored_procedure::owner(&values) {
             values.insert("owner".into(), Value::Object((i.user)(*o)));
         }
@@ -305,8 +333,14 @@ pub fn same_slot_rows(
                     .find(|r| r.oid == a)
                     .ok_or_else(|| err(format!("template argument {a:?} missing")))?;
                 let aoid = alloc(SystemTable::DbStoredProcedureArgs);
-                let mut av =
-                    rewrite(SystemTable::DbStoredProcedureArgs, &argt.class, ta, &i.now)?.values;
+                let mut av = rewrite(
+                    line,
+                    SystemTable::DbStoredProcedureArgs,
+                    &argt.class,
+                    ta,
+                    &i.now,
+                )?
+                .values;
                 av.insert("sp_of".into(), Value::Object(oid));
                 out.push((
                     SystemTable::DbStoredProcedureArgs,
@@ -364,7 +398,7 @@ pub fn same_slot_rows(
                 entries.push(e);
             }
         }
-        r.values.insert("grants".into(), grant_value(entries));
+        r.values.insert("grants".into(), grant_value(line, entries));
     }
     Ok(out)
 }

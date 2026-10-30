@@ -13,7 +13,7 @@
 
 use std::fmt::Write as _;
 
-use fastmig_ondisk::Oid;
+use fastmig_ondisk::{Oid, VersionLine};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogTemplate {
@@ -36,6 +36,15 @@ impl CatalogTemplate {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// The target line the template was made for (`meta line`, `11.4` or `develop`); `None` for any other value.
+    pub fn line(&self) -> Option<VersionLine> {
+        match self.meta("line")? {
+            "11.4" => Some(VersionLine::V11_4),
+            "develop" => Some(VersionLine::Develop),
+            _ => None,
+        }
     }
 
     pub fn rows_of<'a>(&'a self, class: &'a str) -> impl Iterator<Item = &'a TemplateRecord> + 'a {
