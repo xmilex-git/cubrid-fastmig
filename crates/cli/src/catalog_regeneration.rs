@@ -47,6 +47,8 @@ pub struct CatalogOutcome {
     pub user_heaps: usize,
     /// User heaps whose statistics were measured (every chain page read).
     pub measured_heaps: usize,
+    /// Pages the page treatment appended to the heaps (workspace#526: against `appended_pages_bound`).
+    pub appended_pages: u64,
     pub rows_written: BTreeMap<&'static str, usize>,
     pub new_slots: usize,
     pub new_heaps: usize,
@@ -63,10 +65,11 @@ impl CatalogOutcome {
             .map(|(t, n)| format!("\"{t}\": {n}"))
             .collect();
         format!(
-            "{{\"freed_files\": {}, \"user_heaps\": {}, \"measured_heaps\": {}, \"new_slots\": {}, \"new_heaps\": {}, \"deleted_classes\": {}, \"catalog_pages\": {}, \"indexes_built\": {}, \"rows_written\": {{{}}}}}",
+            "{{\"freed_files\": {}, \"user_heaps\": {}, \"measured_heaps\": {}, \"appended_pages\": {}, \"new_slots\": {}, \"new_heaps\": {}, \"deleted_classes\": {}, \"catalog_pages\": {}, \"indexes_built\": {}, \"rows_written\": {{{}}}}}",
             self.freed_files,
             self.user_heaps,
             self.measured_heaps,
+            self.appended_pages,
             self.new_slots,
             self.new_heaps,
             self.deleted_classes,
@@ -220,6 +223,7 @@ pub fn finish(
         freed_files: p.freed_files,
         user_heaps: p.reports.len(),
         measured_heaps: p.reports.iter().filter(|r| r.measured).count(),
+        appended_pages: p.reports.iter().map(|r| r.appended_pages).sum(),
         rows_written: p.layout.rows_written.clone(),
         new_slots: p.layout.new_slots.len(),
         new_heaps: p.layout.new_heaps.len(),
@@ -344,6 +348,7 @@ pub fn same_version_finish(
         freed_files: p.freed_files,
         user_heaps: p.reports.len(),
         measured_heaps: p.reports.iter().filter(|r| r.measured).count(),
+        appended_pages: p.reports.iter().map(|r| r.appended_pages).sum(),
         rows_written,
         new_slots: 0,
         new_heaps: 0,

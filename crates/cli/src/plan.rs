@@ -17,6 +17,7 @@ use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_ondisk::{SourceVersion, VersionLine};
 use fastmig_plan::cubrid_conf::ignore_trailing_space;
+use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::parse_line;
 use fastmig_plan::{Plan, PlanInputs};
 
@@ -227,6 +228,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         &s.vols,
         plan.version_pair,
         plan.source_version,
+        lob_base_dir(&s.entry).map_err(io::Error::other)?.as_deref(),
         limits::worker_limit(&p)?,
         limits::physical_memory()?,
     )?;

@@ -20,6 +20,7 @@ use std::time::Instant;
 use crate::limits;
 use fastmig_catalog::catalog_layout::generated_rows;
 use fastmig_catalog::classify::ClassKind;
+use fastmig_catalog::page_treatment::appended_pages_bound;
 use fastmig_catalog::row_encode::encode_row;
 use fastmig_catalog::same_version_catalog::{DevelopCatalog, deferred_rows};
 use fastmig_catalog::source_catalog::SourceCatalog;
@@ -71,6 +72,9 @@ pub struct ResourceEstimate {
     pub physical_memory: u64,
     /// The run regenerates the system catalog (an 11.x or 10.2 source): its rows are built in memory.
     pub regenerates: bool,
+    /// Heap pages the page treatment may append (`page_treatment::appended_pages_bound`; 0 on the same-version
+    /// path, which only patches).
+    pub appended_pages: u64,
     /// Spill bytes the verifier's source side takes (`verify::source_pair_bytes`), counted only for `--verify`.
     pub verify_source: Option<u64>,
     /// Heap pages of the source the verifier reads (its live row map), counted with `verify_source`.
@@ -89,6 +93,7 @@ pub fn estimate(
     vols: &VolumeSet,
     pair: VersionPair,
     source: SourceVersion,
+    lob_base: Option<&std::path::Path>,
     workers: usize,
     physical_memory: u64,
 ) -> io::Result<ResourceEstimate> {
@@ -161,9 +166,11 @@ pub fn estimate(
                 workers,
             )?;
             let s = count(vols, &tables(false), Rows::Records(&records), workers)?;
+            let appended = appended_pages_bound(vols, &src, lob_base, workers)?;
             e.indexes.extend(s.indexes);
             e.per_def.extend(s.per_def);
             e.per_def_figures.extend(s.per_def_figures);
+            e.appended_pages = appended;
             e
         }
     };
@@ -252,6 +259,7 @@ fn count(
         workers,
         physical_memory: 0,
         regenerates: false,
+        appended_pages: 0,
         verify_source: None,
         verify_heap_pages: None,
     })

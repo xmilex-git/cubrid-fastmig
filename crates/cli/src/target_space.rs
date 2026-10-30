@@ -77,7 +77,7 @@ pub fn bound(plan: &Plan, est: &ResourceEstimate, io_page: u64, new_log_bytes: u
             btree_pages(f, g, io_page as usize, est.workers)
         })
         .sum();
-    let pages = plan.rewritten_pages_bound + btree_pages + CATALOG_SLACK_PAGES;
+    let pages = plan.rewritten_pages_bound + btree_pages + est.appended_pages + CATALOG_SLACK_PAGES;
     let extra_bytes =
         pages * io_page + plan.lob.referenced_bytes() + plan.java.bytes + plan.java_static.bytes;
     TargetSpace {

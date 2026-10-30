@@ -194,6 +194,9 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         &src.vols,
         plan.version_pair,
         plan.source_version,
+        lob_base_dir(&src.entry)
+            .map_err(io::Error::other)?
+            .as_deref(),
         o.worker_limit,
         limits::physical_memory()?,
     )?;
@@ -314,6 +317,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let resources = b.est.json(mem);
     let temp_limit = b.temp_limit;
     let target = b.target;
+    let b_appended = b.est.appended_pages;
     for w in &plan.warnings {
         rep.progress.warn(format!("warning: {w}"));
     }
@@ -609,14 +613,15 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &catalog.json(),
         added_volumes,
         &format!(
-            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_btree_bound_pages\": {}, \"target_added_volume_bytes\": {added_bytes}}}",
+            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_btree_bound_pages\": {}, \"target_appended_bound_pages\": {}, \"target_added_volume_bytes\": {added_bytes}}}",
             temp_limit,
             limits.temp_disk.is_some(),
             TEMP_DISK.now_and_peak().1,
             target.copy_bytes,
             target.log_bytes,
             target.extra_bytes,
-            target.btree_pages
+            target.btree_pages,
+            b_appended
         ),
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;

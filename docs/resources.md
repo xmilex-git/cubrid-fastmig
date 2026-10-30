@@ -214,8 +214,11 @@ reservation (`--workers 16 --mem 64M`):
 | T1 11.4 dirty | 40,468,480 | 60,183,668 | 1.48 |
 | T4 11.3 dirty | 40,796,160 | 59,802,052 | 1.46 |
 
-Not bounded yet: heap pages a re-encoded or patched heap appends (`HeapReport.appended_pages`), inside the
-64-page catalog slack only by chance. A source index with a defect (a live row's key missing)
+Heap pages the page treatment appends are bounded too (`page_treatment::appended_pages_bound`): only a re-encoded
+record can grow, so every record of a re-encoded class is re-encoded as the treatment will (the same encoder, LOB
+directories included) and one that grows is counted whole on new pages. report.json: `catalog.appended_pages`
+against `temp_disk.target_appended_bound_pages`; T1 11.4 clean and dirty 0 against 2, T1 develop, T4 11.3 dirty
+and 11.2 clean 0 against 0. A source index with a defect (a live row's key missing)
 can make the source's counts too small: not covered yet (1번 세션 decision: a check at build time before the
 first page is written).
 
