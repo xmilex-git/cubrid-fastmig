@@ -4,12 +4,14 @@
 //! Input: the heap pass's sorted runs for the index (whole, or one shard of them: `merge_shards`), the index's
 //! [`LeafPairs`] over the same leaves. Output: check 2 defects — `missing-in-index` (a live row without its entry),
 //! `missing-in-heap` (an entry without its live row; the same OID under a second key lands here), `key-value-differs`
-//! (same position, the decoded key values differ: e.g. two case variants under a case-insensitive collation).
+//! (same position, the decoded key values differ, and no row of that key record has the leaf key's image: two
+//! values the key domain calls equal share one key record, so the image of one of its rows is no defect).
 //! Keys are equal when their decoded value tuples are (G3 Q1), not when their images are; the order is the key
 //! domain's (`KeyDomain::compare`) then the OID; byte-equal images are equal without a compare. A deferred index
 //! (function or filter) has no heap side (G5): [`check_oids`] checks its entries' OIDs name live rows of the indexed
 //! classes.
-//! Source: G3 workspace#483 Q1, G5 workspace#486; k-way merge of the builder (`fastmig_index::kway_merge`).
+//! Source: G3 workspace#483 Q1, G5 workspace#486, workspace#554 (a shared key image); k-way merge of the builder
+//! (`fastmig_index::kway_merge`).
 
 use std::cmp::Ordering;
 use std::io;
@@ -81,6 +83,7 @@ pub fn merge_pairs(
     let (mut hk, mut lk) = (Vec::new(), Vec::new());
     let mut h = take_pair(heap.next_pair()?, &mut hk);
     let mut l = take_pair(leaves.next_pair(), &mut lk);
+    let mut record = KeyRecord::at(leaves.counts.records);
     loop {
         let ord = match (h, l) {
             (None, None) => break,
@@ -92,8 +95,10 @@ pub fn merge_pairs(
         };
         match ord {
             Ordering::Equal => {
-                if hk != lk && kd.decode_key(&hk).ok() != kd.decode_key(&lk).ok() {
-                    out.push(
+                if hk == lk {
+                    record.image_in_heap = true;
+                } else if kd.decode_key(&hk).ok() != kd.decode_key(&lk).ok() {
+                    record.pending.push(
                         d("key-value-differs", h.unwrap(), &lk)
                             .expected(key_text(&kd, &hk))
                             .actual(key_text(&kd, &lk)),
@@ -101,6 +106,7 @@ pub fn merge_pairs(
                 }
                 h = take_pair(heap.next_pair()?, &mut hk);
                 l = take_pair(leaves.next_pair(), &mut lk);
+                record.leaf_read(leaves.counts.records, &mut out);
             }
             Ordering::Less => {
                 out.push(d("missing-in-index", h.unwrap(), &hk));
@@ -109,10 +115,52 @@ pub fn merge_pairs(
             Ordering::Greater => {
                 out.push(d("missing-in-heap", l.unwrap(), &lk));
                 l = take_pair(leaves.next_pair(), &mut lk);
+                record.leaf_read(leaves.counts.records, &mut out);
             }
         }
     }
+    record.settle(&mut out);
     Ok(out)
+}
+
+/// The leaf key record the merge is in. It holds one image for all rows its key domain calls equal ('c ' and 'c\0'
+/// under utf8_bin, case variants under a _ci collation): the engine keeps its first insert's, the builder the first
+/// row's in key-then-OID order. So a row whose value differs from its leaf key is a defect only when no row of the
+/// record has the leaf key's image; its `key-value-differs` waits here until the leaf moves to the next record
+/// (workspace#554).
+struct KeyRecord {
+    pending: Vec<Defect>,
+    image_in_heap: bool,
+    /// `LeafPairs::counts.records` when this record was read: a new count is a new record.
+    record: i64,
+}
+
+impl KeyRecord {
+    fn at(record: i64) -> Self {
+        Self {
+            pending: Vec::new(),
+            image_in_heap: false,
+            record,
+        }
+    }
+
+    /// After each leaf pair: a new record settles the one just left.
+    fn leaf_read(&mut self, record: i64, out: &mut Vec<Defect>) {
+        if record != self.record {
+            self.settle(out);
+            self.record = record;
+        }
+    }
+
+    /// Reports the waiting defects unless a row of the record has the leaf key's image, and starts a new record.
+    fn settle(&mut self, out: &mut Vec<Defect>) {
+        if self.image_in_heap {
+            self.pending.clear();
+        } else {
+            out.append(&mut self.pending);
+        }
+        self.image_in_heap = false;
+    }
 }
 
 /// Copies a pair's key into `buf` and returns its OID.
