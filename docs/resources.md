@@ -197,7 +197,25 @@ key, every 86th pair opening a chain. The former `5 · T_i / page + 4` was no bo
 | T1 11.4 dirty | 721 | 1,430 | 1.98 |
 
 The allocated pages also hold catalog pages and appended heap pages; on T1 most of the gap is the fixed pages of
-75 small indexes (file header, root, one partial leaf). A source index with a defect (a live row's key missing)
+75 small indexes (file header, root, one partial leaf).
+
+Freeing a file writes too: `destroy_file` retypes every allocated page of every B-tree and overflow key file (and,
+with a regenerated catalog, of the catalog and the freed system heaps), and on a cloned volume each such write
+unshares a block. The rewritten-pages bound counts them (`n_page_user + n_page_ftab` of each file the run frees);
+5cbe96d had left them out. What the run really writes outside the space it took at the start, measured as the
+blocks of the cloned volumes no longer shared with the source (`filefrag -v`) plus added volumes, against the
+reservation (`--workers 16 --mem 64M`):
+
+| DB | written outside, B | reservation, B | reservation / written |
+|---|---|---|---|
+| T1 develop clean | 23,478,272 | 41,964,660 | 1.78 |
+| T1 develop dirty | 30,310,400 | 57,087,092 | 1.88 |
+| T1 11.4 clean | 37,617,664 | 61,396,084 | 1.63 |
+| T1 11.4 dirty | 40,468,480 | 60,183,668 | 1.48 |
+| T4 11.3 dirty | 40,796,160 | 59,802,052 | 1.46 |
+
+Not bounded yet: heap pages a re-encoded or patched heap appends (`HeapReport.appended_pages`), inside the
+64-page catalog slack only by chance. A source index with a defect (a live row's key missing)
 can make the source's counts too small: not covered yet (1번 세션 decision: a check at build time before the
 first page is written).
 

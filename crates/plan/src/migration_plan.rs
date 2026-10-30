@@ -131,9 +131,10 @@ pub struct Plan {
     pub lob: LobScan,
     pub java: DirSize,
     pub java_static: DirSize,
-    /// Heap pages the run may rewrite in place, an upper bound (workspace#526): what a cloned volume must unshare
-    /// besides the new B-trees — every heap page when the catalog is regenerated (11.4 → develop), else the
-    /// treated pages and the root heap (class objects get the rebuilt BTIDs).
+    /// Pages the run may rewrite in place, an upper bound (workspace#526): what a cloned volume must unshare besides
+    /// the new B-trees — every heap page when the catalog is regenerated (11.4 → develop), else the treated pages
+    /// and the root heap (class objects get the rebuilt BTIDs); and every page of the files the run frees, which
+    /// `destroy_file` retypes.
     pub rewritten_pages_bound: u64,
     /// Free bytes of the target filesystem (the need is `cubrid-fastmig` `target_space`, with the resource estimate).
     pub available_bytes: u64,
@@ -370,6 +371,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     let (_, boot) = BootDbParm::read(i.vols)?;
     let (items, _) = file_tracker::read(i.vols, boot.trk_vfid)?;
     let mut heap_pages = std::collections::HashMap::new();
+    // pages of the files the run frees: destroy_file retypes every allocated page of them, which a cloned volume
+    // unshares (workspace#526): every B-tree and overflow key file; with a regenerated catalog also the catalog,
+    // heap and overflow heap files (an upper bound of the system ones freed)
+    let mut freed_pages = 0u64;
     for it in &items {
         let h = FileHeader::read(&i.vols.read_page(it.vfid.header_vpid())?);
         if h.is_tde_encrypted() {
@@ -384,6 +389,15 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         ) {
             heap_pages.insert((it.vfid.volid, it.vfid.fileid), h.n_page_user.max(0) as u64);
         }
+        // destroy_file retypes the allocated pages: user and table pages (a regenerated catalog's heap user pages are
+        // in the heap bound already)
+        let (user, ftab) = (h.n_page_user.max(0) as u64, h.n_page_ftab.max(0) as u64);
+        freed_pages += match h.file_type() {
+            Some(FileType::Btree | FileType::BtreeOverflowKey) => user + ftab,
+            Some(FileType::Catalog | FileType::MultipageObjectHeap) if regenerates => user + ftab,
+            Some(FileType::Heap | FileType::HeapReuseSlots) if regenerates => ftab,
+            _ => 0,
+        };
     }
 
     if matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
@@ -731,7 +745,9 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         lob,
         java,
         java_static,
-        rewritten_pages_bound: rewritten_pages_bound + if regenerates { 0 } else { treated_pages },
+        rewritten_pages_bound: rewritten_pages_bound
+            + if regenerates { 0 } else { treated_pages }
+            + freed_pages,
         available_bytes: available,
         system_name_rewrites,
         refusals,
