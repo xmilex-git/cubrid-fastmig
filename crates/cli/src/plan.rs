@@ -22,7 +22,7 @@ use fastmig_plan::{Plan, PlanInputs};
 
 use crate::args::{CliError, Parsed, parse};
 use crate::limits::{self, Limits};
-use crate::{plan_report, resource_estimate, target_space, verify};
+use crate::{plan_report, resource_estimate, target_space, verify, volume_dirs};
 
 const HELP: &str = "\
 cubrid-fastmig plan <db> --dest <dir> [options]
@@ -192,6 +192,10 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
     if let Err(e) = register_db::check_name_free(&o.target_dbtxt, &o.target_name) {
         plan.refusals.push(e.to_string());
     }
+    // a copied source still naming the original volumes (workspace#515)
+    let (warnings, refusals) = volume_dirs::check(s, o.locate);
+    plan.warnings.extend(warnings);
+    plan.refusals.extend(refusals);
     // a rerun removes what the previous run left before it writes: that space is free to it (workspace#526)
     plan.available_bytes += incomplete_marker::reclaimable_bytes(&o.target_dir)?;
     Ok(plan)
