@@ -119,7 +119,7 @@ pub fn prepare(
     let vols = space.volumes();
     let (_, boot) = BootDbParm::read(vols)?;
     // everything the regeneration reads from the source catalog, before the first write
-    let source = SourceCatalog::read(vols, src_version)?;
+    let source = SourceCatalog::read(vols, src_version, VersionLine::Develop)?;
     let template = builtin(VersionLine::Develop, source.charset).ok_or_else(|| {
         io::Error::other(format!(
             "no catalog template for charset {}",

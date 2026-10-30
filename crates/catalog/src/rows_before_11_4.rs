@@ -2,8 +2,8 @@
 //! their object type and the grantor 11.4 would record, stored procedures gain their unique name and split target,
 //! arguments point to their procedure, the serial's `att_name` becomes `attr_name`.
 //!
-//! Input: the source version, the same-slot rows by develop table name (as the source holds them), the source
-//! classes. Output: the rows rewritten in place; an 11.4 or develop source is left alone.
+//! Input: the source version, the target line, the same-slot rows by develop table name (as the source holds them),
+//! the source classes. Output: the rows rewritten in place; an 11.4 or develop source is left alone.
 //! Source: R12 workspace#521 § 5.1 (research/fastmig-r12-same-slot-mapping bacaa22), mapping order db_user →
 //! procedures → arguments → grants → serial:
 //! - grants {class, grantor, cache} → {0 (`DB_OBJECT_CLASS`), class, grantor, cache}; a grantor in the DBA group,
@@ -11,8 +11,10 @@
 //!   authenticate_grant.cpp:1944@release/11.4; `get_grants` filter); entries of one (class, grantor) merge their
 //!   cache by OR. A third user who granted with grant option stays the grantor (map supervisor decision (b): the
 //!   engine's unload → load path makes it the owner; this is a reported intended difference).
-//! - `_db_stored_procedure`: `target` split by [`split_target_signature`], `pkg_name` NULL, `is_system_generated` 0,
-//!   `directive` 0; `unique_name` = lower(owner name) + "." + `sp_name` (`change_sp_owner`) is set by
+//! - `_db_stored_procedure`: `target` split by [`split_target_signature`] with the target line's `target_method`
+//!   length (11.4 1024 shortens a long method, develop 4096; a split the target cannot store is an error, plan
+//!   refuses it first), `pkg_name` NULL, `is_system_generated` 0, `directive` 0;
+//!   `unique_name` = lower(owner name) + "." + `sp_name` (`change_sp_owner`) is set by
 //!   `owner_qualification`, which knows the engine lowercase of the database locale.
 //! - `_db_stored_procedure_args`: `sp_of` = the procedure whose `args` holds the row, `sp_name` dropped,
 //!   `is_system_generated` 0, `default_value` NULL, `is_optional` 0.
@@ -24,11 +26,11 @@
 use std::collections::HashMap;
 
 use fastmig_ondisk::value::{DecodeError, DecodeResult, SetElement, Value};
-use fastmig_ondisk::{Oid, SourceVersion};
+use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 
 use crate::class_rows::Row;
 use crate::source_classes::SourceClass;
-use crate::sp_target_signature::split_target_signature;
+use crate::sp_target_signature::{split_target_signature, target_refusal};
 use crate::system_rows::{authorization, object, stored_procedure, user};
 use crate::system_table::SystemTable;
 
@@ -85,6 +87,7 @@ impl Users {
 
 pub fn to_11_4_shape(
     version: SourceVersion,
+    target: VersionLine,
     rows: &mut HashMap<SystemTable, Vec<Row>>,
     classes: &[SourceClass],
 ) -> DecodeResult<()> {
@@ -106,7 +109,7 @@ pub fn to_11_4_shape(
         .into_iter()
         .flatten()
     {
-        procedure(r, &users, &mut sp_of)?;
+        procedure(r, target, &users, &mut sp_of)?;
     }
     for r in rows
         .get_mut(&SystemTable::DbStoredProcedureArgs)
@@ -130,7 +133,12 @@ pub fn to_11_4_shape(
     Ok(())
 }
 
-fn procedure(r: &mut Row, users: &Users, sp_of: &mut HashMap<Oid, Oid>) -> DecodeResult<()> {
+fn procedure(
+    r: &mut Row,
+    line: VersionLine,
+    users: &Users,
+    sp_of: &mut HashMap<Oid, Oid>,
+) -> DecodeResult<()> {
     let sp_name = stored_procedure::sp_name(&r.values)
         .ok_or_else(|| err(format!("procedure {:?} without sp_name", r.oid)))?;
     object(stored_procedure::owner(&r.values))
@@ -142,13 +150,18 @@ fn procedure(r: &mut Row, users: &Users, sp_of: &mut HashMap<Oid, Oid>) -> Decod
             ))
         })?;
     let target = stored_procedure::target(&r.values).unwrap_or_default();
-    let (class, method) = split_target_signature(target).ok_or_else(|| {
+    let refused = |why: String| {
         err(format!(
-            "procedure {} target {:?} has no Class.method(..)",
+            "procedure {} target {:?} {why}",
             String::from_utf8_lossy(sp_name),
             String::from_utf8_lossy(target)
         ))
-    })?;
+    };
+    if let Some(why) = target_refusal(target, line) {
+        return Err(refused(why));
+    }
+    let (class, method) = split_target_signature(target, line)
+        .ok_or_else(|| refused("has no Class.method(..)".into()))?;
     if let Some(Value::Set(s)) = stored_procedure::args(&r.values) {
         for e in &s.elements {
             if let Value::Object(a) = e.value {

@@ -2,8 +2,8 @@
 //! objects with their plans, the rows of the same-slot tables, the source `_db_charset`/`_db_collation` rows and the
 //! database charset.
 //!
-//! Input: the target's volume set while it still holds the source's bytes (right after the copy), and the source
-//! release line. Output: [`SourceCatalog`].
+//! Input: the target's volume set while it still holds the source's bytes (right after the copy), the source
+//! release line and the target line. Output: [`SourceCatalog`].
 //! Source: workspace#482 decision 10 (old files are freed before anything new is allocated, so the reallocated
 //! tables' rows must be read first: `_db_charset` and `_db_collation` live in heaps decision 1 reallocates).
 
@@ -46,7 +46,8 @@ fn missing(name: &str) -> io::Error {
 }
 
 impl SourceCatalog {
-    pub fn read(vs: &VolumeSet, version: SourceVersion) -> io::Result<Self> {
+    /// `target` is the line regeneration writes: a pre-11.4 stored procedure target splits by its rules.
+    pub fn read(vs: &VolumeSet, version: SourceVersion, target: VersionLine) -> io::Result<Self> {
         let line = version.line().ok_or_else(|| {
             io::Error::other(format!("source {} has no codec line", version.name()))
         })?;
@@ -62,7 +63,7 @@ impl SourceCatalog {
         let mut same_slot: HashMap<SystemTable, Vec<Row>> = same_slot(version)
             .map(|t| Ok((t, rows(t.source_name().unwrap_or_default())?)))
             .collect::<io::Result<_>>()?;
-        to_11_4_shape(version, &mut same_slot, &classes)
+        to_11_4_shape(version, target, &mut same_slot, &classes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.what))?;
         let static_source = FROM_SOURCE
             .iter()

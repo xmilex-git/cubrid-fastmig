@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use fastmig_catalog::sp_target_signature::split_target_signature;
+use fastmig_ondisk::VersionLine;
 
 /// The byte string between `open` and the next `close` after it, and where it ends.
 fn between<'a>(e: &'a [u8], from: usize, open: &[u8], close: u8) -> Option<(&'a [u8], usize)> {
@@ -64,7 +65,7 @@ pub fn sp_owner_authid(entries: &mut [Vec<u8>]) -> usize {
             continue;
         }
         if let Some((target, end)) = between(&out, 0, b" NAME '", b'\'')
-            && let Some((class, method)) = split_target_signature(target)
+            && let Some((class, method)) = split_target_signature(target, VersionLine::Develop)
         {
             let start = end - target.len();
             out = [

@@ -23,7 +23,7 @@ use fastmig_catalog::output_sql::{deferred_indexes_sql, plcsql_routines, recompi
 use fastmig_catalog::owner_qualification::qualify_names;
 use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
-use fastmig_catalog::sp_target_signature::{TARGET_CLASS_LEN, split_target_signature};
+use fastmig_catalog::sp_target_signature::target_refusal;
 use fastmig_catalog::stored_texts::map_stored_texts;
 use fastmig_catalog::system_classes::SystemClassRole;
 use fastmig_catalog::system_name_mapping::judge;
@@ -435,22 +435,22 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         };
     }
 
-    if matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
-        // a pre-11.4 Java target must split into develop's target_class/target_method (R12 § 5.1 2)
+    if matches!(
+        version,
+        SourceVersion::V10_2 | SourceVersion::V11_2 | SourceVersion::V11_3
+    ) {
+        // a pre-11.4 Java target must split into the target's target_class/target_method (R12 § 5.1 2); an 11.4
+        // target stops its schema load on a method still over 1024 after shortening (T15 V3, workspace#534)
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedure)? {
             let name =
                 String::from_utf8_lossy(stored_procedure::sp_name(&r.values).unwrap_or_default())
                     .into_owned();
             let target = stored_procedure::target(&r.values).unwrap_or_default();
-            match split_target_signature(target) {
-                None => refusals.push(format!(
-                    "stored procedure {name}: target {:?} has no Class.method(..) (workspace#529)",
+            if let Some(why) = target_refusal(target, i.target_line) {
+                refusals.push(format!(
+                    "stored procedure {name}: target {:?} {why} (workspace#529, workspace#534)",
                     String::from_utf8_lossy(target)
-                )),
-                Some((c, _)) if c.len() > TARGET_CLASS_LEN => refusals.push(format!(
-                    "stored procedure {name}: target class over {TARGET_CLASS_LEN} bytes (workspace#529)"
-                )),
-                Some(_) => {}
+                ));
             }
         }
     }

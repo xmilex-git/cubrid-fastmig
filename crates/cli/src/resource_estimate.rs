@@ -117,7 +117,7 @@ pub fn estimate(
             count(vols, &classes, Rows::Heaps(&HashMap::new(), &skip), workers)?
         }
         VersionLine::V10_2 | VersionLine::V11_4 => {
-            let src = SourceCatalog::read(vols, source)?;
+            let src = SourceCatalog::read(vols, source, VersionLine::Develop)?;
             let template = builtin(VersionLine::Develop, src.charset).ok_or_else(|| {
                 invalid(format!("no catalog template for charset {}", src.charset))
             })?;
