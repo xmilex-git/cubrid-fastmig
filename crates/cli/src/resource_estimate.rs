@@ -27,7 +27,7 @@ use fastmig_catalog::target_classes::{Origin, TargetClass as CatalogClass};
 use fastmig_catalog::template_store::builtin;
 use fastmig_index::IndexDef;
 use fastmig_index::heap_scan::WORKER_SHARE;
-use fastmig_index::pair_count::{pair_bytes, record_pair_bytes};
+use fastmig_index::pair_count::{PairStats, pair_bytes, record_pair_bytes};
 use fastmig_index::rebuild::{TargetClass, class_constraints, plain_index_defs};
 use fastmig_index::temp_disk::index_batches;
 use fastmig_ondisk::heap_rewrite::{ClassReEncoder, ReEncode};
@@ -42,12 +42,15 @@ pub struct IndexPairs {
     pub class: String,
     pub index: String,
     pub bytes: u64,
+    pub stats: PairStats,
 }
 
 pub struct ResourceEstimate {
     pub indexes: Vec<IndexPairs>,
     /// Pair bytes per index definition (owners summed): the input of the batching.
     pub per_def: Vec<u64>,
+    /// Per index definition, owners merged: pairs, longest key, overflow key pages (the B-tree space bound).
+    pub per_def_stats: Vec<PairStats>,
     /// Seconds of the counting scan: one read of every indexed heap, the price of one more batch.
     pub scan_seconds: f64,
     pub workers: usize,
@@ -144,6 +147,7 @@ pub fn estimate(
             let s = count(vols, &tables(false), Rows::Records(&records), workers)?;
             e.indexes.extend(s.indexes);
             e.per_def.extend(s.per_def);
+            e.per_def_stats.extend(s.per_def_stats);
             e
         }
     };
@@ -182,7 +186,7 @@ fn count(
             &|oid| re_encoders.get(&oid).map(|r| r as &dyn ReEncode),
             skip,
         ),
-        Rows::Records(records) => record_pair_bytes(&refs, &|oid| {
+        Rows::Records(records) => record_pair_bytes(&refs, vols.io_pagesize(), &|oid| {
             records.get(&oid).map_or(&[], |r| r.as_slice())
         }),
     }
@@ -199,13 +203,25 @@ fn count(
             indexes.push(IndexPairs {
                 class: name_of(o.class_oid),
                 index: String::from_utf8_lossy(&o.constraint.name).into(),
-                bytes: by_class.get(&o.class_oid).copied().unwrap_or(0),
+                bytes: by_class.get(&o.class_oid).map_or(0, |s| s.bytes),
+                stats: by_class.get(&o.class_oid).copied().unwrap_or_default(),
             });
         }
     }
     Ok(ResourceEstimate {
         indexes,
-        per_def: counted.iter().map(|b| b.values().sum()).collect(),
+        per_def: counted
+            .iter()
+            .map(|b| b.values().map(|s| s.bytes).sum())
+            .collect(),
+        per_def_stats: counted
+            .iter()
+            .map(|b| {
+                let mut s = PairStats::default();
+                b.values().for_each(|c| s.merge(c));
+                s
+            })
+            .collect(),
         scan_seconds: 0.0,
         workers,
         physical_memory: 0,
@@ -270,8 +286,8 @@ impl ResourceEstimate {
             .iter()
             .map(|i| {
                 format!(
-                    "{{\"class\": {:?}, \"index\": {:?}, \"pair_bytes\": {}}}",
-                    i.class, i.index, i.bytes
+                    "{{\"class\": {:?}, \"index\": {:?}, \"pair_bytes\": {}, \"pairs\": {}, \"max_key\": {}, \"ovf_key_pages\": {}}}",
+                    i.class, i.index, i.bytes, i.stats.pairs, i.stats.max_key, i.stats.ovf_key_pages
                 )
             })
             .collect();

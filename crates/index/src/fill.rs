@@ -78,7 +78,7 @@ pub fn fill_btrees(
                 &HashSet::new(),
             )?
             .iter()
-            .map(|by_class| by_class.values().sum())
+            .map(|by_class| by_class.values().map(|s| s.bytes).sum())
             .collect();
             index_batches(&bytes, limit).map_err(|min| {
                 BuildError::TempDisk(format!(
