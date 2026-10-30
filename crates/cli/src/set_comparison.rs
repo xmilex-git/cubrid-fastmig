@@ -19,6 +19,7 @@ use fastmig_ondisk::{SourceVersion, VersionLine};
 
 use crate::unload_files::{entries, unload_set};
 use crate::unload_normalize::{normalize, rules};
+use crate::unload_rules_10_2::ClassOwners;
 
 const HELP: &str = "\
 cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix> [--diff <file>]
@@ -26,7 +27,7 @@ cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix> [--d
   --diff <file>    write every differing entry (< source only, > target only)
   --source-version <10.2|11.2|11.3|11.4|develop> --target-version <11.4|develop>
                    the engine lines that wrote each side; both or neither (default: one line, no normalization);
-                   a 10.2 source gets no rules: compare against the official path's target-line unload
+                   a 10.2 source gets rules to develop only: to 11.4, compare against the official path's 11.4 unload
   exit 0 = same entries, 1 = differ, 2 = usage or I/O error";
 
 /// Differing entries printed per file on stdout; `--diff` has all of them.
@@ -42,9 +43,14 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
         &["--diff", "--source-version", "--target-version"],
         &[],
     )?;
+    let mut source_10_2 = false;
     let pair = match (p.value("--source-version"), p.value("--target-version")) {
         (None, None) => Vec::new(),
-        (Some(s), Some(t)) => rules(source_version(s)?, version_line(t)?),
+        (Some(s), Some(t)) => {
+            let s = source_version(s)?;
+            source_10_2 = s == SourceVersion::V10_2;
+            rules(s, version_line(t)?)
+        }
         _ => {
             return Err(CliError::Usage(
                 "give --source-version and --target-version together".into(),
@@ -65,12 +71,18 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
             format!("no unload files at {source} or {target}"),
         )));
     }
+    // a 10.2 unload sets class owners in its schema file; the rules of the other files read them
+    let owners = match source_set.get("schema") {
+        Some(path) if source_10_2 => ClassOwners::from_schema(&entries("schema", path)?),
+        _ => ClassOwners::default(),
+    };
     let mut suffixes: Vec<&String> = source_set.keys().chain(target_set.keys()).collect();
     suffixes.sort();
     suffixes.dedup();
 
     let mut differs = false;
     let mut diff = String::new();
+    let mut entries_changed = String::new();
     for suffix in suffixes {
         let mut s = match source_set.get(suffix) {
             Some(path) => entries(suffix, path)?,
@@ -80,10 +92,22 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
             Some(path) => entries(suffix, path)?,
             None => Vec::new(),
         };
+        // the entries before the rules, to count those any rule changed (one entry may be changed by several rules)
+        let before = (!pair.is_empty()).then(|| (s.clone(), t.clone()));
         let (ns, nt) = (
-            normalize(&pair, suffix, true, &mut s),
-            normalize(&pair, suffix, false, &mut t),
+            normalize(&pair, suffix, true, &mut s, &owners),
+            normalize(&pair, suffix, false, &mut t, &owners),
         );
+        if let Some((s0, t0)) = before {
+            let changed =
+                |a: &[Vec<u8>], b: &[Vec<u8>]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+            let _ = writeln!(
+                entries_changed,
+                "normalized _{suffix}: source {} target {}",
+                changed(&s0, &s),
+                changed(&t0, &t)
+            );
+        }
         // an entry a rule emptied was folded into another (sp-owner-authid)
         s.retain(|e| !e.is_empty());
         t.retain(|e| !e.is_empty());
@@ -128,6 +152,7 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
     for (r, (a, b)) in pair.iter().zip(&normalized) {
         println!("normalized {}: source {a} target {b}", r.name);
     }
+    print!("{entries_changed}");
     if let Some(file) = p.value("--diff") {
         fs::write(file, diff)?;
     }

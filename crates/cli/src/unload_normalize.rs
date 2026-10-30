@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use crate::unload_rules_10_2::{self as v10_2, ClassOwners};
 use crate::unload_rules_before_11_4 as before_11_4;
 use fastmig_ondisk::{SourceVersion, VersionLine};
 
@@ -42,6 +43,11 @@ pub enum Rewrite {
     LobAbsoluteLocator,
     /// Drop ` WITH DEDUPLICATE=<level>`, any level.
     DeduplicateLevel,
+    /// The 10.2 print forms, one per function of [`crate::unload_rules_10_2`].
+    OwnerQualifiedNames,
+    ViewQueryOnePass,
+    DontReuseOid,
+    OwnerQualifiedText,
 }
 
 pub struct Rule {
@@ -76,6 +82,18 @@ pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
             .chain(V11_2_SOURCE)
             .chain(V11_2_TO_11_4)
             .collect(),
+        // the 10.2 names first: class-id-names and index-expression read the qualified forms; 10.2 prints serials and
+        // triggers as 11.2 does, its auto_increment state as develop does (no auto-increment-11-2)
+        (SourceVersion::V10_2, VersionLine::Develop) => V10_2_TO_DEVELOP
+            .iter()
+            .chain(V11_4_TO_DEVELOP)
+            .chain(BEFORE_11_4)
+            .chain(
+                V11_2_SOURCE
+                    .iter()
+                    .filter(|r| r.name != "auto-increment-11-2"),
+            )
+            .collect(),
         // one line prints alike; a downgrade is out of scope (ADR 0003)
         _ => Vec::new(),
     }
@@ -108,6 +126,35 @@ const BEFORE_11_4: &[Rule] = &[
         files: &["objects"],
         side: Side::Source,
         rewrite: Rewrite::LobAbsoluteLocator,
+    },
+];
+
+// a 10.2 source has no user schema, prints views in two passes and no DONT_REUSE_OID (T4 10.2.18 -> develop,
+// workspace#555; `unload_rules_10_2`)
+const V10_2_TO_DEVELOP: &[Rule] = &[
+    Rule {
+        name: "owner-qualified-names",
+        files: &["schema", "indexes", "trigger", "objects"],
+        side: Side::Source,
+        rewrite: Rewrite::OwnerQualifiedNames,
+    },
+    Rule {
+        name: "owner-qualified-text",
+        files: &["schema", "trigger"],
+        side: Side::Target,
+        rewrite: Rewrite::OwnerQualifiedText,
+    },
+    Rule {
+        name: "view-query-one-pass",
+        files: &["schema"],
+        side: Side::Source,
+        rewrite: Rewrite::ViewQueryOnePass,
+    },
+    Rule {
+        name: "dont-reuse-oid",
+        files: &["schema"],
+        side: Side::Source,
+        rewrite: Rewrite::DontReuseOid,
     },
 ];
 
@@ -199,12 +246,14 @@ const V11_4_TO_DEVELOP: &[Rule] = &[
     },
 ];
 
-/// Applies `rules` to one file's entries of one side; returns how many entries each rule changed.
+/// Applies `rules` to one file's entries of one side; returns how many entries each rule changed. `owners` are the
+/// source schema's class owners (empty unless the source is 10.2).
 pub fn normalize(
     rules: &[&Rule],
     suffix: &str,
     source_side: bool,
     entries: &mut [Vec<u8>],
+    owners: &ClassOwners,
 ) -> Vec<usize> {
     rules
         .iter()
@@ -237,6 +286,12 @@ pub fn normalize(
                     .iter_mut()
                     .filter_map(drop_deduplicate_level)
                     .count(),
+                Rewrite::OwnerQualifiedNames => {
+                    v10_2::owner_qualified_names(suffix, entries, owners)
+                }
+                Rewrite::ViewQueryOnePass => v10_2::view_query_one_pass(entries),
+                Rewrite::DontReuseOid => v10_2::dont_reuse_oid(entries),
+                Rewrite::OwnerQualifiedText => v10_2::owner_qualified_text(suffix, entries),
             }
         })
         .collect()

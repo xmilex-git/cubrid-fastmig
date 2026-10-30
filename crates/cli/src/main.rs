@@ -25,6 +25,7 @@ mod temp_disk_choice;
 mod template_extract;
 mod unload_files;
 mod unload_normalize;
+mod unload_rules_10_2;
 mod unload_rules_before_11_4;
 mod verify;
 mod volume_dirs;

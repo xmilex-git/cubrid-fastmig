@@ -22,6 +22,12 @@ the 11.2 serial `current_val`/`started` pair that 11.2 `unloaddb` prints as the 
 | position of a started serial with a cache (`START WITH` in the unload) | ahead by `CACHE` × `INCREMENT`: loaddb runs the unload's `SELECT [s].NEXT_VALUE`, which reserves a cache block and stores its end (`s_invoice` 2545 → 2590, CACHE 10, INCREMENT 5); a restart skips the unused values | the source's `current_val`/`started`: the next value is the one the source would give (2550) | 10.2..11.3 to 11.4 (measured on 11.4.6, T4 11.3·11.2, workspace#552); develop's loaddb runs the same statement, not measured | the target goes on where the source stopped; nothing is skipped | workspace#552 |
 | OBJECT value naming a row of a system table whose rows keep their slots (`_db_stored_procedure`, `_db_stored_procedure_args`, `_db_user`, `_db_serial`) | NULL: `unloaddb` prints a reference to a system class row as NULL | the same OID, which names the migrated row (on develop `t.p = s` finds `dba.put_line2` and its argument row) | 10.2..11.3 (measured on 10.2.18, 11.2.9, 11.3.6) | placement preservation keeps every OID (ADR 0002), and those rows are rewritten in their own slots (workspace#482 decision 1), so the reference stays valid and the verifier checks it | workspace#554; fixture `basedb/old-source-edge-cases/` m |
 
+In a set comparison of a 10.2 source's own unload with the target's, the normalization rule `owner-qualified-text`
+drops only the owner of a qualified name in a view or trigger text; what the qualification adds besides it stays and is
+the "print shape" row above: the alias kept for a bare-name reference (`update [t2] set` → `update [t2] [t2] set`)
+and the bracketed procedure call (`sp2(` → `[sp2](`). Fixtures a and b of `basedb/owner-qualified-names-102` show one
+trigger entry each and nothing else (workspace#555).
+
 Not listed here because a decision fixes them as rules, not as kept source state: `_db_serial.start_val` NULL for a
 started serial (workspace#482 decision 8; the official path writes the declared start), and new `created_time` /
 `updated_time` values (the migrate start, in local time like the engine, workspace#543; the official path writes the
