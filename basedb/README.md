@@ -11,10 +11,21 @@ and in later tickets stops matching. P1 and every later step start from the pris
 taken with `cp -a --reflink=always <BASEDB_ROOT>/<label>/pristine/<variant> <your dir>`.
 
 A pristine copy still names the **registered** DB: its `_vinf` and every volume header hold absolute paths under
-`<BASEDB_ROOT>/<label>/<variant>/`. Never run an engine utility (`addvoldb`, `csql -S`, a server) on such a copy:
-the engine follows those paths and writes into the registered DB (workspace#494 did this once with `addvoldb -S`;
-the three changed files were restored from pristine). Read a copy with `cubrid-fastmig migrate
---volumes-in-first-dir`, or migrate it first — the target's headers and `_vinf` carry the target's paths.
+`<BASEDB_ROOT>/<label>/<variant>/`. An engine run on a plain copy follows those paths and writes into the registered
+DB (workspace#494 did this once with `addvoldb -S`), and `cubrid deletedb` on it deletes the registered volumes and
+log (workspace#515; both restored from pristine). So:
+
+- **When the engine opens a copy, the copy comes only from this helper** (`csql`, a server, any utility):
+
+  ```sh
+  bash basedb/safe_copy.sh <BASEDB_ROOT>/<label>/pristine/<variant> <new dir>   # then CUBRID_DATABASES=<new dir>
+  ```
+
+  It reflink-copies, rewrites `_vinf` to the copy's directory, writes the copy's `databases.txt` and prints the
+  rewritten `_vinf`. The volume headers keep the old paths (the engine reads `_vinf` first).
+- cubrid-fastmig reads a copy with `--volumes-in-first-dir`; `plan` and `migrate` refuse a source that reads a
+  volume from another directory while a file of that name lies next to volume 0.
+- Remove a copy by its literal path with `rm -rf`, never with `cubrid deletedb`.
 
 ## Run
 
