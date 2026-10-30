@@ -224,14 +224,25 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         r => r?,
     };
     let mem = Limits::from(&p, &o.target_dir)?.memory_limit_bytes;
-    let mut est = resource_estimate::estimate(
+    let mut est = match resource_estimate::estimate(
         &s.vols,
         plan.version_pair,
         plan.source_version,
         lob_base_dir(&s.entry).map_err(io::Error::other)?.as_deref(),
         limits::worker_limit(&p)?,
         limits::physical_memory()?,
-    )?;
+    ) {
+        // the estimate encodes what the run writes, so a class the plan refused (a 10.2 stream with F_BENCHMARK,
+        // workspace#540) can stop it too: the refusals are the answer, exit 1 like migrate
+        Err(e) if !plan.refusals.is_empty() => {
+            println!(
+                "the plan refuses the migration:\n  {}\n(no resource estimate: {e})",
+                plan.refusals.join("\n  ")
+            );
+            return Ok(1);
+        }
+        r => r?,
+    };
     est.source_groups = verify::source_key_groups(&s, o.locate, est.workers)?;
     if p.switch("--verify") {
         let (bytes, pages) = verify::source_pair_bytes(&s, o.locate, est.workers)?;

@@ -337,13 +337,6 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             warnings.push(line);
         }
     }
-    // 10.2 values read (workspace#520), names and texts owner-qualified (workspace#544), TDE metadata written
-    // (workspace#515), system class roles (workspace#549); still open: workspace#540, whose partition streams the
-    // resource estimate below would fail on instead of refusing. Past this gate a 10.2 plan runs whole (#549 scratch
-    // run: T4 10.2 clean/dirty and fixtures b, c, e migrate with verify 0 once the streams pass)
-    if pair.source == VersionLine::V10_2 {
-        return Err(io::Error::other(Refused { refusals, warnings }));
-    }
     let mut system_name_rewrites = Vec::new();
 
     // the log and the volumes: one cleanly shut down database

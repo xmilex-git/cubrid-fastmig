@@ -41,13 +41,6 @@ struct Parser<'a> {
 
 /// Parses `stream`, written by `line`.
 pub fn parse(line: VersionLine, stream: &[u8]) -> DecodeResult<StreamTree> {
-    // 10.2 numbers OPERATOR_TYPE differently (R13); its remap is workspace#540
-    if line == VersionLine::V10_2 {
-        return Err(DecodeError {
-            at: 0,
-            what: "10.2 partition streams are not read yet (workspace#540)".into(),
-        });
-    }
     let mut p = Parser {
         line,
         stream,
