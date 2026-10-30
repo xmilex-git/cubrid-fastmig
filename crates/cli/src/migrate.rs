@@ -522,7 +522,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         if pair.regenerates_catalog(src.version) {
             let prepared = catalog_regeneration::prepare(
                 &space,
-                src.version,
+                &plan,
                 &target_keys,
                 &src.log,
                 src_lob_base.as_deref(),

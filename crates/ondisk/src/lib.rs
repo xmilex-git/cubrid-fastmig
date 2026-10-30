@@ -2,12 +2,14 @@
 //!
 //! Names follow GLOSSARY.md terms (in English); words a GLOSSARY entry lists under _Avoid_ are not used.
 
+pub mod base64;
 pub mod boot_parm;
 pub mod btree;
 pub mod catalog_dir;
 pub mod class_object;
 pub mod crc32;
 pub mod databases_txt;
+pub mod dblink_password;
 pub mod extdata;
 pub mod file_alloc;
 pub mod file_header;

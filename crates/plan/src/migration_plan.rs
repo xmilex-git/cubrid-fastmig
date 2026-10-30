@@ -47,6 +47,7 @@ use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, Vfid, Vpid, Vsid, fi
 
 use crate::compare_rule_mismatch::{self, OldRules, OwnerNames};
 use crate::copy_method::{self, CopyMethod};
+use crate::dblink_passwords::{ServerPasswords, server_passwords};
 use crate::execute_grants::{ExecuteGrants, execute_grants};
 use crate::free_space;
 use crate::keyinfo_heap_room::Volume0Room;
@@ -138,8 +139,12 @@ pub struct Plan {
     /// `<dest>/fastmig/deferred-indexes.sql`.
     pub deferred_indexes_sql: String,
     /// `<dest>/fastmig/post-migration-fixes.sql`: the target-side fixes of the compare rule mismatches (workspace#541)
-    /// and the EXECUTE grants other-owner procedure calls need (workspace#545); empty when there is none.
+    /// and the EXECUTE grants other-owner procedure calls need (workspace#545), and the ALTER SERVER of each DBLink
+    /// password no key opened (workspace#556); empty when there is none.
     pub post_migration_fixes_sql: String,
+    /// `_db_server` row → the password value the target stores (re-wrapped, or empty when no key opened it;
+    /// workspace#556). Never printed.
+    pub server_passwords: HashMap<Oid, Vec<u8>>,
     /// `<dest>/fastmig/recompile-plcsql.sql`.
     pub recompile_plcsql_sql: String,
     pub plcsql_routines: usize,
@@ -568,6 +573,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
 
     let mut new_heaps_bound = 0usize;
     let mut grants = ExecuteGrants::default();
+    let mut servers = ServerPasswords::default();
     // catalog regeneration inputs that refuse: collations, default values (regenerates-line only)
     if regenerates {
         let charset = i.vols.volume(0)?.header.db_charset as u8;
@@ -680,6 +686,15 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         let qualified = deferred_indexes(&mapped, line)?;
         let items: Vec<_> = qualified.iter().map(|(c, k)| (*c, k)).collect();
         deferred_sql = deferred_indexes_sql(&items, line).map_err(invalid)?;
+        // DBLink passwords under the source key: re-wrapped for develop (workspace#556)
+        servers = server_passwords(
+            i.vols,
+            i.target_line,
+            &rows_of(i.vols, line, &classes, SystemTable::DbServer)?,
+            &rows_of(i.vols, line, &classes, SystemTable::DbUser)?,
+            &i.source.vol_path.join(format!("{}_keys", i.source.name)),
+        )?;
+        warnings.extend(servers.warning.clone());
         // PL/CSQL keeps its compiled code, which develop cannot recompile from a rewritten source (workspace#542)
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedureCode)? {
             let name = stored_procedure_code::name(&r.values)
@@ -938,8 +953,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         post_migration_fixes_sql: post_migration_fixes_sql(&[
             &mismatch.post_migration_fixes_sql,
             &grants.fix_sql,
+            &servers.fix_sql,
         ]),
         recompile_plcsql_sql: recompile_plcsql_sql(&routines),
+        server_passwords: servers.values,
         plcsql_routines: routines.len(),
         lob,
         java,

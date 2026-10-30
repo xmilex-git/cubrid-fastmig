@@ -87,6 +87,49 @@ fn crypt_data_key(master: &Key, t: DataKeyType, k: &[u8; KEY_LEN]) -> [u8; KEY_L
     out
 }
 
+/// The log data key of a source database (`tde_Cipher.data_keys.log_key` once its TDE module is loaded). From 11.2 to
+/// 11.4 it is also the key of every stored DBLink server password ([`crate::dblink_password`], workspace#556); nothing
+/// else in the tool reads it.
+pub struct LogKey(Key);
+
+impl LogKey {
+    /// The key a source without a loaded TDE module used: its `dblink_Cipher.crypt_key` stays zero-initialized
+    /// (release/11.4 crypt_opfunc.c:734, `dblink_get_cipher_master_key` fails with ER_TDE_CIPHER_IS_NOT_LOADED).
+    pub fn zero() -> Self {
+        LogKey(Key([0; KEY_LEN]))
+    }
+
+    /// The log key from a source's `_keys` file and its keyinfo record (the one record of the
+    /// `BOOT_DB_PARM.tde_keyinfo_hfid` heap), as `tde_load_mk` + `tde_decrypt_dk` load it; `None` when the record names
+    /// no item of the file or the item's master key does not hash to the record's `mk_hash`.
+    pub fn read(keys_file: &[u8], keyinfo_record: &[u8]) -> Option<Self> {
+        let (ki, _) = KeyInfoLe::ref_from_prefix(keyinfo_record.get(4..)?).ok()?;
+        let at =
+            KEYS_MAGIC_SIZE + usize::try_from(ki.mk_index.get()).ok()? * size_of::<MkFileItemLe>();
+        let (item, _) = MkFileItemLe::ref_from_prefix(keys_file.get(at..)?).ok()?;
+        let master = Key(item.master_key);
+        if item.created_time.get() == -1
+            || <[u8; KEY_LEN]>::from(Sha256::digest(master.0)) != ki.mk_hash
+        {
+            return None;
+        }
+        Some(LogKey(Key(crypt_data_key(
+            &master,
+            DataKeyType::Log,
+            &ki.dk_log,
+        ))))
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8; KEY_LEN] {
+        &self.0.0
+    }
+}
+
+/// AES-256-CTR under a raw 256-bit key, for the DBLink password re-wrap ([`crate::dblink_password`]).
+pub(crate) fn aes256_ctr_raw(key: &[u8; KEY_LEN], iv: &[u8; 16], buf: &mut [u8]) {
+    ctr::Ctr128BE::<Aes256>::new(key.into(), iv.into()).apply_keystream(buf);
+}
+
 /// The keys of one database: what `tde_initialize` creates for a new one.
 pub struct TdeKeySet {
     master: Key,

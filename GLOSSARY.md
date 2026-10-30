@@ -117,12 +117,16 @@ _Avoid_: 이름 치환, 시스템 뷰 검사(옛 G1 거부·경고만 하던 검
 _Avoid_: 공백 버그, 데이터 손상, 정합성 오류
 
 **사후 정리 SQL (post-migration fixes)**:
-`<dest>/fastmig/post-migration-fixes.sql`. 비교 규칙 어긋남마다 도착에서 DBA가 검토 후 실행할 문장: HASH는 `REMOVE PARTITIONING` + `PARTITION BY HASH`, LIST·RANGE는 모든 파티션을 한 문장으로 `REORGANIZE PARTITION`(LIST는 행이 가진 값을 목록에 더한다), FK는 짝 없는 자식을 찾는 조회문. 그리고 다른 owner SP 호출마다 필요한 `GRANT EXECUTE ON PROCEDURE [owner.sp] TO [caller];`(같은 SP·호출자 쌍은 한 문장). 둘 다 없으면 빈 파일이다.
+`<dest>/fastmig/post-migration-fixes.sql`. 비교 규칙 어긋남마다 도착에서 DBA가 검토 후 실행할 문장: HASH는 `REMOVE PARTITIONING` + `PARTITION BY HASH`, LIST·RANGE는 모든 파티션을 한 문장으로 `REORGANIZE PARTITION`(LIST는 행이 가진 값을 목록에 더한다), FK는 짝 없는 자식을 찾는 조회문. 그리고 다른 owner SP 호출마다 필요한 `GRANT EXECUTE ON PROCEDURE [owner.sp] TO [caller];`(같은 SP·호출자 쌍은 한 문장). 서버 비밀번호 다시 감싸기가 열지 못한 DBLink 서버마다 값 없는 `ALTER SERVER [owner].[name] CHANGE PASSWORD` 주석. 모두 없으면 빈 파일이다.
 _Avoid_: 수정 스크립트, 패치 SQL(페이지 처리 등급 patch와 섞인다)
 
 **다른 owner SP 호출 (other-owner procedure call)**:
 11.4 미만 출발에서 뷰 query spec이나 trigger condition·action이 다른 owner의 저장 프로시저를 부르는 것. 텍스트 owner가 DBA 그룹이면 해당하지 않는다. 11.4 미만에는 `GRANT EXECUTE`가 없어 누구나 모든 SP를 불렀다. develop은 owner가 아닌 호출자에게 EXECUTE를 요구한다. 그래서 그대로 옮기면 그 뷰·trigger가 "EXECUTE authorization failure"로 실패한다. 공식 경로처럼 도구는 권한을 만들지 않는다. plan이 경고하고, 사후 정리 SQL에 GRANT 문을 낸다(G11 [workspace#545](https://github.com/xmilex-git/workspace/issues/545)).
 _Avoid_: 권한 누락, EXECUTE 결함
+
+**서버 비밀번호 다시 감싸기 (server password re-wrap)**:
+11.2~11.4 출발의 DBLink 서버 비밀번호(`_db_server.password`)를 develop이 읽는 형식으로 바꾸는 일. 11.2~11.4는 비밀번호를 그 DB의 TDE log data key로 암호화해 두고 문자열 안의 개인 키를 비워 둔다. develop은 개인 키가 문자열에 든 형식만 읽고, 빈 키에서는 assert한다. 도구는 출발 `<db>_keys`와 keyinfo 레코드로 log key를 풀고(없으면 엔진처럼 0 키) AES 층만 벗겨 develop 형식으로 다시 감싼다. 안의 비밀번호 바이트(엔진이 섞어 둔 것)는 그대로 두고 평문을 만들지 않는다. 어느 키로도 열리지 않으면 빈 값으로 두고, plan이 경고하며 사후 정리 SQL에 값 없는 `ALTER SERVER` 주석을 낸다. 도착이 11.4이거나 develop → develop이면 형식이 같아 손대지 않는다. TDE 지원이 아니다: 암호화된 출발은 여전히 거부하고, 이 키는 서버 비밀번호에만 쓴다([workspace#556](https://github.com/xmilex-git/workspace/issues/556)).
+_Avoid_: 비밀번호 복호화, 비밀번호 이관
 
 ## 검증과 원본 삭제
 

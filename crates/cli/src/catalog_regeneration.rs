@@ -20,6 +20,8 @@ use fastmig_catalog::same_version_catalog::{
     write_classes_and_catalog,
 };
 use fastmig_catalog::source_catalog::SourceCatalog;
+use fastmig_catalog::system_rows::server;
+use fastmig_catalog::system_table::SystemTable;
 use fastmig_catalog::template::CatalogTemplate;
 use fastmig_catalog::template_store::builtin;
 use fastmig_index::memory_limit::MemoryLimit;
@@ -35,6 +37,7 @@ use fastmig_ondisk::heap_rewrite::{HeapReport, VacuumHorizon};
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::{Btid, Oid, SourceVersion, VersionLine};
 use fastmig_ondisk::{tde_metadata, vacuum_data};
+use fastmig_plan::Plan;
 use fastmig_progress::Meter;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -109,20 +112,32 @@ impl Prepared {
 
 /// Frees the old catalog files, treats the user heaps (page-treatment phase), places the catalog and writes its rows.
 /// `tde_keys`: where a source without TDE metadata (10.2) gets its new `_keys` file.
+/// `plan`: the source version and the DBLink password per `_db_server` row (workspace#556).
 pub fn prepare(
     space: &SpaceManager,
-    src_version: SourceVersion,
+    plan: &Plan,
     tde_keys: &Path,
     src_log: &LogHeader,
     src_lob_base: Option<&Path>,
     worker_limit: usize,
     meter: Meter,
 ) -> io::Result<Prepared> {
+    let src_version = plan.source_version;
     let vols = space.volumes();
     let (_, boot) = BootDbParm::read(vols)?;
     // everything the regeneration reads from the source catalog, before the first write
     let target = space.line();
-    let source = SourceCatalog::read(vols, src_version, target)?;
+    let mut source = SourceCatalog::read(vols, src_version, target)?;
+    for r in source
+        .same_slot
+        .get_mut(&SystemTable::DbServer)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(p) = plan.server_passwords.get(&r.oid) {
+            server::set_password(&mut r.values, p.clone());
+        }
+    }
     let template = builtin(target, source.charset).ok_or_else(|| {
         io::Error::other(format!(
             "no catalog template for charset {}",

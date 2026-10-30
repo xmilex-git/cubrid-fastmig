@@ -234,3 +234,26 @@ pub mod index_key {
         object(r.get("index_of"))
     }
 }
+
+/// `_db_server` (11.2 on).
+pub mod server {
+    use super::{Values, object, text};
+    use fastmig_ondisk::Oid;
+    use fastmig_ondisk::value::Value;
+
+    pub fn link_name(r: &Values) -> Option<&[u8]> {
+        text(r.get("link_name"))
+    }
+
+    pub fn owner(r: &Values) -> Option<Oid> {
+        object(r.get("owner"))
+    }
+
+    pub fn password(r: &Values) -> Option<&[u8]> {
+        text(r.get("password"))
+    }
+
+    pub fn set_password(r: &mut Values, password: Vec<u8>) {
+        r.insert("password".into(), Value::Varchar(password));
+    }
+}
