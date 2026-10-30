@@ -12,6 +12,7 @@ pub mod lob_manifest;
 pub mod new_log;
 pub mod new_log_start;
 pub mod out_of_volume_asset;
+pub mod own_blocks;
 pub mod register_db;
 pub mod source_lock;
 pub mod volinfo;

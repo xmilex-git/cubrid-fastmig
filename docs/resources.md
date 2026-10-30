@@ -137,7 +137,10 @@ The verifier read the whole active log to parse its header (64 MiB on T1); it re
   page treatment, exact) and batches by those counts.
 - With `--verify`, min and max are both verify min.
 - Over a target a killed run left (`FASTMIG_INCOMPLETE`), the free space counts the files that run listed on the
-  target filesystem as free: the rerun removes them before it writes (`incomplete_marker::reclaimable_bytes`).
+  target filesystem as free: the rerun removes them before it writes (`incomplete_marker::reclaimable_bytes`). Only
+  their own blocks count (FIEMAP extents without `FIEMAP_EXTENT_SHARED`, `own_blocks::own_bytes`): a cloned
+  volume gives back what it unshared, not its size (T1 develop dirty killed after its arena: 133,562,368 B credited
+  against 133,599,232 B unshared by `filefrag`, the listed files 366,426,843 B in size).
   Without it a rerun on a filesystem the first run filled was refused. A spill arena left in a spill directory
   on another filesystem is not counted.
 

@@ -15,6 +15,8 @@
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
+
+use crate::own_blocks::own_bytes;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -131,7 +133,8 @@ impl IncompleteMarker {
     }
 }
 
-/// Bytes the files a previous run listed in `target_dir`'s marker hold on `target_dir`'s filesystem: a rerun
+/// Bytes the files a previous run listed in `target_dir`'s marker hold on `target_dir`'s filesystem and share with
+/// no other file (a clone's shared blocks stay with its source): a rerun
 /// removes them before it writes, so its free-space check counts them as free (workspace#526: a rerun after a kill
 /// on a filesystem the first run filled was refused). 0 without a marker.
 pub fn reclaimable_bytes(target_dir: &Path) -> io::Result<u64> {
@@ -141,12 +144,18 @@ pub fn reclaimable_bytes(target_dir: &Path) -> io::Result<u64> {
         Err(e) => return Err(e),
     };
     let dev = fs::metadata(target_dir)?.dev();
-    Ok(listed
-        .lines()
-        .filter_map(|l| fs::symlink_metadata(l.strip_prefix(SCRATCH).unwrap_or(l)).ok())
-        .filter(|m| m.is_file() && m.dev() == dev)
-        .map(|m| m.blocks() * 512)
-        .sum())
+    let mut bytes = 0;
+    for l in listed.lines() {
+        let p = Path::new(l.strip_prefix(SCRATCH).unwrap_or(l));
+        let Ok(m) = fs::symlink_metadata(p) else {
+            continue;
+        };
+        if m.is_file() && m.dev() == dev {
+            // a cloned volume gives back only the blocks it no longer shares
+            bytes += own_bytes(&File::open(p)?)?;
+        }
+    }
+    Ok(bytes)
 }
 
 /// Removes the paths a previous run listed, newest first, so directories are empty by the time they are reached.
