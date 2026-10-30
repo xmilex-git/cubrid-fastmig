@@ -1,7 +1,7 @@
 //! What regeneration does with each system class: keep its slot, allocate it anew, create it, or drop it.
 //!
-//! Input: a system class name in the source (11.4; 11.2/11.3 lack one same-slot table) or target (develop) catalog,
-//! and the source version. Output: its [`SystemClassRole`]
+//! Input: a system class name in the source (11.4; 11.2/11.3 lack one same-slot table, 10.2 three and `dual`) or
+//! target (develop) catalog, and the source version. Output: its [`SystemClassRole`]
 //! and, for a kept class, its develop name.
 //! Source: decision workspace#482 1 (classification); names from the T1 11.4 DB and the develop catalog template
 //! (49 system classes in 11.4, 74 in develop: 30 tables, 25 system views, 19 `INFORMATION_SCHEMA` views); R4.
@@ -71,17 +71,20 @@ pub const NEW: [SystemTable; 2] = [SystemTable::DbHistogram, SystemTable::DbGlob
 /// 11.4 tables develop lacks.
 pub const DROPPED: [SystemTable; 1] = [SystemTable::DbAuthorizations];
 
-/// Same-slot tables of [`SAME_SLOT`] a source version does not have: 10.2 to 11.3 have no
+/// Tables of [`SAME_SLOT`] and [`REALLOCATED`] a source version does not have: 10.2 to 11.3 have no
 /// `_db_stored_procedure_code` (added with the stored procedure redesign, 1ea4a86e0 #5438; R8 § 2.11). Their develop
-/// class comes from the template with an empty heap, like a [`SystemClassRole::New`] one.
-pub fn absent_same_slot(version: SourceVersion) -> &'static [SystemTable] {
+/// class comes from the template in a new slot, like a [`SystemClassRole::New`] one, with an empty heap or, for
+/// `dual`, the template row ([`crate::static_rows`]).
+pub fn absent_tables(version: SourceVersion) -> &'static [SystemTable] {
     match version {
         SourceVersion::V11_2 | SourceVersion::V11_3 => &[SystemTable::DbStoredProcedureCode],
-        // 10.2 has neither synonyms nor DBLink servers (R8 § 2; the T4 10.2 root heap has no such class, workspace#544)
+        // 10.2 has neither synonyms nor DBLink servers nor `dual` (a system class since 11.0, R10 § 5); the T4 10.2
+        // root heap has none of the four (workspace#544, workspace#549)
         SourceVersion::V10_2 => &[
             SystemTable::DbStoredProcedureCode,
             SystemTable::DbSynonym,
             SystemTable::DbServer,
+            SystemTable::Dual,
         ],
         SourceVersion::V11_0 | SourceVersion::V11_4 | SourceVersion::Develop => &[],
     }
@@ -91,7 +94,7 @@ pub fn absent_same_slot(version: SourceVersion) -> &'static [SystemTable] {
 pub fn same_slot(version: SourceVersion) -> impl Iterator<Item = SystemTable> {
     SAME_SLOT
         .into_iter()
-        .filter(move |t| !absent_same_slot(version).contains(t))
+        .filter(move |t| !absent_tables(version).contains(t))
 }
 
 /// Role of a system class of the source (11.4) catalog, by its name; `None` for a name this table does not know.
@@ -119,10 +122,10 @@ pub fn target_role(name: &str, is_view: bool, version: SourceVersion) -> Option<
         return Some(SystemClassRole::View);
     }
     let named = |t: &SystemTable| t.develop_name() == Some(name);
+    if absent_tables(version).iter().any(named) {
+        return Some(SystemClassRole::New);
+    }
     if let Some(&table) = SAME_SLOT.iter().find(|t| named(t)) {
-        if absent_same_slot(version).contains(&table) {
-            return Some(SystemClassRole::New);
-        }
         return Some(SystemClassRole::SameSlot { table });
     }
     if REALLOCATED.iter().any(named) {

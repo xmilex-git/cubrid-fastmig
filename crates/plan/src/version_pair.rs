@@ -28,8 +28,7 @@ impl VersionPair {
             (VersionLine::V11_4, VersionLine::Develop) => None,
             // 10.2 values are read (workspace#520); what the target still lacks is named by the ticket that adds it
             (VersionLine::V10_2, VersionLine::Develop) => Some(
-                "source 10.2: system class roles (workspace#549) not written yet; partition streams \
-                 (workspace#540) not handled yet"
+                "source 10.2: partition streams (workspace#540) not handled yet"
                     .into(),
             ),
             (s, t) => Some(format!(
