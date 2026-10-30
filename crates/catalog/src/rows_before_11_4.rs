@@ -11,8 +11,9 @@
 //!   authenticate_grant.cpp:1944@release/11.4; `get_grants` filter); entries of one (class, grantor) merge their
 //!   cache by OR. A third user who granted with grant option stays the grantor (map supervisor decision (b): the
 //!   engine's unload → load path makes it the owner; this is a reported intended difference).
-//! - `_db_stored_procedure`: `unique_name` = lower(owner name) + "." + `sp_name` (`change_sp_owner`), `target` split
-//!   by [`split_target_signature`], `pkg_name` NULL, `is_system_generated` 0, `directive` 0.
+//! - `_db_stored_procedure`: `target` split by [`split_target_signature`], `pkg_name` NULL, `is_system_generated` 0,
+//!   `directive` 0; `unique_name` = lower(owner name) + "." + `sp_name` (`change_sp_owner`) is set by
+//!   `owner_qualification`, which knows the engine lowercase of the database locale.
 //! - `_db_stored_procedure_args`: `sp_of` = the procedure whose `args` holds the row, `sp_name` dropped,
 //!   `is_system_generated` 0, `default_value` NULL, `is_optional` 0.
 //! - `db_serial.att_name` → `attr_name` (b85c07b27 #5346).
@@ -132,7 +133,7 @@ pub fn to_11_4_shape(
 fn procedure(r: &mut Row, users: &Users, sp_of: &mut HashMap<Oid, Oid>) -> DecodeResult<()> {
     let sp_name = stored_procedure::sp_name(&r.values)
         .ok_or_else(|| err(format!("procedure {:?} without sp_name", r.oid)))?;
-    let owner = object(stored_procedure::owner(&r.values))
+    object(stored_procedure::owner(&r.values))
         .and_then(|o| users.by_oid.get(&o))
         .ok_or_else(|| {
             err(format!(
@@ -140,7 +141,6 @@ fn procedure(r: &mut Row, users: &Users, sp_of: &mut HashMap<Oid, Oid>) -> Decod
                 String::from_utf8_lossy(sp_name)
             ))
         })?;
-    let unique_name = [owner.0.to_ascii_lowercase().as_slice(), b".", sp_name].concat();
     let target = stored_procedure::target(&r.values).unwrap_or_default();
     let (class, method) = split_target_signature(target).ok_or_else(|| {
         err(format!(
@@ -158,7 +158,6 @@ fn procedure(r: &mut Row, users: &Users, sp_of: &mut HashMap<Oid, Oid>) -> Decod
     }
     let v = &mut r.values;
     v.remove("target");
-    v.insert("unique_name".into(), Value::Varchar(unique_name));
     v.insert("target_class".into(), Value::Varchar(class));
     v.insert("target_method".into(), Value::Varchar(method));
     v.insert("pkg_name".into(), Value::Null);

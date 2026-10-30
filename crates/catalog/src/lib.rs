@@ -45,3 +45,4 @@ pub mod template;
 pub mod template_class;
 pub mod template_extract;
 pub mod template_store;
+pub mod unicode_identifier_lower;

@@ -248,15 +248,7 @@ fn owner_names(
     let casing = IdentifierCasing::of(vs.volume(0)?.header.db_charset as u8, &lang);
     Ok(rows_of(vs, line, classes, SystemTable::DbUser)?
         .into_iter()
-        .filter_map(|r| {
-            // the pre-check refuses an owner this casing cannot lower (P7)
-            user::name(&r.values).map(|n| {
-                (
-                    r.oid,
-                    casing.lower(n).unwrap_or_else(|| n.to_ascii_lowercase()),
-                )
-            })
-        })
+        .filter_map(|r| user::name(&r.values).map(|n| (r.oid, casing.lower(n))))
         .collect())
 }
 

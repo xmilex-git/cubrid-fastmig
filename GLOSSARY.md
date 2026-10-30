@@ -21,7 +21,7 @@ _Avoid_: 업그레이드 경로, 홉
 _Avoid_: 소스 버전, DB 버전
 
 **소유자 한정 이름 (owner-qualified name)**:
-11.2부터 클래스·serial·trigger(11.4부터 SP도)가 갖는 `lower(owner).name` 형식의 이름. 11.2 미만 출발 DB의 이름에는 소유자가 없어 도착에서 붙인다. `lower`는 엔진 `intl_identifier_lower`와 같다(UTF-8 `en_US`·`ko_KR`·EUC-KR은 A-Z만, ISO-8859-1은 Latin-1 대문자도, `tr_TR`은 터키 문자). 뷰 spec·trigger condition·action·파티션 식 안의 클래스·SP·serial 참조도 공식 경로처럼 `[owner.name]`으로 한정한다(serial은 엔진의 `[dba.s]` 대신 실제 owner, 의도된 차이; [workspace#544](https://github.com/xmilex-git/workspace/issues/544)). 붙인 결과가 develop 한도(이름 222 B, SP 254 B)를 넘거나, `.`을 포함하거나, develop 시스템 이름과 겹치면 plan이 거부한다(P1~P6, 로케일 라이브러리 로케일의 비ASCII owner는 P7, [workspace#518](https://github.com/xmilex-git/workspace/issues/518), 근거 R10 [workspace#511](https://github.com/xmilex-git/workspace/issues/511)).
+11.2부터 클래스·serial·trigger(11.4부터 SP도)가 갖는 `lower(owner).name` 형식의 이름. 11.2 미만 출발 DB의 이름에는 소유자가 없어 도착에서 붙인다. `lower`는 엔진 `intl_identifier_lower`와 같다(UTF-8 `en_US`·`ko_KR`·EUC-KR은 A-Z만, ISO-8859-1은 Latin-1 대문자도, `tr_TR`은 터키 문자, 그 밖의 UTF-8 로케일(로케일 라이브러리)은 엔진 `unicodedata.txt`의 BMP 대문자 단순 소문자). 뷰 spec·trigger condition·action·파티션 식 안의 클래스·SP·serial 참조도 공식 경로처럼 `[owner.name]`으로 한정한다(serial은 엔진의 `[dba.s]` 대신 실제 owner, 의도된 차이; [workspace#544](https://github.com/xmilex-git/workspace/issues/544)). 11.2·11.3 출발은 클래스·serial이 이미 한정돼 있고, SP `unique_name`과 텍스트 안 SP 호출만 `[owner.sp]`로 한정한다([workspace#517](https://github.com/xmilex-git/workspace/issues/517)). 붙인 결과가 develop 한도(이름 222 B, SP 254 B)를 넘거나, `.`을 포함하거나, develop 시스템 이름과 겹치면 plan이 거부한다(P1~P6, [workspace#518](https://github.com/xmilex-git/workspace/issues/518), 근거 R10 [workspace#511](https://github.com/xmilex-git/workspace/issues/511)).
 _Avoid_: unique name(엔진 칼럼 이름으로만), 전체 이름
 
 **기준 DB (baseline database)**:
