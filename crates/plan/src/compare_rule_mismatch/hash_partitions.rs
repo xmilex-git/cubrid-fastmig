@@ -1,5 +1,6 @@
-//! HASH partitions of a 10.2 source whose rows develop pruning looks for in another partition: a CHAR/VARCHAR key
-//! of a collation whose hash weighs the space (1, 3, 4, 5, 6, 7) with a space left once the trailing ones are cut.
+//! HASH partitions of a 10.2 source whose rows develop pruning looks for in another partition: a CHAR/VARCHAR or
+//! NCHAR/VARNCHAR key of a collation whose hash weighs the space (1, 3, 4, 5, 6, 7) with a space left once the
+//! trailing ones are cut.
 //!
 //! Input: one HASH [`Partitioning`] of a 10.2 source. Output: a [`Finding`] when rows sit apart from where develop
 //! hashes them, or when the key is an expression this tool does not evaluate.
@@ -31,7 +32,15 @@ pub fn check(vs: &VolumeSet, p: &Partitioning, owners: &OwnerNames) -> io::Resul
     let Some(d) = attr_domain(&p.root.class, &p.key_column) else {
         return Ok(None);
     };
-    let string_key = d.type_id == DbType::Varchar as i32 || d.type_id == DbType::Char as i32;
+    // NCHAR and VARNCHAR hash like CHAR and VARCHAR and become them on develop (workspace#554)
+    let string_key = [
+        DbType::Char,
+        DbType::Varchar,
+        DbType::Nchar,
+        DbType::Varnchar,
+    ]
+    .iter()
+    .any(|t| d.type_id == *t as i32);
     if !string_key || !space_weight_changes_hash(d.collation_id) {
         return Ok(None);
     }

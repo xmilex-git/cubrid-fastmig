@@ -1,5 +1,5 @@
 //! The compare rule mismatch pre-check: rows a source placed or matched under its older string rules that
-//! develop's rules place or match differently — HASH partitions (10.2), VARCHAR foreign keys and LIST/RANGE
+//! develop's rules place or match differently — HASH partitions (10.2), VARCHAR/VARNCHAR foreign keys and LIST/RANGE
 //! partitions (10.2, or a source run with `ignore_trailing_space=yes`). Each is a warning, and the SQL that fixes
 //! it on the target goes to `<dest>/fastmig/post-migration-fixes.sql`.
 //!

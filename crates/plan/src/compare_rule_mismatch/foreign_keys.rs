@@ -184,7 +184,7 @@ pub fn check(
     Ok(Some(Finding {
         warning: format!(
             "compare rule mismatch: foreign key {fk_name} of {ct}: {orphans} rows (e.g. {}) match a {pt} key only \
-             with trailing spaces ignored; develop finds no parent for them (cascades and checks skip them); \
+             with trailing spaces and NULs ignored; develop finds no parent for them (cascades and checks skip them); \
              fix: fastmig/post-migration-fixes.sql (workspace#541)",
             sample.unwrap_or_default()
         ),

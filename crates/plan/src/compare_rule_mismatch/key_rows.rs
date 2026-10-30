@@ -82,21 +82,21 @@ pub fn attr_domain<'c>(c: &'c ClassObject, name: &[u8]) -> Option<&'c SchemaDoma
         .and_then(|a| a.domain.first())
 }
 
-/// The develop compare of a VARCHAR column whose equality 10.2 drew wider, or `None` for a column the rule change
-/// does not touch: CHAR compares with trailing spaces ignored on both lines, `binary` (9) keeps spaces on both,
-/// an LDML collation is refused by the index pre-check (workspace#491), NCHAR is not settled (workspace#472 Not yet
-/// specified).
+/// The develop compare of a VARCHAR column (or a 10.2 VARNCHAR one, which develop reads as VARCHAR and 10.2 compared
+/// alike, workspace#554) whose equality 10.2 drew wider, or `None` for a column the rule change does not touch: CHAR
+/// and NCHAR compare with trailing spaces ignored on both lines, `binary` (9) keeps spaces on both, an LDML collation
+/// is refused by the index pre-check (workspace#491).
 pub fn varchar_compare(d: &SchemaDomain) -> Option<Collation> {
-    if d.type_id != DbType::Varchar as i32 {
+    if d.type_id != DbType::Varchar as i32 && d.type_id != DbType::Varnchar as i32 {
         return None;
     }
     Collation::from_id(d.collation_id).filter(|c| *c != Collation::Binary)
 }
 
-/// The string of a CHAR/VARCHAR value.
+/// The string of a CHAR/VARCHAR or NCHAR/VARNCHAR value.
 pub fn string(v: &Value) -> Option<&[u8]> {
     match v {
-        Value::Varchar(s) | Value::Char(s) => Some(s),
+        Value::Varchar(s) | Value::Char(s) | Value::Varnchar(s) | Value::Nchar(s) => Some(s),
         _ => None,
     }
 }
@@ -149,8 +149,9 @@ pub fn column(name: &[u8]) -> String {
     ident(name)
 }
 
-/// A string literal; a NUL byte cannot be written in one and shows as U+FFFD (shortcut: no such key seen in a
-/// source yet, workspace#472 Not yet specified "끝 0x00").
+/// A string literal; a NUL byte cannot be written in one and shows as U+FFFD (shortcut: develop partition bounds take
+/// plain literals only, no CHR/CONCAT/charset hex (measured workspace#554), so a LIST/RANGE fix whose bound or row
+/// holds a NUL is wrong; upgrade when a source with such a partition value shows up).
 pub fn literal(s: &[u8]) -> String {
     format!(
         "'{}'",
