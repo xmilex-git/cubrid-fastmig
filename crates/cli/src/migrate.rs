@@ -187,6 +187,9 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             plan.refusals.join("\n  ")
         ))));
     }
+    // the reads inside precheck, timed on their own (workspace#526: what the space and temp figures cost)
+    let mut pre: Vec<(&'static str, f64)> = Vec::new();
+    let t = Instant::now();
     let mut est = resource_estimate::estimate(
         &src.vols,
         plan.version_pair,
@@ -194,10 +197,15 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         o.worker_limit,
         limits::physical_memory()?,
     )?;
+    pre.push(("precheck.pair_count", t.elapsed().as_secs_f64()));
+    let t = Instant::now();
     est.source_groups = verify::source_key_groups(&src, o.plan.locate, o.worker_limit)?;
+    pre.push(("precheck.source_key_groups", t.elapsed().as_secs_f64()));
     let mem = o.limits.memory_limit_bytes;
     if o.verify {
+        let t = Instant::now();
         let (bytes, pages) = verify::source_pair_bytes(&src, o.plan.locate, o.worker_limit)?;
+        pre.push(("precheck.verify_source_count", t.elapsed().as_secs_f64()));
         est.verify_source = Some(bytes);
         est.verify_heap_pages = Some(pages);
         // refused before anything is written: under it the verifier's scan workers get no share (workspace#526)
@@ -243,6 +251,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             est,
             temp_limit,
             target,
+            pre,
         },
         progress,
     )
@@ -283,12 +292,14 @@ struct Begun {
     est: ResourceEstimate,
     temp_limit: u64,
     target: TargetSpace,
+    /// Timed parts of the precheck, reported before it.
+    pre: Vec<(&'static str, f64)>,
 }
 
 /// Returns report.json.
 fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String> {
     let mut rep = Report {
-        steps: Vec::new(),
+        steps: b.pre.clone(),
         started: b.started,
         progress,
     };
