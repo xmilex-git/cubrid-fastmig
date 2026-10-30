@@ -6,6 +6,7 @@
 //! [`crate::file_alloc::SpaceManager`]. Output: each heap rewritten, with a [`HeapReport`].
 //! Source: R2 (workspace#474) § 1.4-1.9, § 3 R2-R7; G2 (workspace#482) decisions 6, 7, 10; workspace#499.
 
+pub mod growth;
 pub mod header_rewrite;
 pub mod heap_state;
 pub mod heap_writer;
@@ -18,6 +19,7 @@ pub mod record_patch;
 pub mod rewrite_heap;
 pub mod vacuum_horizon;
 
+pub use growth::Growth;
 pub use heap_state::PageStats;
 pub use heap_writer::{HeapWriter, create_heap};
 pub use isolated_pages::{IsolatedHeap, IsolatedPages, rewrite_isolated_pages};

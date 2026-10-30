@@ -28,9 +28,9 @@ use fastmig_index::{BuildError, IndexRuns, MemoryLimit, Run, SpillDir, WorkerLim
 use fastmig_ondisk::class_object::{Constraint, class_properties};
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::value::KeyDomain;
-use fastmig_ondisk::{Btid, Oid};
+use fastmig_ondisk::{Btid, Oid, Vpid};
 
-use crate::btree_walk::{IndexTree, LeafCounts, LeafPairs, ShardEnd, join_shards};
+use crate::btree_walk::{IndexTree, LeafCounts, LeafPairs, ShardEnd, join_shards, leaf_counts};
 use crate::catalog_refs::{CatalogInput, check_catalog};
 use crate::database::Database;
 use crate::defect::{Check, Defect, OidText};
@@ -710,14 +710,39 @@ pub fn memory_min(heap_pages: usize, workers: usize) -> usize {
 }
 
 /// Per plain index of `db`, its class and name (first owner) and what its leaves hold (records, wide records,
-/// objects past a record): read on `workers` threads, one tree each (workspace#526: upper bounds of the keys and
-/// overflow OID chains a rebuild of the live rows makes, the source's index holding every live row's key).
+/// objects past a record): the leaves of every tree in one queue, a chunk per job (workspace#526: upper bounds of
+/// the keys and overflow OID chains a rebuild of the live rows makes, the source's index holding every live row's
+/// key; a big tree is no longer one worker's).
 pub fn index_key_groups(db: &Database, workers: usize) -> Vec<(String, String, LeafCounts)> {
+    const LEAVES_PER_JOB: usize = 64;
     let x = open_indexes(db);
     let trees: Vec<&IndexTree> = x.trees.values().collect();
-    run_jobs(workers, trees, |t| {
-        let mut lp = LeafPairs::new(t);
-        while lp.next_pair().is_some() {}
-        (t.class.clone(), t.name.clone(), lp.counts)
-    })
+    let mut units: Vec<(usize, Vec<Vpid>)> = Vec::new();
+    for (k, t) in trees.iter().enumerate() {
+        for chunk in t.leaves.chunks(LEAVES_PER_JOB) {
+            units.push((k, chunk.iter().map(|(v, _)| *v).collect()));
+        }
+    }
+    let mut out: Vec<LeafCounts> = vec![LeafCounts::default(); trees.len()];
+    for (k, c) in run_jobs(workers, units, |(k, leaves)| {
+        let mut c = LeafCounts::default();
+        for v in leaves {
+            let l = leaf_counts(trees[k], v);
+            c.records += l.records;
+            c.objects += l.objects;
+            c.wide_records += l.wide_records;
+            c.objects_past_record += l.objects_past_record;
+        }
+        (k, c)
+    }) {
+        out[k].records += c.records;
+        out[k].objects += c.objects;
+        out[k].wide_records += c.wide_records;
+        out[k].objects_past_record += c.objects_past_record;
+    }
+    trees
+        .iter()
+        .zip(out)
+        .map(|(t, c)| (t.class.clone(), t.name.clone(), c))
+        .collect()
 }

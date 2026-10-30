@@ -10,16 +10,16 @@
 //! 11.4 source's run generates) go through the same extractor (`record_pair_bytes`).
 //! Source: workspace#526.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fastmig_ondisk::btree::{max_keylen_inpage, ovf_key};
 use fastmig_ondisk::file_table::FileTable;
-use fastmig_ondisk::heap_rewrite::ReEncode;
+use fastmig_ondisk::heap_rewrite::{Growth, ReEncode};
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, db_pagesize};
 
 use crate::build_error::BuildError;
-use crate::heap_keys::{ClassKeys, page_keys, record_keys};
+use crate::heap_keys::{ClassKeys, page_keys_sized, record_keys};
 use crate::heap_scan::RowKey;
 use crate::index_def::IndexDef;
 use crate::job_pool::run_jobs;
@@ -127,6 +127,19 @@ pub fn pair_bytes<'c>(
     re_encode: &dyn Fn(Oid) -> Option<&'c dyn ReEncode>,
     skip: &HashSet<Oid>,
 ) -> Result<Vec<PairBytes>, BuildError> {
+    Ok(pair_bytes_and_growth(vols, defs, workers, re_encode, skip)?.0)
+}
+
+/// [`pair_bytes`], and per owner class with a re-encoder the [`Growth`] of its re-encoded records: the pages its
+/// page treatment may append, from the same read (workspace#526: `page_treatment::appended_pages_bound` skips these
+/// classes).
+pub fn pair_bytes_and_growth<'c>(
+    vols: &VolumeSet,
+    defs: &[&'c IndexDef<'c>],
+    workers: usize,
+    re_encode: &dyn Fn(Oid) -> Option<&'c dyn ReEncode>,
+    skip: &HashSet<Oid>,
+) -> Result<(Vec<PairBytes>, HashMap<Oid, Growth>), BuildError> {
     let mut classes = owner_classes(defs)?;
     let mut units = Vec::new();
     for (i, c) in classes.iter_mut().enumerate() {
@@ -145,11 +158,13 @@ pub fn pair_bytes<'c>(
     units.sort_by_key(|(_, p)| std::cmp::Reverse(p.len()));
     let io_pagesize = vols.io_pagesize();
     let db = db_pagesize(io_pagesize);
+    let usable = Growth::usable(io_pagesize);
     let counted = run_jobs(workers, units, |(c, pages)| {
         let mut buf = vec![0u8; io_pagesize];
         let mut stats = vec![PairStats::default(); classes[c].keys.indexes_len()];
+        let mut grown = Growth::default();
         for vpid in pages {
-            page_keys(
+            page_keys_sized(
                 vols,
                 &classes[c].keys,
                 &mut buf,
@@ -161,16 +176,24 @@ pub fn pair_bytes<'c>(
                         stats[ix].add_key(k.len(), db);
                     }
                 },
+                &mut |before, after| grown.add(before, after, usable),
             )?;
         }
-        Ok::<_, BuildError>((c, stats))
+        Ok::<_, BuildError>((c, stats, grown))
     });
     let mut out: Vec<PairBytes> = defs.iter().map(|_| PairBytes::new()).collect();
+    let mut growth: HashMap<Oid, Growth> = HashMap::new();
     for r in counted {
-        let (c, stats) = r?;
+        let (c, stats, grown) = r?;
         add(&mut out, &classes[c], stats);
+        if classes[c].keys.re_encode.is_some() {
+            growth
+                .entry(classes[c].keys.class_oid)
+                .or_default()
+                .merge(&grown);
+        }
     }
-    Ok(out)
+    Ok((out, growth))
 }
 
 /// The same count over records not yet on any page: `records(class)` gives each owner class's rows as (OID, develop

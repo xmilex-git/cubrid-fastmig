@@ -22,7 +22,7 @@ use std::time::Instant;
 use crate::limits;
 use fastmig_catalog::catalog_layout::generated_rows;
 use fastmig_catalog::classify::ClassKind;
-use fastmig_catalog::page_treatment::appended_pages_bound;
+use fastmig_catalog::page_treatment::{appended_pages_bound, encoder_of};
 use fastmig_catalog::row_encode::encode_row;
 use fastmig_catalog::same_version_catalog::{SameVersionCatalog, deferred_rows};
 use fastmig_catalog::source_catalog::SourceCatalog;
@@ -30,10 +30,10 @@ use fastmig_catalog::target_classes::{Origin, TargetClass as CatalogClass};
 use fastmig_catalog::template_store::builtin;
 use fastmig_index::IndexDef;
 use fastmig_index::heap_scan::WORKER_SHARE;
-use fastmig_index::pair_count::{PairStats, pair_bytes, record_pair_bytes};
+use fastmig_index::pair_count::{PairStats, pair_bytes_and_growth, record_pair_bytes};
 use fastmig_index::rebuild::{TargetClass, class_constraints, plain_index_defs};
 use fastmig_index::temp_disk::index_batches;
-use fastmig_ondisk::heap_rewrite::{ClassReEncoder, ReEncode};
+use fastmig_ondisk::heap_rewrite::{ClassReEncoder, Growth, ReEncode};
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 use fastmig_plan::version_pair::VersionPair;
@@ -119,7 +119,7 @@ pub fn estimate(
             // the run deletes the deferred indexes' catalog rows before the build
             let (index_rows, key_rows) = deferred_rows(vols, &cat)?;
             let skip: HashSet<Oid> = index_rows.into_iter().chain(key_rows).collect();
-            count(vols, &classes, Rows::Heaps(&HashMap::new(), &skip), workers)?
+            count(vols, &classes, Rows::Heaps(&HashMap::new(), &skip), workers)?.0
         }
         VersionLine::V10_2 | VersionLine::V11_4 => {
             let src = SourceCatalog::read(vols, source, VersionLine::Develop)?;
@@ -128,15 +128,14 @@ pub fn estimate(
             })?;
             // the class objects and catalog rows the run writes, without writing them
             let g = generated_rows(&src, &template, &now_datetime()).map_err(invalid)?;
+            // the page treatment's own encoders (LOB directories too): the record lengths they give bound its appended
+            // pages (workspace#526)
             let mut re_encoders = HashMap::new();
-            for (c, p) in src.classes.iter().zip(&src.plans) {
-                if p.kind == ClassKind::User && p.re_encoded {
-                    // user classes are MVCC classes (page_treatment); LOB locators are not keys
-                    re_encoders.insert(
-                        c.oid,
-                        ClassReEncoder::new(&c.class, src.line, true)
-                            .map_err(|e| invalid(format!("{}: {e}", p.name)))?,
-                    );
+            for (i, (c, p)) in src.classes.iter().zip(&src.plans).enumerate() {
+                if p.kind == ClassKind::User
+                    && let Some(r) = encoder_of(&src, lob_base, i)?
+                {
+                    re_encoders.insert(c.oid, r);
                 }
             }
             let by_name: HashMap<&[u8], &CatalogClass> = g
@@ -164,15 +163,19 @@ pub fn estimate(
                     })
                     .collect()
             };
-            let mut e = count(
+            let (mut e, growth) = count(
                 vols,
                 &tables(true),
                 Rows::Heaps(&re_encoders, &HashSet::new()),
                 workers,
             )?;
-            let s = count(vols, &tables(false), Rows::Records(&records), workers)?;
+            let (s, _) = count(vols, &tables(false), Rows::Records(&records), workers)?;
+            // the re-encoded classes the pair count did not read (no index) get their own pass
             let t = std::time::Instant::now();
-            let appended = appended_pages_bound(vols, &src, lob_base, workers)?;
+            let counted: HashSet<Oid> = growth.keys().copied().collect();
+            let usable = Growth::usable(vols.io_pagesize());
+            let appended = growth.values().map(|g| g.pages(usable)).sum::<u64>()
+                + appended_pages_bound(vols, &src, lob_base, workers, &counted)?;
             let appended_seconds = t.elapsed().as_secs_f64();
             e.indexes.extend(s.indexes);
             e.per_def.extend(s.per_def);
@@ -204,7 +207,7 @@ fn count(
     classes: &[TargetClass],
     rows: Rows,
     workers: usize,
-) -> io::Result<ResourceEstimate> {
+) -> io::Result<(ResourceEstimate, HashMap<Oid, Growth>)> {
     // the estimate is for a develop target; an 11.4 target is wired by workspace#533
     let cons = class_constraints(classes, VersionLine::Develop).map_err(invalid)?;
     let charset = vols.volume(0)?.header.db_charset as u8;
@@ -219,7 +222,7 @@ fn count(
     let refs: Vec<&IndexDef> = defs.iter().collect();
     let from_heaps = matches!(rows, Rows::Heaps(..));
     let counted = match rows {
-        Rows::Heaps(re_encoders, skip) => pair_bytes(
+        Rows::Heaps(re_encoders, skip) => pair_bytes_and_growth(
             vols,
             &refs,
             workers,
@@ -228,9 +231,11 @@ fn count(
         ),
         Rows::Records(records) => record_pair_bytes(&refs, vols.io_pagesize(), &|oid| {
             records.get(&oid).map_or(&[], |r| r.as_slice())
-        }),
+        })
+        .map(|b| (b, HashMap::new())),
     }
     .map_err(invalid)?;
+    let (counted, growth) = counted;
     let name_of = |oid| {
         classes.iter().find(|c| c.oid == oid).map_or_else(
             || format!("{oid:?}"),
@@ -248,37 +253,40 @@ fn count(
             });
         }
     }
-    Ok(ResourceEstimate {
-        indexes,
-        per_def: counted
-            .iter()
-            .map(|b| b.values().map(|s| s.bytes).sum())
-            .collect(),
-        per_def_figures: defs
-            .iter()
-            .zip(&counted)
-            .map(|(d, b)| {
-                let mut stats = PairStats::default();
-                b.values().for_each(|c| stats.merge(c));
-                DefFigures {
-                    class: name_of(d.owners[0].class_oid),
-                    index: String::from_utf8_lossy(&d.owners[0].constraint.name).into(),
-                    unique: d.shape.unique,
-                    stats,
-                    from_heaps,
-                }
-            })
-            .collect(),
-        source_groups: HashMap::new(),
-        scan_seconds: 0.0,
-        appended_seconds: 0.0,
-        workers,
-        physical_memory: 0,
-        regenerates: false,
-        appended_pages: 0,
-        verify_source: None,
-        verify_heap_pages: None,
-    })
+    Ok((
+        ResourceEstimate {
+            indexes,
+            per_def: counted
+                .iter()
+                .map(|b| b.values().map(|s| s.bytes).sum())
+                .collect(),
+            per_def_figures: defs
+                .iter()
+                .zip(&counted)
+                .map(|(d, b)| {
+                    let mut stats = PairStats::default();
+                    b.values().for_each(|c| stats.merge(c));
+                    DefFigures {
+                        class: name_of(d.owners[0].class_oid),
+                        index: String::from_utf8_lossy(&d.owners[0].constraint.name).into(),
+                        unique: d.shape.unique,
+                        stats,
+                        from_heaps,
+                    }
+                })
+                .collect(),
+            source_groups: HashMap::new(),
+            scan_seconds: 0.0,
+            appended_seconds: 0.0,
+            workers,
+            physical_memory: 0,
+            regenerates: false,
+            appended_pages: 0,
+            verify_source: None,
+            verify_heap_pages: None,
+        },
+        growth,
+    ))
 }
 
 impl ResourceEstimate {

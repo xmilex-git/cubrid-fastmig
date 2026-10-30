@@ -19,8 +19,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use fastmig_catalog::output_sql::UPDATE_STATISTICS_SQL;
@@ -43,6 +43,7 @@ use fastmig_ondisk::volume_addition::VolumePlace;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_ondisk::{Oid, SourceVersion, Vsid};
 use fastmig_plan::Plan;
+use fastmig_plan::migration_plan::PageRange;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
 use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
@@ -366,33 +367,48 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let t = Instant::now();
     clone_targets(&mut jobs, &marker)?;
     if plan.unshare {
+        // one worker per volume: XFS takes a file's lock for each fallocate, so volumes go in parallel
         let io = src.vols.io_pagesize() as u64;
-        for r in &target.unshare_ranges {
-            let job = jobs
-                .iter()
-                .find(|j| j.volid == r.volid)
-                .ok_or_else(|| io::Error::other(format!("no target for volume {}", r.volid)))?;
-            let f = OpenOptions::new().write(true).open(&job.target)?;
-            preallocate::unshare(&f, r.first as u64 * io, r.pages as u64 * io).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "unsharing pages {}..{} of {}: {e}",
-                        r.first,
-                        r.first as i64 + r.pages as i64,
-                        job.target.display()
-                    ),
-                )
-            })?;
+        // (a range whose content the run does not need is zeroed: blocks of its own without a copy)
+        let mut by_volume: Vec<(&VolumeJob, Vec<(&PageRange, bool)>)> = Vec::new();
+        let ranges = (target.unshare_ranges.iter().map(|r| (r, false)))
+            .chain(target.zero_ranges.iter().map(|r| (r, true)));
+        for (r, zero) in ranges {
+            match by_volume.iter_mut().find(|(j, _)| j.volid == r.volid) {
+                Some((_, rs)) => rs.push((r, zero)),
+                None => by_volume.push((
+                    jobs.iter().find(|j| j.volid == r.volid).ok_or_else(|| {
+                        io::Error::other(format!("no target for volume {}", r.volid))
+                    })?,
+                    vec![(r, zero)],
+                )),
+            }
+        }
+        let next = AtomicUsize::new(0);
+        let first_err: Mutex<Option<io::Error>> = Mutex::new(None);
+        std::thread::scope(|s| {
+            for _ in 0..o.worker_limit.clamp(1, by_volume.len().max(1)) {
+                s.spawn(|| {
+                    while let Some((job, rs)) = by_volume.get(next.fetch_add(1, Ordering::Relaxed))
+                    {
+                        if let Err(e) = unshare_ranges(job, rs, io) {
+                            first_err.lock().unwrap().get_or_insert(e);
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(e) = first_err.into_inner().unwrap() {
+            return Err(e);
         }
     }
     rep.steps
         .push(("volumes.clone_unshare", t.elapsed().as_secs_f64()));
-    let _reservation = Reservation::take(
+    let reservation = Arc::new(Reservation::take(
         &marker,
         &fastmig_dir.join("reserve-target"),
-        target.extra_bytes,
-    )?;
+        target.extra_bytes + target.transfer_bytes,
+    )?);
     marker.create_dir_all(&limits.spill_dir)?;
     let target_keys = po.target_dir.join(format!("{}_keys", po.target_name));
     if src.version == SourceVersion::V10_2 {
@@ -464,11 +480,14 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         }),
     };
     let mut space = SpaceManager::new(&vols, pair.target, trk).with_growth(growth);
-    // a sector reserved off the list on a cloned volume takes its blocks when reserved; failing that, the space change
-    // fails before a page of it is written (workspace#526)
+    // a sector reserved off the list on a cloned volume, or a listed one of a file the run freed, takes its blocks when
+    // reserved, the reservation's space handed over; failing that, the space change fails before a page of it is
+    // written (workspace#526)
     let off_list = Arc::new(AtomicU64::new(0));
     if plan.unshare {
         let listed: HashSet<Vsid> = target.sectors.iter().copied().collect();
+        let deferred: HashSet<Vsid> = target.deferred.iter().copied().collect();
+        let res = reservation.clone();
         let mut cloned: HashMap<i16, (File, i32)> = HashMap::new();
         for (j, v) in jobs.iter().zip(&plan.volumes) {
             if v.copy_method == CopyMethod::Clone {
@@ -482,12 +501,16 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         let sector = SECTOR_NPAGES as u64 * vols.io_pagesize() as u64;
         let count = off_list.clone();
         space = space.with_claim(Arc::new(move |s: Vsid| {
-            if listed.contains(&s) {
+            let off_list = !listed.contains(&s);
+            if !off_list && !deferred.contains(&s) {
                 return Ok(());
             }
             if let Some((f, _)) = cloned.get(&s.volid).filter(|(_, total)| s.sectid < *total) {
-                preallocate::unshare(f, s.sectid as u64 * sector, sector)?;
-                count.fetch_add(1, Ordering::Relaxed);
+                res.give(sector)?;
+                preallocate::zero(f, s.sectid as u64 * sector, sector)?;
+                if off_list {
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Ok(())
         }));
@@ -805,4 +828,29 @@ fn report_json(
         heap_counter::now_and_peak().map_or("null".into(), |(_, peak)| peak.to_string()),
         fastmig_progress::report::json(&rep.progress),
     )
+}
+
+/// Unshares `ranges` of one cloned target volume, or zeroes those marked (`preallocate::zero`).
+fn unshare_ranges(job: &VolumeJob, ranges: &[(&PageRange, bool)], io: u64) -> io::Result<()> {
+    let f = OpenOptions::new().write(true).open(&job.target)?;
+    for &(r, zero) in ranges {
+        let (off, len) = (r.first as u64 * io, r.pages as u64 * io);
+        let done = if zero {
+            preallocate::zero(&f, off, len)
+        } else {
+            preallocate::unshare(&f, off, len)
+        };
+        done.map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "unsharing pages {}..{} of {}: {e}",
+                    r.first,
+                    r.first as i64 + r.pages as i64,
+                    job.target.display()
+                ),
+            )
+        })?;
+    }
+    Ok(())
 }

@@ -156,6 +156,9 @@ pub struct Plan {
     /// files that take new pages inside their sectors (heaps of re-encoded and system classes, the root heap, their
     /// overflow heaps, the tracker), merged.
     pub unshare_ranges: Vec<PageRange>,
+    /// Pages of cloned volumes whose content the run does not need but may write: the unallocated pages in the
+    /// sectors of the files above that take new pages; given blocks without a copy at the start, merged.
+    pub zero_ranges: Vec<PageRange>,
     /// Sectors of the files the run frees before it allocates: every B-tree, overflow key and catalog file; with a
     /// regenerated catalog also the heaps and overflow heaps of the reallocated and dropped system classes.
     pub freed_sectors: Vec<Vsid>,
@@ -853,6 +856,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         );
     }
     let mut pages: Vec<Vpid> = Vec::new();
+    // pages whose content the run does not need: given blocks of their own without a copy (`preallocate::zero`)
+    let mut zero_pages: Vec<Vpid> = Vec::new();
     if unshare {
         rewritten_files.sort();
         rewritten_files.dedup();
@@ -873,10 +878,16 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         for vfid in &rewritten_files {
             let t = FileTable::read(i.vols, *vfid)?;
             if appending.contains(vfid) {
+                let allocated = t.allocated_pages();
                 for s in t.sectors.iter().filter(|s| cloned.contains(&s.vsid.volid)) {
                     let first = s.vsid.sectid * SECTOR_NPAGES;
-                    pages
-                        .extend((first..first + SECTOR_NPAGES).map(|p| Vpid::new(s.vsid.volid, p)));
+                    for p in (first..first + SECTOR_NPAGES).map(|p| Vpid::new(s.vsid.volid, p)) {
+                        if allocated.contains(&p) {
+                            pages.push(p);
+                        } else {
+                            zero_pages.push(p);
+                        }
+                    }
                 }
             } else {
                 pages.extend(
@@ -887,19 +898,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             }
         }
     }
-    pages.sort();
-    pages.dedup();
-    let mut unshare_ranges: Vec<PageRange> = Vec::new();
-    for p in pages {
-        match unshare_ranges.last_mut() {
-            Some(r) if r.volid == p.volid && r.first + r.pages as i32 == p.pageid => r.pages += 1,
-            _ => unshare_ranges.push(PageRange {
-                volid: p.volid,
-                first: p.pageid,
-                pages: 1,
-            }),
-        }
-    }
+    let unshare_ranges = page_ranges(pages);
+    let zero_ranges = page_ranges(zero_pages);
 
     // what the target needs is bounded with the resource estimate (cli target_space, workspace#526)
     let available = free_space::available_bytes(i.target_dir)?;
@@ -924,6 +924,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         java_static,
         unshare,
         unshare_ranges,
+        zero_ranges,
         freed_sectors,
         catalog_sectors,
         rewritten_pages_bound: rewritten_pages_bound
@@ -960,4 +961,22 @@ fn root_heap_pages(heap_pages: &std::collections::HashMap<(i16, i32), u64>, root
         .get(&(root.vfid.volid, root.vfid.fileid))
         .copied()
         .unwrap_or(0)
+}
+
+/// `pages` sorted, as runs of consecutive pages of a volume.
+fn page_ranges(mut pages: Vec<Vpid>) -> Vec<PageRange> {
+    pages.sort();
+    pages.dedup();
+    let mut out: Vec<PageRange> = Vec::new();
+    for p in pages {
+        match out.last_mut() {
+            Some(r) if r.volid == p.volid && r.first + r.pages as i32 == p.pageid => r.pages += 1,
+            _ => out.push(PageRange {
+                volid: p.volid,
+                first: p.pageid,
+                pages: 1,
+            }),
+        }
+    }
+    out
 }

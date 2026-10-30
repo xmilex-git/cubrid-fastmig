@@ -930,3 +930,68 @@ struct LeafCursor {
     slot: usize,
     fence: Option<Vec<u8>>,
 }
+
+/// The leaf records of leaf `v` of `t` as [`LeafPairs`] counts them (`records`, `objects`, `wide_records`,
+/// `objects_past_record`; a fence record is no record), read on its own and checked for nothing: the leaves of every
+/// tree split over the workers (workspace#526, `run::index_key_groups`). A page or record that does not read counts
+/// nothing; the verifier reports it.
+pub fn leaf_counts(t: &IndexTree, v: Vpid) -> LeafCounts {
+    let mut c = LeafCounts::default();
+    let Ok(p) = t.db.vols.read_page(v) else {
+        return c;
+    };
+    let Some(s) = slotted(&p) else {
+        return c;
+    };
+    let unique = t.root.is_unique();
+    let per_record =
+        max_oidlen_inpage(db_pagesize(t.db.vols.io_pagesize())) / object_fixed_size(unique);
+    for slot in 1..s.num_slots() {
+        let Some((_, rec)) = s.record(slot) else {
+            continue;
+        };
+        let Ok(r) = read_leaf_record(rec, unique, &t.kd) else {
+            continue;
+        };
+        if r.is_fence() {
+            continue;
+        }
+        let mut n = 1 + r.others.len();
+        let mut next = r.ovf_oids;
+        let mut hops = 0;
+        while let Some(o) = next.filter(|o| !o.is_null()) {
+            hops += 1;
+            let Some(op) = (hops <= 1 << 20)
+                .then(|| t.db.vols.read_page(o).ok())
+                .flatten()
+            else {
+                break;
+            };
+            let Some(os) = slotted(&op) else {
+                break;
+            };
+            let Some(hdr) = os.record(0).and_then(|r| OvfHeader::read(r.1).ok()) else {
+                break;
+            };
+            let objs = os.record(1).map_or(&[][..], |r| r.1);
+            let mut q = 0;
+            while q < objs.len() {
+                match read_object(objs, q, unique) {
+                    Ok((_, nq)) => {
+                        n += 1;
+                        q = nq;
+                    }
+                    Err(_) => break,
+                }
+            }
+            next = Some(hdr.next);
+        }
+        c.records += 1;
+        c.objects += n as i64;
+        if n > per_record {
+            c.wide_records += 1;
+            c.objects_past_record += (n - per_record) as i64;
+        }
+    }
+    c
+}

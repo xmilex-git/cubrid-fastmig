@@ -11,23 +11,24 @@
 //! `SpaceManager` serializes space changes); workspace#481 (one worker limit for the run); workspace#507 (LOB
 //! locators of a re-encoded class move to develop's per-attribute directories).
 
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::heap_rewrite::{
-    ClassReEncoder, HeapJob, HeapReport, ReEncode, VacuumHorizon, rewrite_heap,
+    ClassReEncoder, Growth, HeapJob, HeapReport, ReEncode, VacuumHorizon, rewrite_heap,
     rewrite_isolated_pages,
 };
 use fastmig_ondisk::page::{self, PageType};
 use fastmig_ondisk::record::heap_chain::HeapChain;
 use fastmig_ondisk::record::heap_scan::resolve_record;
-use fastmig_ondisk::spage::{SPAGE_HEADER_SIZE, SPAGE_SLOT_SIZE, SlottedPage};
+use fastmig_ondisk::spage::SlottedPage;
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Hfid, Oid, Vpid, db_pagesize};
+use fastmig_ondisk::{Hfid, Oid, Vpid};
 use fastmig_progress::Meter;
 
 use crate::classify::ClassKind;
@@ -99,7 +100,7 @@ pub fn treat_user_heaps(
 
 /// The encoder of class `i` when it is re-encoded: user classes are MVCC classes; LOB locators move to develop's
 /// per-attribute directories (workspace#507).
-fn encoder_of(
+pub fn encoder_of(
     source: &SourceCatalog,
     lob_base: Option<&Path>,
     i: usize,
@@ -120,25 +121,25 @@ fn encoder_of(
         .map_err(|e| invalid(format!("{}: {e}", plan.name)))
 }
 
-/// Pages the page treatment may append to the user heaps, an upper bound (workspace#526: the target space the run
-/// writes outside what it takes at the start). Only a re-encoded record can grow (a patch drops header bytes): each
-/// record of a re-encoded class is re-encoded as the treatment will, and one that grows is counted whole as if it
-/// moved to a new page — a record of a quarter page or more as its own pages (overflow pages plus one), the smaller
-/// ones packed three quarters full (a page takes another record of under a quarter page while it is less full than
-/// that) — plus one partial page per heap. A record the encoder cannot read counts twice its size.
-/// The pages are re-encoded a sector at a time from one queue over every heap, so one big heap spreads over the
-/// workers.
+/// Pages the page treatment may append to the user heaps of re-encoded classes not in `counted` (whose records the
+/// index pair count re-encoded already, `pair_count::pair_stats_and_growth`), an upper bound (workspace#526: the
+/// target space the run writes outside what it takes at the start). Only a re-encoded record can grow (a patch drops
+/// header bytes): each record is re-encoded as the treatment will and counted by [`Growth`]. A record the encoder
+/// cannot read counts twice its size. The pages are re-encoded a sector at a time from one queue over every heap, so
+/// one big heap spreads over the workers.
 pub fn appended_pages_bound(
     vols: &VolumeSet,
     source: &SourceCatalog,
     lob_base: Option<&Path>,
     worker_limit: usize,
+    counted: &HashSet<Oid>,
 ) -> io::Result<u64> {
     let mut encoders = Vec::new();
     for i in 0..source.classes.len() {
         if source.plans[i].kind == ClassKind::User
             && source.plans[i].re_encoded
             && !source.classes[i].class.heap.is_null()
+            && !counted.contains(&source.classes[i].oid)
             && let Some(enc) = encoder_of(source, lob_base, i)?
         {
             encoders.push((source.classes[i].class.heap, enc));
@@ -151,11 +152,8 @@ pub fn appended_pages_bound(
             units.push((k, pages));
         }
     }
-    let usable = db_pagesize(vols.io_pagesize()) - SPAGE_HEADER_SIZE - 64;
-    let grown: Vec<(AtomicU64, AtomicU64)> = encoders
-        .iter()
-        .map(|_| (AtomicU64::new(0), AtomicU64::new(0)))
-        .collect();
+    let usable = Growth::usable(vols.io_pagesize());
+    let grown: Vec<Mutex<Growth>> = encoders.iter().map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
     let first_err: Mutex<Option<io::Error>> = Mutex::new(None);
     std::thread::scope(|s| {
@@ -169,10 +167,7 @@ pub fn appended_pages_bound(
                     };
                     let (hfid, enc) = &encoders[*k];
                     match pages_growth(vols, *hfid, enc, pages, usable, &mut buf) {
-                        Ok((small, big)) => {
-                            grown[*k].0.fetch_add(small, Ordering::Relaxed);
-                            grown[*k].1.fetch_add(big, Ordering::Relaxed);
-                        }
+                        Ok(g) => grown[*k].lock().unwrap().merge(&g),
                         Err(e) => {
                             first_err.lock().unwrap().get_or_insert(e);
                         }
@@ -184,18 +179,7 @@ pub fn appended_pages_bound(
     if let Some(e) = first_err.into_inner().unwrap() {
         return Err(e);
     }
-    Ok(grown
-        .iter()
-        .map(|(small, big)| {
-            let (small, big_pages) = (small.load(Ordering::Relaxed), big.load(Ordering::Relaxed));
-            let packed = small.div_ceil((usable * 3 / 4) as u64);
-            if big_pages + packed == 0 {
-                0
-            } else {
-                big_pages + packed + 1
-            }
-        })
-        .sum())
+    Ok(grown.iter().map(|g| g.lock().unwrap().pages(usable)).sum())
 }
 
 /// The grown records of `pages` of heap `hfid`: bytes of the small ones packed (aligned, with their slot) and pages
@@ -207,8 +191,8 @@ fn pages_growth(
     pages: &[Vpid],
     usable: usize,
     buf: &mut [u8],
-) -> io::Result<(u64, u64)> {
-    let (mut small, mut big_pages) = (0u64, 0u64);
+) -> io::Result<Growth> {
+    let mut g = Growth::default();
     for &vpid in pages {
         vols.read_page_into(vpid, buf)?;
         if page::ptype(buf) != Some(PageType::Heap) {
@@ -234,16 +218,12 @@ fn pages_growth(
                 continue;
             };
             let old = r.bytes.len();
-            let new = enc.re_encode(oid, &r.bytes).map_or(2 * old, |b| b.len());
-            if new <= old {
-                continue;
-            }
-            if new >= usable / 4 {
-                big_pages += new.div_ceil(usable) as u64 + 1;
-            } else {
-                small += (new.div_ceil(8) * 8 + SPAGE_SLOT_SIZE) as u64;
-            }
+            g.add(
+                old,
+                enc.re_encode(oid, &r.bytes).map_or(2 * old, |b| b.len()),
+                usable,
+            );
         }
     }
-    Ok((small, big_pages))
+    Ok(g)
 }

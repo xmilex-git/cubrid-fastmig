@@ -17,9 +17,10 @@
 //! Source: workspace#526 (1번 세션 decision: copy volumes allocated at the start, one reservation for the rest).
 
 use std::collections::HashSet;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fastmig_copy::IncompleteMarker;
 use fastmig_index::btree_page::BtreePage;
@@ -67,16 +68,28 @@ pub struct TargetSpace {
     pub sectors: Vec<Vsid>,
     /// Sectors the free ones cannot give: an expansion, reserved.
     pub short_sectors: u64,
-    /// Cloned pages unshared at the start: the rewritten pages (`Plan::unshare_ranges`), the listed sectors on cloned
-    /// volumes, each cloned volume's header and sector table; merged.
+    /// Cloned pages unshared at the start: the rewritten pages (`Plan::unshare_ranges`) and each cloned volume's
+    /// header and sector table; merged.
     pub unshare_ranges: Vec<PageRange>,
+    /// Cloned pages given blocks of their own without a copy at the start (`preallocate::zero`): the listed sectors
+    /// on cloned volumes and the plan's `zero_ranges`; merged.
+    pub zero_ranges: Vec<PageRange>,
+    /// Listed sectors on cloned volumes of files the run frees (and reads until then): zeroed when reserved again, the
+    /// space handed over from the reservation.
+    pub deferred: Vec<Vsid>,
+    /// Their bytes, held in the reservation besides `extra_bytes` and taken once.
+    pub transfer_bytes: u64,
 }
 
 impl TargetSpace {
     /// Free space the run needs on the target filesystem: the reservation stays until the run ends while the writes
     /// it bounds take up to as much again.
     pub fn needed(&self) -> u64 {
-        self.copy_bytes + self.log_bytes + self.unshare_bytes + 2 * self.extra_bytes
+        self.copy_bytes
+            + self.log_bytes
+            + self.unshare_bytes
+            + self.transfer_bytes
+            + 2 * self.extra_bytes
     }
 }
 
@@ -118,6 +131,9 @@ pub fn bound(
         sectors: Vec::new(),
         short_sectors: 0,
         unshare_ranges: Vec::new(),
+        zero_ranges: Vec::new(),
+        deferred: Vec::new(),
+        transfer_bytes: 0,
     };
     if !plan.unshare {
         // rewritten and new pages: inside a byte-copied volume, outside a cloned one this filesystem cannot unshare
@@ -156,18 +172,28 @@ pub fn bound(
             pages: v.header.stab_npages as u32,
         });
     }
-    ranges.extend(
-        sectors
-            .iter()
-            .filter(|s| cloned.contains(&s.volid))
-            .map(|s| PageRange {
-                volid: s.volid,
-                first: s.sectid * SECTOR_NPAGES,
-                pages: SECTOR_NPAGES as u32,
-            }),
-    );
+    // the listed sectors' content is not needed (disjoint from the pages above, which belong to live files and the
+    // volume's system pages): a free one gets its blocks now; one of a file the run frees is read until then, so it
+    // gets them when reserved again, from the reservation (`deferred`)
+    let (deferred, free): (Vec<Vsid>, Vec<Vsid>) = sectors
+        .iter()
+        .copied()
+        .filter(|s| cloned.contains(&s.volid))
+        .partition(|s| freed.contains(s));
+    let mut zero = plan.zero_ranges.clone();
+    zero.extend(free.iter().map(|s| PageRange {
+        volid: s.volid,
+        first: s.sectid * SECTOR_NPAGES,
+        pages: SECTOR_NPAGES as u32,
+    }));
     t.unshare_ranges = merge_ranges(ranges);
-    t.unshare_bytes = t.unshare_ranges.iter().map(|r| r.pages as u64).sum::<u64>() * io_page;
+    t.zero_ranges = merge_ranges(zero);
+    t.transfer_bytes = deferred.len() as u64 * SECTOR_NPAGES as u64 * io_page;
+    t.deferred = deferred;
+    t.unshare_bytes = (t.unshare_ranges.iter().chain(&t.zero_ranges))
+        .map(|r| r.pages as u64)
+        .sum::<u64>()
+        * io_page;
     // reserved: what the free sectors cannot give, as the engine's expansion takes it (1 % of the data sectors or
     // 64, plus the request), and room for sectors taken off the list (a request of more than one sector)
     let total: u64 = vols
@@ -301,25 +327,44 @@ pub fn btree_pages(f: &DefFigures, g: Option<&LeafCounts>, io_page: usize, worke
     (leaves + chain_data + chain_dirs + upper + 1.0 + ovf_keys + 4.0).ceil() as u64
 }
 
-/// A file allocated in full that only holds space; removed on drop.
+/// A file allocated in full that only holds space; removed on drop. [`Reservation::give`] hands its space to a range
+/// the run takes, from the start of the file on.
 pub struct Reservation {
     path: PathBuf,
+    file: File,
+    size: u64,
+    given: AtomicU64,
 }
 
 impl Reservation {
     pub fn take(marker: &IncompleteMarker, path: &Path, bytes: u64) -> io::Result<Self> {
         marker.record_scratch(path)?;
-        let f = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         let r = Reservation {
             path: path.to_path_buf(),
+            file,
+            size: bytes,
+            given: AtomicU64::new(0),
         };
-        preallocate::allocate(&f, bytes).map_err(|e| {
+        preallocate::allocate(&r.file, bytes).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("reserving {bytes} B at {}: {e}", path.display()),
             )
         })?;
         Ok(r)
+    }
+
+    /// Gives `len` bytes of the reservation back to the filesystem for the caller to take at once; nothing when less
+    /// than that is left.
+    // shortcut: another process may take the bytes between the release and the caller's allocation (two syscalls);
+    // upgrade to a single exchange if a run on a contended filesystem fails there.
+    pub fn give(&self, len: u64) -> io::Result<()> {
+        let off = self.given.fetch_add(len, Ordering::Relaxed);
+        if off + len > self.size {
+            return Ok(());
+        }
+        preallocate::release(&self.file, off, len)
     }
 }
 

@@ -83,6 +83,18 @@ pub fn page_keys(
     vpid: Vpid,
     emit: &mut dyn FnMut(usize, Oid, RowKey),
 ) -> Result<(), BuildError> {
+    page_keys_sized(vols, ck, buf, vpid, emit, &mut |_, _| {})
+}
+
+/// [`page_keys`], and `sized(before, after)` with the lengths of each live record `ck` re-encodes.
+pub fn page_keys_sized(
+    vols: &VolumeSet,
+    ck: &ClassKeys,
+    buf: &mut [u8],
+    vpid: Vpid,
+    emit: &mut dyn FnMut(usize, Oid, RowKey),
+    sized: &mut dyn FnMut(usize, usize),
+) -> Result<(), BuildError> {
     let page_oid = Oid::new(vpid.volid, vpid.pageid, 0);
     vols.read_page_into(vpid, buf)?;
     if page::ptype(buf) != Some(PageType::Heap) {
@@ -115,7 +127,7 @@ pub fn page_keys(
             }
             _ => continue,
         };
-        record_keys(ck, oid, bytes, emit)?;
+        record_keys_sized(ck, oid, bytes, emit, sized)?;
     }
     Ok(())
 }
@@ -127,6 +139,17 @@ pub fn record_keys(
     bytes: &[u8],
     emit: &mut dyn FnMut(usize, Oid, RowKey),
 ) -> Result<(), BuildError> {
+    record_keys_sized(ck, oid, bytes, emit, &mut |_, _| {})
+}
+
+/// [`record_keys`], and `sized(before, after)` when `ck` re-encodes the record.
+pub fn record_keys_sized(
+    ck: &ClassKeys,
+    oid: Oid,
+    bytes: &[u8],
+    emit: &mut dyn FnMut(usize, Oid, RowKey),
+    sized: &mut dyn FnMut(usize, usize),
+) -> Result<(), BuildError> {
     let header = RecordHeader::read(bytes).map_err(|e| bad(oid, e.to_string()))?;
     if header.is_deleted() {
         return Ok(());
@@ -137,6 +160,7 @@ pub fn record_keys(
             re_encoded = r
                 .re_encode(oid, bytes)
                 .map_err(|e| bad(oid, e.to_string()))?;
+            sized(bytes.len(), re_encoded.len());
             let h = RecordHeader::read(&re_encoded).map_err(|e| bad(oid, e.to_string()))?;
             (&re_encoded[..], h)
         }
