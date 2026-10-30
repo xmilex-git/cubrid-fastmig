@@ -19,11 +19,16 @@ the 11.2 serial `current_val`/`started` pair that 11.2 `unloaddb` prints as the 
 | stored procedure call in a view or trigger text of an 11.2 or 11.3 source (`[sp2]([u2.t2].[b])`) | the load fails: develop `loaddb` resolves the unqualified call as `dba.sp2` and stops the schema at the first such view ("Function sp2 is undefined", 11.3.6 → develop) | `[u2.sp2]`, the procedure's real owner, as the 10.2 official path stores it | 11.2, 11.3 | before 11.4 a procedure name had one namespace, so the real owner is what the source text resolved to | G8 [workspace#517](https://github.com/xmilex-git/workspace/issues/517); code `catalog/src/owner_qualification.rs` |
 | `REUSE_OID` flag of a user table of a 10.2 source | set: 10.2 `unloaddb` prints `REUSE_OID` only for a reuse class and nothing otherwise, so develop `loaddb` applies its default `create_table_reuseoid=yes` | the source flag (0 for a table 10.2 made without OID reuse) | 10.2 | placement preservation keeps every OID and OBJECT reference (ADR 0002), so the class keeps the OID behavior it had on the source; the user can still `ALTER TABLE .. REUSE_OID` | workspace#549; code `catalog/src/class_rewrite.rs` (flags copied) |
 | password object of a user a 10.2 source made without a password | a `_db_password` row with a NULL password (`CREATE USER` in the unloaded schema) | none: `_db_user.password` stays NULL as on the source | 10.2 | develop `au_set_password_internal` creates the object when the user first gets a password; login without a password works either way | workspace#549; code `catalog/src/same_slot_rows.rs` (same-slot rows kept) |
+| position of a started serial with a cache (`START WITH` in the unload) | ahead by `CACHE` × `INCREMENT`: loaddb runs the unload's `SELECT [s].NEXT_VALUE`, which reserves a cache block and stores its end (`s_invoice` 2545 → 2590, CACHE 10, INCREMENT 5); a restart skips the unused values | the source's `current_val`/`started`: the next value is the one the source would give (2550) | 10.2..11.3 to 11.4 (measured on 11.4.6, T4 11.3·11.2, workspace#552); develop's loaddb runs the same statement, not measured | the target goes on where the source stopped; nothing is skipped | workspace#552 |
 
 Not listed here because a decision fixes them as rules, not as kept source state: `_db_serial.start_val` NULL for a
 started serial (workspace#482 decision 8; the official path writes the declared start), and new `created_time` /
 `updated_time` values (the migrate start, in local time like the engine, workspace#543; the official path writes the
-load time). Rows the source already stamps keep their times on a develop → develop run.
+load time). Rows the source already stamps keep their times on a develop → develop run. A LOB locator a 10.2..11.3
+source stored as an absolute path under its lob-base-path becomes relative and its file is copied into the target's
+base (G6 workspace#488 3; develop: under the per-attribute directory, workspace#507); the official path keeps the
+absolute path, so its target still reads the source's files (11.3.6/11.2.9 → 11.4.6 loaddb, workspace#552). The same
+holds for an 11.4 and a develop target.
 
 Not a difference from the official path either, but a change every 10.2 source sees: a view or trigger text on
 `db_trig` (rewritten to develop `db_trigger`, workspace#542) owned by a user without SELECT on a trigger's target class

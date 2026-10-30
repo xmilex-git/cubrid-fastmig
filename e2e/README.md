@@ -15,10 +15,14 @@ FASTMIG_E2E_SERVER_CTL=<workspace>/.agents/skills/cubrid-server-control/scripts/
 
 - `<install>`: the target-line install (develop). Use your own copy (`cp -a --reflink=always`): the run overwrites
   its `conf/cubrid.conf` (port, `data_buffer_size=512M`, `stored_procedure=yes`).
-- Target version: `develop`, or `11.4` from an 11.4 source with the 11.4.6 install (workspace#530); the plan refuses
-  `11.4` from an older source.
+- Target version: `develop`, or `11.4` with the 11.4.6 install from an 11.4 source (workspace#530) or a 10.2, 11.2
+  or 11.3 one (workspace#552). An 11.2/11.3 source is compared with its own unload under the pair's rules; a 10.2
+  source has no rules, so `FASTMIG_E2E_SOURCE_UNLOAD` names the official path's 11.4 unload (10.2 unloaddb → 11.4
+  loaddb `--no-user-specified-name` → unloaddb).
 - Optional env: `FASTMIG_E2E_WORKERS` (worker limit, default 4), `FASTMIG_E2E_CPUS` (taskset CPU list for migrate and
-  verify; also turns on the quiet gate), `FASTMIG_E2E_CHECKDB=1` (engine checkdb, #484 (5): the small 11.4 -> develop
+  verify only; also turns on the quiet gate. To keep the engine processes — csql, servers, unloaddb — on a CPU set
+  too, start the whole runner under `taskset -c <cpus> bash e2e/run.sh ...`: they inherit it),
+  `FASTMIG_E2E_CHECKDB=1` (engine checkdb, #484 (5): the small 11.4 -> develop
   target only), `FASTMIG_E2E_BREAKER` (the #484 (6) probe binary), `FASTMIG_E2E_SOURCE_UNLOAD` (unloaddb prefix of the
   source, default `<BASEDB_ROOT>/<label>/unload/<variant>/<db>`), `FASTMIG_E2E_LOB_BASE` (see below).
 - A 10.2..11.3 baseline's LOB locators are absolute paths under the base it was built in
