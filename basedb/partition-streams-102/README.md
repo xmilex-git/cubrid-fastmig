@@ -32,10 +32,12 @@ runs in SA mode (no port) and leaves both DBs (about 300 MB) for the caller to d
 
 ## Results
 
-- Trees equal, written bytes equal: p_extract, p_floor, p_ascii_hash, p_from_tz. p_from_tz needs the language flag
-  remap: 10.2..11.3 store TO_CHAR/TO_DATE-family flags without the parity develop checks since CBRD-25302.
-- Trees differ only where develop compiles differently: p_char_hash/p_char_list (CHAR vs VARCHAR result domain),
-  p_new_time/p_conv_tz (10.2 `T_CAST` where develop writes the implicit cast as `T_CAST_WRAP`). The transcoder keeps
-  the 10.2 tree; develop evaluates it to the same partition for every row (workspace#540 V4).
+- Trees equal, written bytes equal: p_extract, p_floor, p_ascii_hash, p_from_tz, p_char_hash, p_char_list. Two of
+  them need a value develop can evaluate (ADR 0017): p_from_tz the language flag parity (10.2..11.3 lack it,
+  CBRD-25302), p_char_hash/p_char_list develop's VARCHAR result for 10.2's built-in CHAR (optdebug assert in
+  `qdata_coerce_result_to_domain` otherwise).
+- Trees differ only where develop compiles differently: p_new_time/p_conv_tz (10.2 `T_CAST` where develop writes
+  the implicit cast as `T_CAST_WRAP`). The transcoder keeps the 10.2 tree; develop evaluates it to the same partition
+  for every row (workspace#540 V4), but `WHERE <expression> = v` reads every partition, as on the official path.
 - p_benchmark: the transcoder refuses function code 963; the plan refuses the class by name.
 - p_curdate: `CURRENT_DATE` stays in the stream (develop 202), not folded.

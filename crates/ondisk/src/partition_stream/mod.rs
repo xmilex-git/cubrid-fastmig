@@ -9,6 +9,7 @@
 //! where the engine's writer would place each node ([`write`]), so the offsets are recomputed for the new value
 //! lengths.
 
+pub mod char_result;
 pub mod container;
 pub mod opcode;
 pub mod read;

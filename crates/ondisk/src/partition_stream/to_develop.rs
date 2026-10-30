@@ -62,7 +62,7 @@ const LANG_PARITY_MASK: i32 = 0xFFFF_F000_u32 as i32;
 
 /// The develop language flag of a stored one. A source before 11.4 (10.2..11.3) stores the bare
 /// `lang id << 2 | has_user_lang << 1 | has_user_format`, the same bits develop keeps below the parity; an 11.4 flag
-/// already carries the parity and stays (workspace#540).
+/// already carries the parity and stays (workspace#540, ADR 0017).
 fn lang_flag(v: i32) -> i32 {
     if v & LANG_PARITY_MASK == 0 {
         v | LANG_PARITY
@@ -144,5 +144,5 @@ pub fn map_tree(from: VersionLine, tree: &mut StreamTree) -> DecodeResult<()> {
             *v = lang_flag(*v);
         }
     }
-    Ok(())
+    super::char_result::map_char_results(tree)
 }

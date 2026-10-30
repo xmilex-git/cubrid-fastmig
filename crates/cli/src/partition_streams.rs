@@ -1,9 +1,9 @@
 //! `cubrid-fastmig partition-streams`: a check, not a migration command. Transcodes every partition expression
-//! stream of an 11.4 or 10.2 database to develop and compares each with the stream the develop engine wrote for the
-//! same class in a develop database built from the same script.
+//! stream of an 11.4, 11.3, 11.2 or 10.2 database to develop and compares each with the stream the develop engine
+//! wrote for the same class in a develop database built from the same script.
 //!
-//! Input: `<source first volume> <develop first volume> --out <dir> [--from 11.4|10.2]` (default 11.4). A 10.2
-//! class name has no owner, so a 10.2 run matches develop classes by the name after the owner. Output: one line per
+//! Input: `<source first volume> <develop first volume> --out <dir> [--from 11.4|11.3|11.2|10.2]` (default 11.4).
+//! A 10.2 class name has no owner, so a 10.2 run matches develop classes by the name after the owner. Output: one line per
 //! partitioned class (stream sizes, whether the trees and the bytes match) and, in `<dir>`, each stream's bytes and
 //! canonical tree text.
 //! Exit status 1 when a tree differs or a stream cannot be read. Progress goes to stderr; the table is printed once
@@ -46,12 +46,9 @@ const TRANSCODE: usize = 2;
 fn streams(
     first: &str,
     line: VersionLine,
+    layout: HeaderLayout,
     unowned: bool,
 ) -> Result<BTreeMap<String, Vec<u8>>, CliError> {
-    let layout = match line {
-        VersionLine::V10_2 => HeaderLayout::Before11_4,
-        VersionLine::V11_4 | VersionLine::Develop => HeaderLayout::Since11_4,
-    };
     let vs = VolumeSet::open(
         Path::new(first),
         Locate::FirstVolumeDir,
@@ -93,15 +90,21 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     std::fs::create_dir_all(out)?;
     let progress = Progress::new("partition-streams", PHASES, 1);
     let monitor = progress_args::start(&p, progress.clone(), None, None)?;
-    let from = match p.value("--from").unwrap_or("11.4") {
-        "11.4" => VersionLine::V11_4,
-        "10.2" => VersionLine::V10_2,
-        x => return Err(CliError::Usage(format!("--from {x}: 11.4 or 10.2"))),
+    // 11.2 and 11.3 use the 11.4 codecs in the older header layout (R8)
+    let (from, layout) = match p.value("--from").unwrap_or("11.4") {
+        "11.4" => (VersionLine::V11_4, HeaderLayout::Since11_4),
+        "11.2" | "11.3" => (VersionLine::V11_4, HeaderLayout::Before11_4),
+        "10.2" => (VersionLine::V10_2, HeaderLayout::Before11_4),
+        x => {
+            return Err(CliError::Usage(format!(
+                "--from {x}: 11.4, 11.3, 11.2 or 10.2"
+            )));
+        }
     };
     let unowned = from == VersionLine::V10_2;
-    let src = streams(src, from, false)?;
+    let src = streams(src, from, layout, false)?;
     progress.advance();
-    let dev = streams(dev, VersionLine::Develop, unowned)?;
+    let dev = streams(dev, VersionLine::Develop, HeaderLayout::Since11_4, unowned)?;
     progress.set_total(TRANSCODE, src.len() as u64);
     progress.advance();
     let meter = progress.meter(TRANSCODE);
