@@ -1,12 +1,15 @@
 //! `cubrid-fastmig partition-streams`: a check, not a migration command. Transcodes every partition expression
-//! stream of an 11.4 database to develop and compares each with the stream the develop engine wrote for the same
-//! class in a develop database built from the same script.
+//! stream of an 11.4 or 10.2 database to develop and compares each with the stream the develop engine wrote for the
+//! same class in a develop database built from the same script.
 //!
-//! Input: `<11.4 first volume> <develop first volume> --out <dir>`. Output: one line per partitioned class (stream
-//! sizes, whether the trees and the bytes match) and, in `<dir>`, each stream's bytes and canonical tree text.
+//! Input: `<source first volume> <develop first volume> --out <dir> [--from 11.4|10.2]` (default 11.4). A 10.2
+//! class name has no owner, so a 10.2 run matches develop classes by the name after the owner. Output: one line per
+//! partitioned class (stream sizes, whether the trees and the bytes match) and, in `<dir>`, each stream's bytes and
+//! canonical tree text.
 //! Exit status 1 when a tree differs or a stream cannot be read. Progress goes to stderr; the table is printed once
 //! the run ends, so it never tears the terminal display.
-//! Source: ticket P1g workspace#497 (acceptance: byte-equal, or the differences explained with equal trees).
+//! Source: tickets P1g workspace#497, T17 workspace#540 (acceptance: byte-equal, or the differences explained with
+//! equal trees).
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -39,19 +42,32 @@ const PHASES: &[PhaseSpec] = &[
 ];
 const TRANSCODE: usize = 2;
 
-/// Class name → the master partition's stream.
-fn streams(first: &str, line: VersionLine) -> Result<BTreeMap<String, Vec<u8>>, CliError> {
+/// Class name (without the owner when `unowned`) → the master partition's stream.
+fn streams(
+    first: &str,
+    line: VersionLine,
+    unowned: bool,
+) -> Result<BTreeMap<String, Vec<u8>>, CliError> {
+    let layout = match line {
+        VersionLine::V10_2 => HeaderLayout::Before11_4,
+        VersionLine::V11_4 | VersionLine::Develop => HeaderLayout::Since11_4,
+    };
     let vs = VolumeSet::open(
         Path::new(first),
         Locate::FirstVolumeDir,
         Access::ReadOnly,
-        HeaderLayout::Since11_4,
+        layout,
     )?;
     let mut out = BTreeMap::new();
     for c in read_classes(&vs, line)? {
         for p in c.class.partitions.iter().filter(|p| p.pname.is_none()) {
             if let Some(s) = stream_of_pvalues(line, &p.pvalues).map_err(failed)? {
-                out.insert(String::from_utf8_lossy(&c.class.name).into_owned(), s);
+                let name = String::from_utf8_lossy(&c.class.name).into_owned();
+                let name = match name.split_once('.') {
+                    Some((_, n)) if unowned => n.to_owned(),
+                    _ => name,
+                };
+                out.insert(name, s);
             }
         }
     }
@@ -63,11 +79,11 @@ fn failed(e: impl std::fmt::Display) -> CliError {
 }
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
-    let flags = [&["--out"], progress_args::FLAGS].concat();
+    let flags = [&["--out", "--from"], progress_args::FLAGS].concat();
     let p = args::parse(argv, &flags, &[])?;
     let [src, dev] = p.positional.as_slice() else {
         return Err(CliError::Usage(
-            "partition-streams needs <11.4 first volume> <develop first volume>".into(),
+            "partition-streams needs <source first volume> <develop first volume>".into(),
         ));
     };
     let out = Path::new(
@@ -77,25 +93,31 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     std::fs::create_dir_all(out)?;
     let progress = Progress::new("partition-streams", PHASES, 1);
     let monitor = progress_args::start(&p, progress.clone(), None, None)?;
-    let src = streams(src, VersionLine::V11_4)?;
+    let from = match p.value("--from").unwrap_or("11.4") {
+        "11.4" => VersionLine::V11_4,
+        "10.2" => VersionLine::V10_2,
+        x => return Err(CliError::Usage(format!("--from {x}: 11.4 or 10.2"))),
+    };
+    let unowned = from == VersionLine::V10_2;
+    let src = streams(src, from, false)?;
     progress.advance();
-    let dev = streams(dev, VersionLine::Develop)?;
+    let dev = streams(dev, VersionLine::Develop, unowned)?;
     progress.set_total(TRANSCODE, src.len() as u64);
     progress.advance();
     let meter = progress.meter(TRANSCODE);
     let mut table = String::new();
     let mut bad = 0;
-    let _ = writeln!(table, "class\t11.4_B\ttranscoded_B\tdevelop_B\ttree\tbytes");
+    let _ = writeln!(
+        table,
+        "class\tsource_B\ttranscoded_B\tdevelop_B\ttree\tbytes"
+    );
     for (name, s) in &src {
         // counted as it starts: the arms below leave the iteration early
         meter.add(1);
         let file = |ext: &str| out.join(format!("{name}.{ext}"));
-        std::fs::write(file("114.bin"), s)?;
-        std::fs::write(
-            file("114.txt"),
-            parse(VersionLine::V11_4, s).map_err(failed)?.canonical(),
-        )?;
-        let t = match transcode_partition_stream(VersionLine::V11_4, VersionLine::Develop, s) {
+        std::fs::write(file("src.bin"), s)?;
+        std::fs::write(file("src.txt"), parse(from, s).map_err(failed)?.canonical())?;
+        let t = match transcode_partition_stream(from, VersionLine::Develop, s) {
             Ok(t) => t,
             Err(e) => {
                 let _ = writeln!(table, "{name}\t{}\t-\t-\ttranscode failed: {e}\t-", s.len());
@@ -152,7 +174,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     for name in dev.keys().filter(|n| !src.contains_key(*n)) {
         let _ = writeln!(
             table,
-            "{name}\t-\t-\t{}\tno 11.4 stream\t-",
+            "{name}\t-\t-\t{}\tno source stream\t-",
             dev[name].len()
         );
     }

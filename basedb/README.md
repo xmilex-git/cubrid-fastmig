@@ -125,3 +125,9 @@ that name other owners' tables, serials and SPs, run through 10.2 `unloaddb` →
 It is not a baseline DB. Its `expected/` dumps are the engine's result: the stored texts, and how the views and
 triggers behave. G8 (workspace#517) compares its text qualification with them. The T4 10.2 DBs fail on this path at
 their first partitioned table owned by APP_OWNER.
+
+### 10.2 partition expressions in every opcode range (T17, workspace#540)
+
+[`partition-streams-102/`](partition-streams-102/README.md) builds the same partitioned tables on 10.2 and develop
+(the three 10.2 → develop opcode ranges, CHAR results, a TO_CHAR language flag, `BENCHMARK` and `CURRENT_DATE`), so
+`cubrid-fastmig partition-streams --from 10.2` compares each transcoded stream with develop's. It is not a baseline DB.
