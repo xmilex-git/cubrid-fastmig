@@ -43,6 +43,7 @@ use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, file_tracker};
 use crate::compare_rule_mismatch::{self, OldRules, OwnerNames};
 use crate::copy_method::{self, CopyMethod};
 use crate::free_space;
+use crate::keyinfo_heap_room::Volume0Room;
 use crate::lob_scan::{self, LobScan};
 use crate::version_pair::VersionPair;
 
@@ -315,6 +316,20 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         },
     )?;
     let mut warnings = mismatch.warnings;
+    // the TDE keyinfo heap a 10.2 source gets must find a sector in volume 0 (workspace#515, #550)
+    if version == SourceVersion::V10_2 {
+        let room = Volume0Room::read(i.vols)?;
+        let line = format!(
+            "TDE keyinfo heap: volume 0 has {} free sectors now and {} more once the old B-trees are freed; it takes 1 \
+             (workspace#550)",
+            room.free, room.freed_btree
+        );
+        if room.total() == 0 {
+            refusals.push(line);
+        } else {
+            warnings.push(line);
+        }
+    }
     // 10.2 values read (workspace#520), names and texts owner-qualified (workspace#544), TDE metadata written
     // (workspace#515); still open: workspace#540, #549
     if pair.source == VersionLine::V10_2 {

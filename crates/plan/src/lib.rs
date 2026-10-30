@@ -7,6 +7,7 @@ pub mod compare_rule_mismatch;
 pub mod copy_method;
 pub mod cubrid_conf;
 pub mod free_space;
+pub mod keyinfo_heap_room;
 pub mod lob_scan;
 pub mod migration_plan;
 pub mod version_pair;
