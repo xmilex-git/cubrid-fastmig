@@ -61,6 +61,14 @@ impl TrackItem {
     pub fn file_type(&self) -> Option<FileType> {
         FileType::from_i32(self.file_type_raw as i32)
     }
+
+    /// A heap file waiting for reuse: DROP of a class without OID reuse marks its `FILE_HEAP` deleted in the tracker
+    /// (`FILE_TRACK_HEAP_METADATA.is_marked_deleted`, metadata byte 0) instead of destroying it, and the next heap
+    /// created takes it (engine `heap_file.c:xheap_destroy_newly_created`, `file_manager.c:file_tracker_reuse_heap`;
+    /// release/10.2, release/11.4 and develop alike, workspace#555).
+    pub fn is_marked_deleted(&self) -> bool {
+        self.file_type() == Some(FileType::Heap) && self.metadata & 0xff != 0
+    }
 }
 
 /// The tracker's first page (its sticky page), where the item chain starts at offset 0.

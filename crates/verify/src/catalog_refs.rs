@@ -6,7 +6,8 @@
 //! - `rep-dir`: the representation directory record exists and lists the class-info item and the current repid;
 //! - `heap-file`, `btree-file`: the class's HFID / each index's BTID names a tracked file of the right type whose
 //!   descriptor names the class (and a B-tree root whose `topclass_oid` does);
-//! - `orphan-heap`, `orphan-btree`: tracked heap / B-tree files no class references (the root heap excepted);
+//! - `orphan-heap`, `orphan-btree`: tracked heap / B-tree files no class references (the root heap and a heap the
+//!   tracker marks deleted, waiting for reuse, excepted);
 //!   overflow heap / overflow key files whose owner is not a referenced heap / B-tree;
 //! - `owner`, `trigger`: the owner is a live `db_user` row, each trigger a live `db_trigger` row;
 //! - `fk-ref`: a foreign key's referenced class exists and its referenced index is that class's;
@@ -188,8 +189,10 @@ pub fn check_catalog(c: &CatalogInput) -> Vec<Defect> {
         }
     }
     check_db_class(c, &mut out);
-    for (vfid, (_, ft)) in c.files {
+    for (vfid, (item, ft)) in c.files {
         let orphan = match (ft.header.file_type(), ft.header.descriptor()) {
+            // a heap waiting for reuse belongs to no class (workspace#555)
+            (Some(FileType::Heap), _) if item.is_marked_deleted() => None,
             (Some(FileType::Heap | FileType::HeapReuseSlots), _) => {
                 (!heaps.contains(vfid)).then_some("orphan-heap")
             }
