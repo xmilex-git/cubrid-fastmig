@@ -100,6 +100,14 @@ _Avoid_: 미지원 인덱스, 누락 인덱스
 사용자 뷰 query spec과 trigger condition·action에 저장된 출발 시스템 클래스 이름을 develop 이름으로 바꿔 쓰는 일(`db_trig`→`db_trigger`, `db_password`→`_db_password`, owner가 DBA 그룹이면 `db_trigger`·`db_user`·`db_authorization`·`db_serial`→`_db_*`). FROM·JOIN 항의 클래스 이름 토큰만 바꾸고 별칭과 칼럼 참조는 둔다. 텍스트마다 결과는 재작성·거부(바꿔도 의미를 지킬 수 없음, 예: `db_authorizations`, `db_user`의 `triggers`)·그대로+경고 셋 중 하나다. 클래스 객체와 `_db_query_spec`·`_db_trigger` 행에 같은 값을 쓰고, 재작성 목록은 plan 출력과 plan.json `system_name_rewrites`에 남는다. 컴파일된 코드를 그대로 복사하는 PL/CSQL 소스는 바꾸지 않고 거부·경고만 한다([workspace#542](https://github.com/xmilex-git/workspace/issues/542), 근거 R11 [workspace#519](https://github.com/xmilex-git/workspace/issues/519)).
 _Avoid_: 이름 치환, 시스템 뷰 검사(옛 G1 거부·경고만 하던 검사)
 
+**비교 규칙 어긋남 (compare rule mismatch)**:
+출발 엔진이 옛 문자열 규칙으로 정해 둔 배치·짝이 develop 규칙에서는 성립하지 않는 행. 세 가지다: 10.2의 HASH 파티션(공백 해시 가중치 0 → 32, 콜레이션 1·3·4·5·6·7, 중간 공백 키), 끝 공백만 다른 VARCHAR FK 짝, 끝 공백만 다른 LIST/RANGE 값·경계(10.2, 또는 출발 conf `ignore_trailing_space=yes`). 마이그레이션 결함이 아니라 출발 데이터의 성질이라 plan·migrate는 거부하지 않고 경고하며, 도착에서 고칠 SQL을 사후 정리 SQL로 낸다([ADR 0016](docs/adr/0016-compare-rule-mismatch-warns.md), [workspace#541](https://github.com/xmilex-git/workspace/issues/541)). 도착 conf `ignore_trailing_space=yes`는 이것이 아니라 거부 사유다.
+_Avoid_: 공백 버그, 데이터 손상, 정합성 오류
+
+**사후 정리 SQL (post-migration fixes)**:
+`<dest>/fastmig/post-migration-fixes.sql`. 비교 규칙 어긋남마다 도착에서 DBA가 검토 후 실행할 문장: HASH는 `REMOVE PARTITIONING` + `PARTITION BY HASH`, LIST·RANGE는 모든 파티션을 한 문장으로 `REORGANIZE PARTITION`(LIST는 행이 가진 값을 목록에 더한다), FK는 짝 없는 자식을 찾는 조회문. 어긋남이 없으면 빈 파일이다.
+_Avoid_: 수정 스크립트, 패치 SQL(페이지 처리 등급 patch와 섞인다)
+
 ## 검증과 원본 삭제
 
 **검증기 (verifier)**:

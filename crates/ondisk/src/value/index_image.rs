@@ -80,11 +80,11 @@ fn utf8_cp(s: &[u8]) -> (u32, usize) {
 }
 
 /// Engine `LANG_CHAR_COUNT_TR`: code points the Turkish table weighs.
-const TR_COUNT: usize = 352;
+pub(crate) const TR_COUNT: usize = 352;
 
 /// The weights `lang_init_coll_Utf8_tr_cs` builds: identity, then each Turkish letter moved right after its Latin
 /// base letter, the weights between shifted up by one.
-fn tr_weights() -> &'static [u32; TR_COUNT] {
+pub(crate) fn tr_weights() -> &'static [u32; TR_COUNT] {
     static W: std::sync::OnceLock<[u32; TR_COUNT]> = std::sync::OnceLock::new();
     W.get_or_init(|| {
         let mut w = [0u32; TR_COUNT];

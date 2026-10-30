@@ -35,6 +35,7 @@ comes from, without reading the rest of the tree.
   | [R7](https://github.com/xmilex-git/workspace/blob/research/fastmig-r7-xasl-streams/docs/research/fastmig/r7-xasl-streams.md) | serialized XASL streams and stored opcodes |
   | [R8](https://github.com/xmilex-git/workspace/blob/research/fastmig-r8-older-pairs/docs/research/fastmig/r8-older-pairs.md) | 10.2..11.3 sources: on-disk differences from 11.4 |
   | [R11](https://github.com/xmilex-git/workspace/blob/research/fastmig-r11-old-system-class-text/docs/research/fastmig/r11-old-system-class-text.md) | system class names in user text before develop: the system name mapping table |
+  | [R14](https://github.com/xmilex-git/workspace/blob/research/fastmig-r14-trailing-space-compare/docs/research/fastmig/r14-trailing-space-compare.md) | trailing-space compare and hash rules before 11.0: unique rebuild, HASH/LIST/RANGE partitions, foreign keys, `ignore_trailing_space` |
 
   A later research doc gets a row here in the commit that first cites it.
 - **Engine source**: `~/dev/cubrid-worktree/develop` on the dev host, release lines at

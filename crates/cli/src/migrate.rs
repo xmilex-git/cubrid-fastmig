@@ -4,7 +4,7 @@
 //! Input: the source DB name (found in the source `databases.txt`), the target directory and options.
 //! Output: the target volumes, a new `_lgat`, `_vinf`, `_keys`, Java SP directories, referenced LOB files, and in
 //! `<dest>/fastmig/`: `plan.json`, `report.json`, `verify.jsonl` (with `--verify`), the SQL files for the user
-//! (`deferred-indexes.sql`, `recompile-plcsql.sql`, `update-statistics.sql`), `lob-manifest`, `lob-outside-base`,
+//! (`deferred-indexes.sql`, `recompile-plcsql.sql`, `post-migration-fixes.sql`, `update-statistics.sql`), `lob-manifest`, `lob-outside-base`,
 //! `measured-classes` and `source-fingerprint` (read by finalize); then the target's `databases.txt` line. Progress
 //! (the phases in `PHASES`) goes to stderr. The source is only read; its active log is read-locked for the whole run.
 //! Order: the plan refuses before anything is written; the new log comes last of the writes; with `--verify` the
@@ -80,6 +80,8 @@ cubrid-fastmig migrate <db> --dest <dir> [options]
   --verify                       run the verifier on target and source after the writes; register and remove
                                  FASTMIG_INCOMPLETE only with 0 migration defects (default: not run; finalize
                                  refuses a target without a passing verify)
+  --source-conf <file>           the source server's cubrid.conf (see plan --help)
+  --target-conf <file>           the target server's cubrid.conf (default: $CUBRID/conf/cubrid.conf)
   --no-clone                     byte-copy even where the filesystem could clone (measures the byte copy where clone would be chosen)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
@@ -637,6 +639,11 @@ fn write_outputs(
         marker,
         &dir.join("recompile-plcsql.sql"),
         &plan.recompile_plcsql_sql,
+    )?;
+    write_recorded(
+        marker,
+        &dir.join("post-migration-fixes.sql"),
+        &plan.post_migration_fixes_sql,
     )?;
     write_recorded(
         marker,

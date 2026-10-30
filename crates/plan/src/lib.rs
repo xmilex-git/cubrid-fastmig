@@ -3,7 +3,9 @@
 //!
 //! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
+pub mod compare_rule_mismatch;
 pub mod copy_method;
+pub mod cubrid_conf;
 pub mod free_space;
 pub mod lob_scan;
 pub mod migration_plan;

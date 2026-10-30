@@ -16,6 +16,7 @@ use fastmig_ondisk::databases_txt::{self, DatabaseEntry};
 use fastmig_ondisk::log_header::{self, LogHeader};
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_ondisk::{SourceVersion, VersionLine};
+use fastmig_plan::cubrid_conf::ignore_trailing_space;
 use fastmig_plan::version_pair::parse_line;
 use fastmig_plan::{Plan, PlanInputs};
 
@@ -31,6 +32,10 @@ cubrid-fastmig plan <db> --dest <dir> [options]
   --target-name <name>           target DB name (default: <db>)
   --source-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --target-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
+  --source-conf <file>           the source server's cubrid.conf: ignore_trailing_space=yes there turns on the
+                                 foreign key and LIST/RANGE compare checks (10.2 always has them)
+  --target-conf <file>           the target server's cubrid.conf; ignore_trailing_space=yes refuses (default:
+                                 $CUBRID/conf/cubrid.conf when it exists)
   --no-clone                     plan byte copies even where the filesystem could clone
   --volumes-in-first-dir         find volumes 1.. next to volume 0 (a source copied without its headers rewritten)
   --workers <n>                  worker limit the resource table assumes (default: CPUs / 2)
@@ -47,6 +52,8 @@ pub const FLAGS: &[&str] = &[
     "--target-name",
     "--source-databases-txt",
     "--target-databases-txt",
+    "--source-conf",
+    "--target-conf",
 ];
 pub const SWITCHES: &[&str] = &["--no-clone", "--volumes-in-first-dir"];
 
@@ -59,6 +66,10 @@ pub struct PlanOptions {
     pub source_dbtxt: PathBuf,
     pub target_dbtxt: PathBuf,
     pub allow_clone: bool,
+    /// The source server's `cubrid.conf`, read for `ignore_trailing_space` (workspace#541); none: not set.
+    pub source_conf: Option<PathBuf>,
+    /// The target server's `cubrid.conf` (default `$CUBRID/conf/cubrid.conf` when it exists).
+    pub target_conf: Option<PathBuf>,
     pub locate: Locate,
 }
 
@@ -98,6 +109,12 @@ impl PlanOptions {
                 .map(PathBuf::from)
                 .map_or_else(default_dbtxt, Ok)?,
             allow_clone: !p.switch("--no-clone"),
+            source_conf: p.value("--source-conf").map(PathBuf::from),
+            target_conf: p.value("--target-conf").map(PathBuf::from).or_else(|| {
+                std::env::var_os("CUBRID")
+                    .map(|c| PathBuf::from(c).join("conf/cubrid.conf"))
+                    .filter(|c| c.is_file())
+            }),
             locate: if p.switch("--volumes-in-first-dir") {
                 Locate::FirstVolumeDir
             } else {
@@ -159,6 +176,18 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
         target_line: o.target_line,
         target_dir: &o.target_dir,
         allow_clone: o.allow_clone,
+        source_ignores_trailing_space: o
+            .source_conf
+            .as_deref()
+            .map(|c| ignore_trailing_space(c, &o.db))
+            .transpose()?
+            .unwrap_or(false),
+        target_ignores_trailing_space: o
+            .target_conf
+            .as_deref()
+            .map(|c| ignore_trailing_space(c, &o.target_name))
+            .transpose()?
+            .unwrap_or(false),
     })?;
     if let Err(e) = register_db::check_name_free(&o.target_dbtxt, &o.target_name) {
         plan.refusals.push(e.to_string());

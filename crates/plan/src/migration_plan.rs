@@ -18,6 +18,7 @@ use fastmig_catalog::class_rows::{Row, read_rows};
 use fastmig_catalog::classify::{ClassKind, classify};
 use fastmig_catalog::collation_check::check_collations;
 use fastmig_catalog::deferred_indexes::{deferred_indexes, report_name};
+use fastmig_catalog::identifier_lower::IdentifierCasing;
 use fastmig_catalog::output_sql::{deferred_indexes_sql, plcsql_routines, recompile_plcsql_sql};
 use fastmig_catalog::owner_qualification::qualify_names;
 use fastmig_catalog::owner_qualified_names;
@@ -26,7 +27,7 @@ use fastmig_catalog::sp_target_signature::{TARGET_CLASS_LEN, split_target_signat
 use fastmig_catalog::stored_texts::map_stored_texts;
 use fastmig_catalog::system_classes::SystemClassRole;
 use fastmig_catalog::system_name_mapping::judge;
-use fastmig_catalog::system_rows::{stored_procedure, stored_procedure_code};
+use fastmig_catalog::system_rows::{stored_procedure, stored_procedure_code, text, user};
 use fastmig_catalog::system_table::SystemTable;
 use fastmig_catalog::{attr_default, template_store};
 use fastmig_ondisk::boot_parm::BootDbParm;
@@ -39,6 +40,7 @@ use fastmig_ondisk::value::{Collation, DbType};
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, file_tracker};
 
+use crate::compare_rule_mismatch::{self, OldRules, OwnerNames};
 use crate::copy_method::{self, CopyMethod};
 use crate::free_space;
 use crate::lob_scan::{self, LobScan};
@@ -53,6 +55,10 @@ pub struct PlanInputs<'a> {
     pub target_line: VersionLine,
     pub target_dir: &'a Path,
     pub allow_clone: bool,
+    /// The source's server ran with `ignore_trailing_space=yes` (its `cubrid.conf`, workspace#541).
+    pub source_ignores_trailing_space: bool,
+    /// The target's server would run with `ignore_trailing_space=yes`.
+    pub target_ignores_trailing_space: bool,
 }
 
 /// Engine names of the GLOSSARY's page treatment grade.
@@ -116,6 +122,8 @@ pub struct Plan {
     pub deferred_indexes: Vec<String>,
     /// `<dest>/fastmig/deferred-indexes.sql`.
     pub deferred_indexes_sql: String,
+    /// `<dest>/fastmig/post-migration-fixes.sql`: the target-side fixes of the compare rule mismatches (workspace#541).
+    pub post_migration_fixes_sql: String,
     /// `<dest>/fastmig/recompile-plcsql.sql`.
     pub recompile_plcsql_sql: String,
     pub plcsql_routines: usize,
@@ -151,17 +159,24 @@ fn invalid(msg: String) -> io::Error {
 }
 
 /// The refusals of a source the plan cannot lay out (its version has no codec line yet), as the error of
-/// [`build`]; the CLI reports them like a plan's refusals.
+/// [`build`], with the warnings found before the plan stopped; the CLI reports them like a plan's.
 #[derive(Debug)]
-pub struct Refused(pub Vec<String>);
+pub struct Refused {
+    pub refusals: Vec<String>,
+    pub warnings: Vec<String>,
+}
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "the plan refuses the migration:\n  {}",
-            self.0.join("\n  ")
-        )
+            self.refusals.join("\n  ")
+        )?;
+        if !self.warnings.is_empty() {
+            write!(f, "\nwarnings:\n  {}", self.warnings.join("\n  "))?;
+        }
+        Ok(())
     }
 }
 
@@ -203,6 +218,32 @@ fn rows_of(
     }
 }
 
+/// Owner name prefixes by `db_user` row OID, lowercased as the engine does: the target names of a source before user
+/// schema start with them (workspace#511, #544).
+fn owner_names(
+    vs: &VolumeSet,
+    line: VersionLine,
+    classes: &[SourceClass],
+) -> io::Result<OwnerNames> {
+    let lang = rows_of(vs, line, classes, SystemTable::DbRoot)?
+        .into_iter()
+        .find_map(|r| text(r.values.get("lang")).map(<[u8]>::to_vec))
+        .unwrap_or_default();
+    let casing = IdentifierCasing::of(vs.volume(0)?.header.db_charset as u8, &lang);
+    Ok(rows_of(vs, line, classes, SystemTable::DbUser)?
+        .into_iter()
+        .filter_map(|r| {
+            // the pre-check refuses an owner this casing cannot lower (P7)
+            user::name(&r.values).map(|n| {
+                (
+                    r.oid,
+                    casing.lower(n).unwrap_or_else(|| n.to_ascii_lowercase()),
+                )
+            })
+        })
+        .collect())
+}
+
 /// The lob-base-path as a directory: `file:<dir>` only (G6 4: `owfs:` has no path in 11.4 or develop builds).
 pub fn lob_base_dir(source: &DatabaseEntry) -> Result<Option<PathBuf>, String> {
     match &source.lob_base_path {
@@ -233,7 +274,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         Ok(l) => l,
         Err(e) => {
             refusals.insert(0, e);
-            return Err(io::Error::other(Refused(refusals)));
+            return Err(io::Error::other(Refused {
+                refusals,
+                warnings: Vec::new(),
+            }));
         }
     };
     let pair = VersionPair {
@@ -242,12 +286,40 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     };
     let regenerates = pair.regenerates_catalog();
     refusals.extend(pair.refusal());
-    // 10.2 values read (workspace#520), names and texts owner-qualified (workspace#544), TDE metadata written
-    // (workspace#515); still open: workspace#540, #548, #549
-    if pair.source == VersionLine::V10_2 {
-        return Err(io::Error::other(Refused(refusals)));
+    // the tool orders VARCHAR keys with trailing spaces counted; a target comparing without them reads its indexes
+    // out of order (G10 workspace#541: refused, not a warning)
+    if i.target_ignores_trailing_space {
+        refusals.push(format!(
+            "the target cubrid.conf sets {}=yes: the rebuilt VARCHAR indexes count trailing spaces, so that server \
+             would read them out of order; set it to no for the target (workspace#541)",
+            crate::cubrid_conf::PARAMETER
+        ));
     }
-    let mut warnings = Vec::new();
+    // classes: roles and re-encoding only differ across lines (workspace#482)
+    let classes = read_classes(i.vols, line)?;
+    // rows placed or matched under the source's older string rules: warned before the version gate, so a 10.2 plan
+    // shows them too (G10 workspace#541)
+    let owners = match version {
+        SourceVersion::V10_2 | SourceVersion::V11_0 => owner_names(i.vols, line, &classes)?,
+        _ => OwnerNames::new(),
+    };
+    let mismatch = compare_rule_mismatch::check(
+        i.vols,
+        line,
+        &classes,
+        &owners,
+        OldRules {
+            hash_space_weight_0: version == SourceVersion::V10_2,
+            trailing_space_ignored: version == SourceVersion::V10_2
+                || i.source_ignores_trailing_space,
+        },
+    )?;
+    let mut warnings = mismatch.warnings;
+    // 10.2 values read (workspace#520), names and texts owner-qualified (workspace#544), TDE metadata written
+    // (workspace#515); still open: workspace#540, #549
+    if pair.source == VersionLine::V10_2 {
+        return Err(io::Error::other(Refused { refusals, warnings }));
+    }
     let mut system_name_rewrites = Vec::new();
 
     // the log and the volumes: one cleanly shut down database
@@ -297,8 +369,6 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         }
     }
 
-    // classes: roles and re-encoding only differ across lines (workspace#482)
-    let classes = read_classes(i.vols, line)?;
     if matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
         // a pre-11.4 Java target must split into develop's target_class/target_method (R12 § 5.1 2)
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedure)? {
@@ -638,6 +708,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         treated_pages,
         deferred_indexes: deferred_names,
         deferred_indexes_sql,
+        post_migration_fixes_sql: mismatch.post_migration_fixes_sql,
         recompile_plcsql_sql: recompile_plcsql_sql(&routines),
         plcsql_routines: routines.len(),
         lob,

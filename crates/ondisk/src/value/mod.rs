@@ -18,6 +18,7 @@ pub mod lzo1x;
 pub mod numeric;
 pub mod or_buf;
 pub mod packed_domain;
+pub mod partition_hash;
 pub mod radix_words;
 pub mod set;
 pub mod string;
