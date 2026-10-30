@@ -37,6 +37,8 @@ pub struct VolumeJob {
     /// The target was created and allocated in full by [`preallocate_targets`] at the start of the run: it is
     /// byte-copied into, never cloned (workspace#526).
     pub preallocated: bool,
+    /// The target was cloned by [`clone_targets`] at the start of the run: kept as is (workspace#526).
+    pub precloned: bool,
 }
 
 pub use fastmig_plan::CopyMethod;
@@ -71,9 +73,15 @@ pub fn copy_volumes(
                 job.volid, job.io_pagesize
             )));
         }
-        if job.preallocated {
+        if job.preallocated || job.precloned {
             let dst = OpenOptions::new().write(true).open(&job.target)?;
-            *prepared[i].lock().unwrap() = Some((dst, CopyMethod::Copy, size));
+            let method = if job.precloned {
+                meter.add(size);
+                CopyMethod::Clone
+            } else {
+                CopyMethod::Copy
+            };
+            *prepared[i].lock().unwrap() = Some((dst, method, size));
             return Ok(());
         }
         marker.record(&job.target)?;
@@ -155,6 +163,25 @@ pub fn preallocate_targets(jobs: &[VolumeJob], marker: &IncompleteMarker) -> io:
                 format!("allocating {size} B for {}: {e}", job.target.display()),
             )
         })?;
+    }
+    Ok(())
+}
+
+/// Clones the target of every job not byte-copied, at the start of the run (workspace#526: the pages the run rewrites
+/// in a clone are unshared right after, before the reservation is taken). A volume the filesystem refuses to clone
+/// stops the run: the free-space check counted it as a clone.
+pub fn clone_targets(jobs: &mut [VolumeJob], marker: &IncompleteMarker) -> io::Result<()> {
+    for job in jobs.iter_mut().filter(|j| !j.preallocated) {
+        marker.record(&job.target)?;
+        let dst = create_target(&job.target)?;
+        if !try_clone(&job.source, &dst)? {
+            return Err(io::Error::other(format!(
+                "{}: the filesystem refused to clone volume {} (the plan counted it as a clone); run with --no-clone",
+                job.target.display(),
+                job.volid
+            )));
+        }
+        job.precloned = true;
     }
     Ok(())
 }

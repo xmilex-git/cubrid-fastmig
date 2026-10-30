@@ -68,7 +68,7 @@ pub fn json(p: &Plan, t: &TargetSpace, resources: &str) -> String {
         })
         .collect();
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"copy_bytes\": {}, \"log_bytes\": {}, \"reserved_bytes\": {}, \"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"copy_bytes\": {}, \"log_bytes\": {}, \"unshare\": {}, \"unshare_bytes\": {}, \"reserved_bytes\": {}, \"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
         p.source_version.name(),
         line_name(p.version_pair.target),
         strings(p.refusals.iter().map(String::as_str)),
@@ -91,6 +91,8 @@ pub fn json(p: &Plan, t: &TargetSpace, resources: &str) -> String {
         p.java_static.bytes,
         t.copy_bytes,
         t.log_bytes,
+        p.unshare,
+        t.unshare_bytes,
         t.extra_bytes,
         t.needed(),
         p.available_bytes,
@@ -151,16 +153,24 @@ pub fn table(p: &Plan, t: &TargetSpace) -> String {
     ));
     let mib = |b: u64| b.div_ceil(1 << 20);
     s.push_str(&format!(
-        "target space taken at the start: {} MiB byte-copied volumes + {} MiB new log + {} MiB reserved (upper bound of the rest, held until the end: needs {} MiB free); {} MiB free\n",
+        "target space taken at the start: {} MiB byte-copied volumes + {} MiB new log + {} MiB cloned pages unshared + {} MiB reserved (upper bound of the rest, held until the end: needs {} MiB free); {} MiB free\n",
         mib(t.copy_bytes),
         mib(t.log_bytes),
+        mib(t.unshare_bytes),
         mib(t.extra_bytes),
         mib(t.needed()),
         mib(p.available_bytes)
     ));
     s.push_str(&format!(
-        "unreserved writes ≤ {} MiB: cloned pages unshared, new B-trees, LOB and Java files are written outside the space taken at the start; keep that much free of other writers during the run\n",
-        mib(t.extra_bytes)
+        "unreserved writes ≤ {} MiB: {}new B-trees, appended heap pages, LOB and Java files are written outside the space taken at the start; keep that much free of other writers during the run\n",
+        mib(t.extra_bytes),
+        if p.unshare {
+            ""
+        } else if p.volumes.iter().any(|v| v.copy_method == fastmig_plan::CopyMethod::Clone) {
+            "rewritten pages of the cloned volumes (this filesystem cannot unshare them at the start: not XFS), "
+        } else {
+            ""
+        }
     ));
     s.push_str(&format!("warnings ({}):\n", p.warnings.len()));
     p.warnings

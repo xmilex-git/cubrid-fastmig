@@ -155,9 +155,15 @@ Right after the incomplete marker, before the first byte of the target, `migrate
 - the new log `<target>_lgat` is created at its full size and allocated (`new_log::allocate`); its header is
   written last, so until then page 0 has no log magic and the target does not boot (copydb leaves the other pages
   as holes; here they are zero);
+- every volume the plan clones is cloned now (`volume_copy::clone_targets`; a filesystem that refuses stops the
+  run before anything else is written), and on XFS the pages the run rewrites in it — the allocated pages of every
+  file it frees and, on the same-version path, of the root heap and the treated heaps, on the 11.x path of every
+  heap (`Plan::unshare_ranges`) — get blocks of their own (`preallocate::unshare`, `FALLOC_FL_UNSHARE_RANGE`): taken
+  once, not held twice in the reservation. Another filesystem keeps them in the reservation, and `plan` says so;
 - one reservation file, `<dest>/fastmig/reserve-target`, holds an upper bound of everything else the run may
-  write, until the run ends: the pages a cloned volume unshares (`Plan::rewritten_pages_bound` — every heap page
-  when the catalog is regenerated, else the treated pages and the root heap), the new B-trees (`target_space::btree_pages`,
+  write, until the run ends: where the target cannot unshare, the pages a cloned volume unshares
+  (`Plan::rewritten_pages_bound` — every heap page when the catalog is regenerated, else the treated pages and the
+  root heap, and the freed files' pages), the new B-trees (`target_space::btree_pages`,
   below), 64 pages of catalog slack, the referenced LOB and Java files. The file is
   removed only when the run ends, so while the run writes what it bounds the space is held twice (accepted,
   1번 세션 decision).
@@ -213,6 +219,20 @@ reservation (`--workers 16 --mem 64M`):
 | T1 11.4 clean | 37,617,664 | 61,396,084 | 1.63 |
 | T1 11.4 dirty | 40,468,480 | 60,183,668 | 1.48 |
 | T4 11.3 dirty | 40,796,160 | 59,802,052 | 1.46 |
+
+That table is before the unshare at the start (2ac7dc5). With it, on XFS, the blocks the run unshares beyond the
+ranges it took at the start, against the reservation (`--workers 16 --mem 64M`):
+
+| T1 DB | unshared at the start, B | written beyond it, B | reservation, B |
+|---|---|---|---|
+| develop dirty | 35,586,048 | 4,800,512 | 22,451,316 |
+| develop clean | 18,235,392 | 5,259,264 | 23,745,652 |
+| 11.4 dirty | 35,635,200 | 6,635,520 | 24,581,236 |
+| 11.4 clean | 35,553,280 | 7,061,504 | 25,875,572 |
+
+The ranges hold whole files (a treated heap's pages that need no patch too), so more is unshared than written
+before (develop dirty 40.4 MB against 30.3 MB), but taken once: the free space needed went from 2 × 57.1 MB to
+35.6 + 2 × 22.5 MB. Cloning and unsharing took 0.08 to 0.16 s on T1 (report.json `volumes.clone_unshare`).
 
 Heap pages the page treatment appends are bounded too (`page_treatment::appended_pages_bound`): only a re-encoded
 record can grow, so every record of a re-encoded class is re-encoded as the treatment will (the same encoder, LOB

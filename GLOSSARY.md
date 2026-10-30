@@ -201,7 +201,7 @@ _Avoid_: 스왑, 임시 볼륨(엔진 용어와 섞인다)
 _Avoid_: 디스크 쿼터, temp 크기
 
 **예약 밖 쓰기 (unreserved writes)**:
-migrate가 시작할 때 잡은 공간(통째로 할당한 바이트 복사 볼륨과 새 로그, spill 아레나) 밖에 쓰는 바이트: clone 볼륨이 공유를 푸는 페이지, 새 B-tree, LOB·Java 파일. 시작할 때 그 상한만큼 예약 파일을 잡아 끝까지 두지만, 쓰기는 예약 파일이 아니라 남은 빈 공간에 들어가므로, 실행 중 다른 프로세스가 파일시스템을 채우면 이 쓰기는 디스크 부족으로 멈출 수 있다. `plan`은 그 상한을 `unreserved writes ≤ N MiB`로 보인다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
+migrate가 시작할 때 잡은 공간(통째로 할당한 바이트 복사 볼륨과 새 로그, XFS에서 미리 공유를 푼 clone 볼륨의 재작성 페이지, spill 아레나) 밖에 쓰는 바이트: 새 B-tree, 덧붙는 힙 페이지, LOB·Java 파일, 그리고 XFS가 아닌 파일시스템에서는 clone 볼륨이 공유를 푸는 페이지. 시작할 때 그 상한만큼 예약 파일을 잡아 끝까지 두지만, 쓰기는 예약 파일이 아니라 남은 빈 공간에 들어가므로, 실행 중 다른 프로세스가 파일시스템을 채우면 이 쓰기는 디스크 부족으로 멈출 수 있다. `plan`은 그 상한을 `unreserved writes ≤ N MiB`로 보인다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
 _Avoid_: 예약 공간, 여유 공간
 
 **인덱스 묶음 (index batch)**:

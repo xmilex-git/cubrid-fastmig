@@ -34,11 +34,12 @@ use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::class_object::{ClassType, class_properties};
 use fastmig_ondisk::databases_txt::DatabaseEntry;
 use fastmig_ondisk::file_header::{FileHeader, FileType};
+use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::heap_rewrite::VacuumHorizon;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::value::{Collation, DbType};
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, file_tracker};
+use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, Vfid, Vpid, file_tracker};
 
 use crate::compare_rule_mismatch::{self, OldRules, OwnerNames};
 use crate::copy_method::{self, CopyMethod};
@@ -94,6 +95,14 @@ pub struct ClassTreatment {
     pub heap: HeapTreatment,
 }
 
+/// Pages `first .. first + pages` of volume `volid`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRange {
+    pub volid: i16,
+    pub first: i32,
+    pub pages: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct VolumePlan {
     pub volid: i16,
@@ -136,6 +145,11 @@ pub struct Plan {
     /// and the root heap (class objects get the rebuilt BTIDs); and every page of the files the run frees, which
     /// `destroy_file` retypes.
     pub rewritten_pages_bound: u64,
+    /// The target can unshare a clone's blocks (XFS) and a volume is cloned: `unshare_ranges` are taken at the
+    /// start and the rewritten pages leave the reservation (workspace#526).
+    pub unshare: bool,
+    /// Pages of cloned volumes the run rewrites in place (the allocated pages of the files above), merged.
+    pub unshare_ranges: Vec<PageRange>,
     /// Free bytes of the target filesystem (the need is `cubrid-fastmig` `target_space`, with the resource estimate).
     pub available_bytes: u64,
     /// Non-empty means migrate does not start.
@@ -375,6 +389,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     // unshares (workspace#526): every B-tree and overflow key file; with a regenerated catalog also the catalog,
     // heap and overflow heap files (an upper bound of the system ones freed)
     let mut freed_pages = 0u64;
+    // files whose allocated pages the run rewrites in place: unshared at the start on a filesystem that can (below)
+    let mut rewritten_files: Vec<Vfid> = Vec::new();
     for it in &items {
         let h = FileHeader::read(&i.vols.read_page(it.vfid.header_vpid())?);
         if h.is_tde_encrypted() {
@@ -392,6 +408,19 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         // destroy_file retypes the allocated pages: user and table pages (a regenerated catalog's heap user pages are
         // in the heap bound already)
         let (user, ftab) = (h.n_page_user.max(0) as u64, h.n_page_ftab.max(0) as u64);
+        let freed = match h.file_type() {
+            Some(FileType::Btree | FileType::BtreeOverflowKey) => true,
+            Some(
+                FileType::Catalog
+                | FileType::MultipageObjectHeap
+                | FileType::Heap
+                | FileType::HeapReuseSlots,
+            ) => regenerates,
+            _ => false,
+        };
+        if freed {
+            rewritten_files.push(it.vfid);
+        }
         freed_pages += match h.file_type() {
             Some(FileType::Btree | FileType::BtreeOverflowKey) => user + ftab,
             Some(FileType::Catalog | FileType::MultipageObjectHeap) if regenerates => user + ftab,
@@ -726,6 +755,51 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     if !regenerates && pending {
         treated_pages += pages_of(boot.rootclass_hfid).unwrap_or(0);
     }
+    if !regenerates {
+        rewritten_files.push(boot.rootclass_hfid.vfid);
+        if pending {
+            rewritten_files.extend(
+                classes
+                    .iter()
+                    .zip(&treatments)
+                    .filter(|(_, t)| matches!(t.heap, HeapTreatment::InPlace(_)))
+                    .map(|(c, _)| c.class.heap.vfid),
+            );
+        }
+    }
+    // the pages they hold on cloned volumes, as ranges: taken at the start when the target can unshare
+    let cloned: Vec<i16> = volumes
+        .iter()
+        .filter(|v| v.copy_method == CopyMethod::Clone)
+        .map(|v| v.volid)
+        .collect();
+    let unshare = !cloned.is_empty() && free_space::can_unshare(i.target_dir)?;
+    let mut pages: Vec<Vpid> = Vec::new();
+    if unshare {
+        rewritten_files.sort();
+        rewritten_files.dedup();
+        for vfid in &rewritten_files {
+            pages.extend(
+                FileTable::read(i.vols, *vfid)?
+                    .allocated_pages()
+                    .into_iter()
+                    .filter(|p| cloned.contains(&p.volid)),
+            );
+        }
+    }
+    pages.sort();
+    pages.dedup();
+    let mut unshare_ranges: Vec<PageRange> = Vec::new();
+    for p in pages {
+        match unshare_ranges.last_mut() {
+            Some(r) if r.volid == p.volid && r.first + r.pages as i32 == p.pageid => r.pages += 1,
+            _ => unshare_ranges.push(PageRange {
+                volid: p.volid,
+                first: p.pageid,
+                pages: 1,
+            }),
+        }
+    }
 
     // what the target needs is bounded with the resource estimate (cli target_space, workspace#526)
     let available = free_space::available_bytes(i.target_dir)?;
@@ -745,6 +819,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         lob,
         java,
         java_static,
+        unshare,
+        unshare_ranges,
         rewritten_pages_bound: rewritten_pages_bound
             + if regenerates { 0 } else { treated_pages }
             + freed_pages,

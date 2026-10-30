@@ -16,7 +16,7 @@
 //! (new log), G6 workspace#488 (LOB and Java assets), workspace#495 (verify), workspace#505 (this wiring).
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use std::time::Instant;
 
 use fastmig_catalog::output_sql::UPDATE_STATISTICS_SQL;
 use fastmig_copy::out_of_volume_asset::{self, AssetOutcome};
-use fastmig_copy::volume_copy::preallocate_targets;
+use fastmig_copy::volume_copy::{clone_targets, preallocate_targets};
 use fastmig_copy::{
     AsIs, CopyMethod, IncompleteMarker, VolumeJob, VolumeOutcome, copy_volumes, durable,
     lob_manifest, new_log, new_log_start, open_source, register_db, volinfo,
@@ -34,6 +34,7 @@ use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::databases_txt::DatabaseEntry;
 use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::log_header::LogHeader;
+use fastmig_ondisk::preallocate;
 use fastmig_ondisk::sector_reserve::{VolumeGrowth, sectors_of_bytes};
 use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::volume_addition::VolumePlace;
@@ -341,6 +342,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             target,
             io_pagesize: src.vols.io_pagesize(),
             preallocated: v.copy_method == CopyMethod::Copy,
+            precloned: false,
         });
     }
     let bytes = plan.volumes.iter().map(|v| v.bytes).sum();
@@ -359,6 +361,32 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let log_header = new_log::new_header(&src.log, pair.target, first_pageid, &po.target_name);
     marker.record(&lgat)?;
     new_log::allocate(&lgat, &log_header)?;
+    // cloned volumes now, and the pages the run rewrites in them unshared: their space is taken once, here
+    let t = Instant::now();
+    clone_targets(&mut jobs, &marker)?;
+    if plan.unshare {
+        let io = src.vols.io_pagesize() as u64;
+        for r in &plan.unshare_ranges {
+            let job = jobs
+                .iter()
+                .find(|j| j.volid == r.volid)
+                .ok_or_else(|| io::Error::other(format!("no target for volume {}", r.volid)))?;
+            let f = OpenOptions::new().write(true).open(&job.target)?;
+            preallocate::unshare(&f, r.first as u64 * io, r.pages as u64 * io).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "unsharing pages {}..{} of {}: {e}",
+                        r.first,
+                        r.first as i64 + r.pages as i64,
+                        job.target.display()
+                    ),
+                )
+            })?;
+        }
+    }
+    rep.steps
+        .push(("volumes.clone_unshare", t.elapsed().as_secs_f64()));
     let _reservation = Reservation::take(
         &marker,
         &fastmig_dir.join("reserve-target"),

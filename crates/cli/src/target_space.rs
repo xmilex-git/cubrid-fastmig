@@ -44,6 +44,8 @@ pub struct TargetSpace {
     pub copy_bytes: u64,
     /// The new log, allocated at the start.
     pub log_bytes: u64,
+    /// Cloned pages the run rewrites, unshared at the start (`Plan::unshare_ranges`; 0 where the target cannot).
+    pub unshare_bytes: u64,
     /// The reservation file: everything else the run may write, outside the space allocated at the start (the
     /// unreserved writes).
     pub extra_bytes: u64,
@@ -55,7 +57,7 @@ impl TargetSpace {
     /// Free space the run needs on the target filesystem: the reservation stays until the run ends while the writes
     /// it bounds take up to as much again.
     pub fn needed(&self) -> u64 {
-        self.copy_bytes + self.log_bytes + 2 * self.extra_bytes
+        self.copy_bytes + self.log_bytes + self.unshare_bytes + 2 * self.extra_bytes
     }
 }
 
@@ -77,12 +79,20 @@ pub fn bound(plan: &Plan, est: &ResourceEstimate, io_page: u64, new_log_bytes: u
             btree_pages(f, g, io_page as usize, est.workers)
         })
         .sum();
-    let pages = plan.rewritten_pages_bound + btree_pages + est.appended_pages + CATALOG_SLACK_PAGES;
+    // rewritten pages: unshared at the start where the target can (on a byte-copied volume they are inside it already)
+    let (unshare_bytes, rewritten) = if plan.unshare {
+        let pages: u64 = plan.unshare_ranges.iter().map(|r| r.pages as u64).sum();
+        (pages * io_page, 0)
+    } else {
+        (0, plan.rewritten_pages_bound)
+    };
+    let pages = rewritten + btree_pages + est.appended_pages + CATALOG_SLACK_PAGES;
     let extra_bytes =
         pages * io_page + plan.lob.referenced_bytes() + plan.java.bytes + plan.java_static.bytes;
     TargetSpace {
         copy_bytes,
         log_bytes: new_log_bytes,
+        unshare_bytes,
         extra_bytes,
         btree_pages,
     }
