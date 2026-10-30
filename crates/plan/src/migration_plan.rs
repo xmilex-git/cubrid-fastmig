@@ -48,6 +48,7 @@ use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, Vfid, Vpid, Vsid, fi
 use crate::compare_rule_mismatch::{self, OldRules, OwnerNames};
 use crate::copy_method::{self, CopyMethod};
 use crate::dblink_passwords::{ServerPasswords, server_passwords};
+use crate::dropped_owner;
 use crate::execute_grants::{ExecuteGrants, execute_grants};
 use crate::free_space;
 use crate::keyinfo_heap_room::Volume0Room;
@@ -676,11 +677,19 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         owned.insert(SystemTable::DbUser, users);
         owned.insert(SystemTable::DbTrigger, triggers);
         let charset = i.vols.volume(0)?.header.db_charset as u8;
-        grants = execute_grants(
-            &qualify_names(version, &mut mapped, &mut owned, charset)
-                .map_err(|e| invalid(format!("owner-qualified names: {}", e.what)))?,
+        // a procedure whose owner was dropped has no owner-qualified name: refused, not qualified (workspace#556)
+        let dropped = dropped_owner::refusals(
+            &owned[&SystemTable::DbStoredProcedure],
+            &owned[&SystemTable::DbUser],
         );
-        warnings.extend(grants.warning.clone());
+        if dropped.is_empty() {
+            grants = execute_grants(
+                &qualify_names(version, &mut mapped, &mut owned, charset)
+                    .map_err(|e| invalid(format!("owner-qualified names: {}", e.what)))?,
+            );
+            warnings.extend(grants.warning.clone());
+        }
+        refusals.extend(dropped);
         // the index DDL names its class as the target does: run as dba, a 10.2/11.0 source's bare class name finds no
         // class of another owner (workspace#555)
         let qualified = deferred_indexes(&mapped, line)?;
