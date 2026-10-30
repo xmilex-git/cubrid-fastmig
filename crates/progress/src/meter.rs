@@ -5,7 +5,8 @@
 //! [`Meter::add`] from the workers. Output: what the monitor and the report read.
 //! Writers pay one `Relaxed` add on their own cache line per batch (a copy task, a run of records): no lock, no
 //! clock, no allocation. Sums, times and rates are the reader's work. Boundaries are timed by the thread that
-//! calls `advance`, which is never a worker's hot loop.
+//! calls `advance`, which is never a worker's hot loop. It also samples the process's CPU time and device bytes there
+//! ([`crate::proc_sample`]), two small /proc reads per boundary.
 //! Source: user request relayed in workspace#472 (추가 3: writers free, the reader does the work).
 
 use std::cell::Cell;
@@ -15,6 +16,8 @@ use std::thread::Thread;
 use std::time::Instant;
 
 use crate::default_rates::DefaultRate;
+use crate::proc_sample::ProcSample;
+use crate::resource::Resource;
 use crate::unit::Unit;
 
 /// Counter slots per phase. Threads beyond this share slots (still correct, only no longer contention-free).
@@ -31,6 +34,8 @@ pub struct PhaseSpec {
     pub unit: Unit,
     /// Ignored for [`Unit::Step`], which is timed by [`crate::default_rates::STEP`].
     pub rate: DefaultRate,
+    /// The resource assumed to bound the phase until it has run long enough to be classified ([`crate::resource`]).
+    pub prior: Resource,
 }
 
 impl PhaseSpec {
@@ -40,11 +45,22 @@ impl PhaseSpec {
             name,
             unit: Unit::Step,
             rate: DefaultRate { points: &[] },
+            prior: Resource::Cpu,
         }
     }
 
-    pub const fn work(name: &'static str, unit: Unit, rate: DefaultRate) -> PhaseSpec {
-        PhaseSpec { name, unit, rate }
+    pub const fn work(
+        name: &'static str,
+        unit: Unit,
+        rate: DefaultRate,
+        prior: Resource,
+    ) -> PhaseSpec {
+        PhaseSpec {
+            name,
+            unit,
+            rate,
+            prior,
+        }
     }
 }
 
@@ -54,12 +70,23 @@ pub(crate) struct Phase {
     slots: Box<[Slot]>,
     pub started: OnceLock<Instant>,
     pub ended: OnceLock<Instant>,
+    /// What the process had used when the phase began and ended (`None` inside: /proc unreadable).
+    pub sample_start: OnceLock<Option<ProcSample>>,
+    pub sample_end: OnceLock<Option<ProcSample>>,
 }
 
 impl Phase {
     pub fn done(&self) -> u64 {
         self.slots.iter().map(|s| s.0.load(Relaxed)).sum()
     }
+}
+
+/// One piece of work timed outside the phases ([`Progress::observe`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Observation {
+    pub seconds: f64,
+    pub predicted_s: f64,
+    pub used: Option<ProcSample>,
 }
 
 pub struct Progress {
@@ -71,6 +98,10 @@ pub struct Progress {
     pub(crate) run_started: Instant,
     /// Elapsed + estimated remaining seconds when the first measured phase began (the plan's totals known).
     pub(crate) start_estimate: OnceLock<f64>,
+    /// Work timed before the phases that predicts them (the precheck's pair count, workspace#560).
+    pub(crate) observations: Mutex<Vec<Observation>>,
+    /// (seconds since the run started, estimated total seconds) at each monitor tick: the report's ETA trail.
+    pub(crate) trail: Mutex<Vec<(f64, f64)>>,
     /// The monitor thread, woken at each boundary (and by a warning) so the screen redraws at once.
     pub(crate) waker: OnceLock<Thread>,
     /// Warnings for the running monitor to print between its frames; `None` while no monitor runs, so
@@ -96,10 +127,14 @@ impl Progress {
                 slots: (0..SLOTS).map(|_| Slot::default()).collect(),
                 started: OnceLock::new(),
                 ended: OnceLock::new(),
+                sample_start: OnceLock::new(),
+                sample_end: OnceLock::new(),
             })
             .collect();
         if let Some(p) = phases.first() {
             let _ = p.started.set(now);
+            // the process's counters start at 0 with the process, which is when the first phase's work began
+            let _ = p.sample_start.set(Some(ProcSample::default()));
         }
         Arc::new(Progress {
             title: title.to_string(),
@@ -108,6 +143,8 @@ impl Progress {
             current: AtomicUsize::new(0),
             run_started: now,
             start_estimate: OnceLock::new(),
+            observations: Mutex::new(Vec::new()),
+            trail: Mutex::new(Vec::new()),
             waker: OnceLock::new(),
             warnings: Mutex::new(None),
         })
@@ -130,9 +167,12 @@ impl Progress {
         let now = Instant::now();
         let i = self.current.load(Relaxed);
         let Some(p) = self.phases.get(i) else { return };
+        let sample = ProcSample::now();
         let _ = p.ended.set(now);
+        let _ = p.sample_end.set(sample);
         if let Some(next) = self.phases.get(i + 1) {
             let _ = next.started.set(now);
+            let _ = next.sample_start.set(sample);
             if next.spec.unit != Unit::Step && self.start_estimate.get().is_none() {
                 let est = crate::estimate::at_start(self, i + 1);
                 let _ = self.start_estimate.set(est);
@@ -142,6 +182,18 @@ impl Progress {
         if let Some(t) = self.waker.get() {
             t.unpark();
         }
+    }
+
+    /// Records work timed before the phases that tells how fast this host runs a kind of later work: `seconds` it
+    /// took, `predicted_s` its default rate gives, and `used` the [`ProcSample`] difference over it (which resource
+    /// it was bound by). Call before the phase it predicts begins.
+    pub fn observe(&self, seconds: f64, predicted_s: f64, used: Option<ProcSample>) {
+        let mut o = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+        o.push(Observation {
+            seconds,
+            predicted_s,
+            used,
+        });
     }
 
     /// Ends every phase still open (the run is over).

@@ -10,12 +10,16 @@ pub mod default_rates;
 pub mod estimate;
 pub mod meter;
 pub mod monitor;
+pub mod proc_sample;
 pub mod render_line;
 pub mod render_screen;
 pub mod report;
+pub mod resource;
 pub mod unit;
 
 pub use default_rates::DefaultRate;
 pub use meter::{Meter, PhaseSpec, Progress};
 pub use monitor::{HeapProbe, Mode, Monitor, TempProbe};
+pub use proc_sample::ProcSample;
+pub use resource::Resource;
 pub use unit::Unit;

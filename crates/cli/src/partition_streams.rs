@@ -23,7 +23,7 @@ use fastmig_ondisk::partition_stream::container::stream_of_pvalues;
 use fastmig_ondisk::partition_stream::{parse, serialize_with_mask, transcode_partition_stream};
 use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
-use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
+use fastmig_progress::{PhaseSpec, Progress, Resource, Unit, default_rates};
 
 use crate::args::{self, CliError};
 use crate::progress_args;
@@ -38,6 +38,7 @@ const PHASES: &[PhaseSpec] = &[
         default_rates::DefaultRate {
             points: &[(1, 1.0 / default_rates::STEP.as_secs_f64())],
         },
+        Resource::Cpu,
     ),
 ];
 const TRANSCODE: usize = 2;

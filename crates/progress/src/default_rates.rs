@@ -75,5 +75,20 @@ pub const VERIFY_PAIRS: DefaultRate = DefaultRate {
     points: &[(1, 0.53e6), (4, 1.9e6), (16, 3.8e6)],
 };
 
+/// Pairs the precheck's counting scan (`resource_estimate`, `fastmig_index::pair_count`) counts on a source of the
+/// target's release: 73.0 M in 1.70 s at 16 workers on the large develop DB (workspace#553 run). It reads the heaps and
+/// extracts the keys as the index build and the verifier do, so its time is the run's first CPU observation
+/// (workspace#560). Below 16 workers not yet measured: scaled like the index build.
+pub const PAIR_COUNT: DefaultRate = DefaultRate {
+    points: &[(1, 5.9e6), (4, 21.5e6), (16, 43.0e6)],
+};
+
+/// The same counting scan on an older source, each row of a re-encoded class re-encoded first: 73.0 M in 3.05 s at
+/// 16 workers on the large 11.4 DB (workspace#553 run, pair count less the appended-pages bound). Below 16 workers
+/// not yet measured: scaled like the index build.
+pub const PAIR_COUNT_RE_ENCODED: DefaultRate = DefaultRate {
+    points: &[(1, 3.3e6), (4, 12.0e6), (16, 24.0e6)],
+};
+
 /// A short fixed step (open, write a header, register): 0..25 ms each on T1 and the large DBs (workspace#560).
 pub const STEP: Duration = Duration::from_millis(10);

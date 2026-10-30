@@ -47,7 +47,7 @@ use fastmig_ondisk::{Oid, SourceVersion, Vsid};
 use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
-use fastmig_progress::{Meter, PhaseSpec, Progress, Unit, default_rates};
+use fastmig_progress::{Meter, PhaseSpec, ProcSample, Progress, Resource, Unit, default_rates};
 use fastmig_verify::Role;
 
 use crate::args::{CliError, parse};
@@ -105,27 +105,41 @@ const PHASES: &[PhaseSpec] = &[
         "open-sources",
         Unit::Bytes,
         default_rates::CLONED_RANGE_BYTES,
+        Resource::Write,
     ),
-    PhaseSpec::work("volume-copy", Unit::Bytes, default_rates::COPY_BYTES),
+    PhaseSpec::work(
+        "volume-copy",
+        Unit::Bytes,
+        default_rates::COPY_BYTES,
+        Resource::Write,
+    ),
     PhaseSpec::step("volume-paths"),
     PhaseSpec::work(
         "page-treatment",
         Unit::Count("pages"),
         default_rates::HEAP_PAGES,
+        Resource::Cpu,
     ),
     PhaseSpec::work(
         "index-build",
         Unit::Count("keys"),
         default_rates::INDEX_KEYS,
+        Resource::Cpu,
     ),
     PhaseSpec::step("catalog-regeneration"),
     PhaseSpec::step("out-of-volume-assets"),
     PhaseSpec::step("new-log"),
-    PhaseSpec::work("durable-sync", Unit::Bytes, default_rates::FSYNC_BYTES),
+    PhaseSpec::work(
+        "durable-sync",
+        Unit::Bytes,
+        default_rates::FSYNC_BYTES,
+        Resource::Write,
+    ),
     PhaseSpec::work(
         "verifier",
         Unit::Count("pairs"),
         default_rates::VERIFY_PAIRS,
+        Resource::Cpu,
     ),
     PhaseSpec::step("register"),
 ];
@@ -207,6 +221,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     // the reads inside precheck, timed on their own (workspace#526: what the space and temp figures cost)
     let mut pre: Vec<(&'static str, f64)> = Vec::new();
     let t = Instant::now();
+    let before = ProcSample::now();
     let mut est = resource_estimate::estimate(
         &src.vols,
         plan.version_pair,
@@ -218,6 +233,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         limits::physical_memory()?,
     )?;
     pre.push(("precheck.pair_count", t.elapsed().as_secs_f64()));
+    let pair_count_used = ProcSample::now().zip(before).map(|(a, b)| a.since(b));
     pre.push(("precheck.appended_bound", est.appended_seconds));
     let t = Instant::now();
     est.source_groups = verify::source_key_groups(&src, o.plan.locate, o.worker_limit)?;
@@ -270,6 +286,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             temp_limit,
             target,
             pre,
+            pair_count_used,
         },
         progress,
     )
@@ -312,6 +329,8 @@ struct Begun {
     target: TargetSpace,
     /// Timed parts of the precheck, reported before it.
     pre: Vec<(&'static str, f64)>,
+    /// What the precheck's pair count used (CPU seconds, device bytes): the resource it was bound by.
+    pair_count_used: Option<ProcSample>,
 }
 
 /// Returns report.json.
@@ -337,6 +356,19 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let target = b.target;
     let b_appended = b.est.appended_pages;
     let b_pairs: u64 = b.est.indexes.iter().map(|i| i.stats.pairs).sum();
+    // the pair count reads the heaps and extracts the keys as the index build and the verifier will: the run's first
+    // measure of this host's speed at that work (workspace#560)
+    let count_rate = if b.est.regenerates {
+        default_rates::PAIR_COUNT_RE_ENCODED
+    } else {
+        default_rates::PAIR_COUNT
+    }
+    .with_workers(o.worker_limit);
+    rep.progress.observe(
+        b.est.scan_seconds - b.est.appended_seconds,
+        b_pairs as f64 / count_rate,
+        b.pair_count_used,
+    );
     for w in &plan.warnings {
         rep.progress.warn(format!("warning: {w}"));
     }
