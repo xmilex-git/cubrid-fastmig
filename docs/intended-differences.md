@@ -20,3 +20,8 @@ Not listed here because a decision fixes them as rules, not as kept source state
 started serial (workspace#482 decision 8; the official path writes the declared start), and new `created_time` /
 `updated_time` values (the migrate start, in local time like the engine, workspace#543; the official path writes the
 load time). Rows the source already stamps keep their times on a develop → develop run.
+
+Not a difference from the official path either, but a change every 10.2 source sees: a view or trigger text on
+`db_trig` (rewritten to develop `db_trigger`, workspace#542) owned by a user without SELECT on a trigger's target class
+returns that trigger's row on develop; the 10.2 `db_trig` hid it, 11.4 `db_trig` and develop `db_trigger` show it
+(measured on 10.2.18 / 11.4.6 / develop, workspace#539). Users with rights, the trigger owner and DBA see the same rows.
