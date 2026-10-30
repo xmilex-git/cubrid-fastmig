@@ -34,6 +34,18 @@ pub struct Classified {
     pub defect: Defect,
 }
 
+/// The identity a target defect has under its source class name: a source before user schema (10.2, 11.0) names a
+/// user class `t` where the target names it `owner.t` (workspace#544). Those names have one namespace and no `.`
+/// (plan pre-check P3), so dropping the owner prefix is unambiguous; a later source's names carry the prefix on both
+/// sides and only match as they are (workspace#539).
+fn source_named_id(d: &Defect) -> DefectId {
+    let mut id = d.id();
+    if let Some((_, name)) = id.1.split_once('.') {
+        id.1 = name.to_string();
+    }
+    id
+}
+
 pub fn classify(target: Vec<Defect>, source: Option<Vec<Defect>>) -> Vec<Classified> {
     let Some(source) = source else {
         return target
@@ -46,11 +58,15 @@ pub fn classify(target: Vec<Defect>, source: Option<Vec<Defect>>) -> Vec<Classif
             .collect();
     };
     let src_ids: HashSet<DefectId> = source.iter().map(Defect::id).collect();
-    let tgt_ids: HashSet<DefectId> = target.iter().map(Defect::id).collect();
+    let tgt_ids: HashSet<DefectId> = target
+        .iter()
+        .flat_map(|d| [d.id(), source_named_id(d)])
+        .collect();
     let mut out: Vec<Classified> = target
         .into_iter()
         .map(|defect| Classified {
-            origin: if src_ids.contains(&defect.id()) {
+            origin: if src_ids.contains(&defect.id()) || src_ids.contains(&source_named_id(&defect))
+            {
                 DefectOrigin::PreExisting
             } else {
                 DefectOrigin::Migration
