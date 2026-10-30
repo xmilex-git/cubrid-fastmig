@@ -58,9 +58,7 @@ pub struct Rule {
     pub rewrite: Rewrite,
 }
 
-/// The rules of one version pair, applied in order. A 10.2 source has none: its unload prints names without owners,
-/// so its reference is the official path's target-line unload (10.2 unloaddb → target loaddb
-/// `--no-user-specified-name` → target unloaddb), compared as it is (workspace#552).
+/// The rules of one version pair, applied in order.
 pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
     match (source, target) {
         (SourceVersion::V11_4, VersionLine::Develop) => V11_4_TO_DEVELOP.iter().collect(),
@@ -84,7 +82,7 @@ pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
             .collect(),
         // the 10.2 names first: class-id-names and index-expression read the qualified forms; 10.2 prints serials and
         // triggers as 11.2 does, its auto_increment state as develop does (no auto-increment-11-2)
-        (SourceVersion::V10_2, VersionLine::Develop) => V10_2_TO_DEVELOP
+        (SourceVersion::V10_2, VersionLine::Develop) => V10_2_SOURCE
             .iter()
             .chain(V11_4_TO_DEVELOP)
             .chain(BEFORE_11_4)
@@ -93,6 +91,18 @@ pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
                     .iter()
                     .filter(|r| r.name != "auto-increment-11-2"),
             )
+            .collect(),
+        // as to develop, with the 11.4 target's rules of an 11.2 source (workspace#555)
+        (SourceVersion::V10_2, VersionLine::V11_4) => V10_2_SOURCE
+            .iter()
+            .chain(BEFORE_11_4)
+            .chain(BEFORE_11_4_TO_11_4)
+            .chain(
+                V11_2_SOURCE
+                    .iter()
+                    .filter(|r| r.name != "auto-increment-11-2"),
+            )
+            .chain(V11_2_TO_11_4)
             .collect(),
         // one line prints alike; a downgrade is out of scope (ADR 0003)
         _ => Vec::new(),
@@ -129,9 +139,9 @@ const BEFORE_11_4: &[Rule] = &[
     },
 ];
 
-// a 10.2 source has no user schema, prints views in two passes and no DONT_REUSE_OID (T4 10.2.18 -> develop,
-// workspace#555; `unload_rules_10_2`)
-const V10_2_TO_DEVELOP: &[Rule] = &[
+// a 10.2 source has no user schema, prints views in two passes and no DONT_REUSE_OID (T4 10.2.18 -> develop and
+// 11.4.6, workspace#555; `unload_rules_10_2`)
+const V10_2_SOURCE: &[Rule] = &[
     Rule {
         name: "owner-qualified-names",
         files: &["schema", "indexes", "trigger", "objects"],

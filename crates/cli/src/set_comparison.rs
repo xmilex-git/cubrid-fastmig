@@ -27,7 +27,7 @@ cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix> [--d
   --diff <file>    write every differing entry (< source only, > target only)
   --source-version <10.2|11.2|11.3|11.4|develop> --target-version <11.4|develop>
                    the engine lines that wrote each side; both or neither (default: one line, no normalization);
-                   a 10.2 source gets rules to develop only: to 11.4, compare against the official path's 11.4 unload
+                   a 10.2 source is compared with its own unload, as the other sources
   exit 0 = same entries, 1 = differ, 2 = usage or I/O error";
 
 /// Differing entries printed per file on stdout; `--diff` has all of them.
