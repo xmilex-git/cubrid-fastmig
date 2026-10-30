@@ -22,7 +22,7 @@ use crate::incomplete_marker::IncompleteMarker;
 use crate::worker_pool;
 
 /// Bytes one copy task moves (the unit the worker_limit slide over).
-const CHUNK_BYTES: u64 = 8 << 20;
+pub const CHUNK_BYTES: u64 = 8 << 20;
 /// Each worker's I/O buffer, the copy engine's only per-worker memory. Small enough to stay in the CPU cache
 /// between the read and the write: copying 1 GiB took 0.35 s with 256 KiB blocks and 0.99 s with 8 MiB blocks on
 /// the dev host (dd, page cache warm, workspace#494). A multiple of every IO page size (4..64 KiB).

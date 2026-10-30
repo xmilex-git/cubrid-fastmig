@@ -187,10 +187,14 @@ Right after the incomplete marker, before the first byte of the target, `migrate
   overflow heap and of the file tracker (single-page deallocations retype their pages), and the whole sectors of
   the heaps that take new pages inside their own sectors (on the 11.x path every live heap gets develop's
   bestspace pages after its header; elsewhere the catalog rows), where no reserved sector could be claimed — get
-  blocks of their own: the allocated pages with their content (`Plan::unshare_ranges`, `preallocate::unshare`,
-  `FALLOC_FL_UNSHARE_RANGE`), the unallocated ones without a copy (`Plan::zero_ranges`, `preallocate::zero`,
-  `FALLOC_FL_ZERO_RANGE`: unwritten blocks, no read of the clone's); one worker per volume, as XFS locks a file
-  for each call. Taken once, not held twice in the reservation. Another filesystem keeps them in the
+  blocks of their own: the allocated pages with their content, by writing the source bytes over them in 8 MiB
+  tasks on every worker (`Plan::unshare_ranges`, `migrate::take_cloned_ranges`; a whole-block write into a clone
+  takes new blocks without reading the shared ones, and XFS reserves them before the write returns), the
+  unallocated ones without a copy (`Plan::zero_ranges`, `preallocate::zero`, `FALLOC_FL_ZERO_RANGE`: unwritten
+  blocks, no read of the clone.s); then an fdatasync of every cloned volume, so a full disk fails here, before the
+  first rewrite. Until workspace#556 this was `FALLOC_FL_UNSHARE_RANGE`, one worker per volume: it reads the shared
+  blocks back from disk a page at a time and ran about 10 times slower than the write (see "Clone or copy" below).
+  Taken once, not held twice in the reservation. Another filesystem keeps them in the
   reservation, and `plan` says so;
 - on XFS with a cloned volume, the sectors the run will take are listed once, here (listed sectors,
   `TargetSpace::sectors`; ADR 0013): the engine's reservation order replayed one sector at a time
@@ -315,6 +319,47 @@ against `temp_disk.target_appended_bound_pages`; T1 11.4 clean and dirty 0 again
 and 11.2 clean 0 against 0. A source index with a defect (a live row's key missing)
 can make the source's counts too small: not covered yet (1번 세션 decision: a check at build time before the
 first page is written).
+
+## Clone or copy (workspace#556)
+
+The copy method stays G1's: clone wherever the filesystem allows it, with no threshold on the share of a volume a run
+rewrites. Taking a clone's rewritten ranges by writing the source bytes over them costs about the rewritten share of
+a byte copy, and the clone owns only that share; so a clone is never slower than a copy and never larger.
+`FALLOC_FL_UNSHARE_RANGE`, used for this until workspace#556, read the shared blocks back from disk a page at a time
+on one worker per volume and lost to the copy once about 40 % of a volume was rewritten.
+
+Big DBs (4.2 GB of volumes, about 22 million rows; `--workers 16 --mem 1G`, warm, CPU 16-31, three rounds in turn,
+median wall seconds; own bytes = the target volumes' blocks not shared with the source, `filefrag`):
+
+| Source → develop | BASE (CoW on write) | `FALLOC_FL_UNSHARE_RANGE` | write over (now) | `--no-clone` |
+|---|---|---|---|---|
+| 11.4: seconds | 16.95 | 19.68 | 17.41 | 17.44 |
+| 11.4: taking the ranges, s | 0.002 | 2.84 | 0.92 | — |
+| 11.4: own bytes | 3,038,035,968 | 3,790,962,688 | 3,790,962,688 | 4,429,185,024 |
+| develop: seconds | 13.08 | 13.21 | 13.21 | 14.57 |
+| develop: own bytes | 1,791,082,496 | 1,943,404,544 | 1,943,404,544 | 4,563,402,752 |
+
+BASE is e74b659 with the space taking at the start turned off (the rewritten pages unshared by CoW as they are
+written); the other two clone arms are e74b659 and 122cbb7. The 11.4 run rewrites 1.91 GB of the clones at the start
+(plan `unshare_bytes`) and owns 86 % of the volume bytes at the end, the worst share of the measured DBs, and the
+clone still ties the copy. `--verify` on the new path: 0 migration defects on both.
+
+Clone and take a share r of each volume (1 MiB sectors spread evenly), against a byte copy (allocate, 8 MiB tasks,
+256 KiB buffers), fsync included; the 11.4 big DB's 10 volumes, 4,429,185,024 B, 16 workers, warm, three runs each
+(scratch probe `sweep`):
+
+| r | clone + `FALLOC_FL_UNSHARE_RANGE`, s | clone + write over, s | copy, s | own bytes of the clones |
+|---|---|---|---|---|
+| 0 | 0.014 | 0.015 | 2.13–2.87 | 0 |
+| 0.25 | 1.10–1.31 | 0.56–0.58 | 1.88–1.96 | 1,107,296,256 |
+| 0.5 | 1.98–2.63 | 1.11–1.12 | 1.94–1.98 | 2,214,592,512 |
+| 0.75 | 2.85–3.32 | 1.63–1.69 | 2.10–2.13 | 3,321,888,768 |
+| 1 | 2.44–2.99 | 2.11–2.13 | 2.07–2.08 | 4,429,185,024 |
+
+The write over a clone reserves its blocks before it returns (Linux v6.9 `xfs_buffered_write_iomap_begin`: a shared
+extent goes to the COW fork, `xfs_bmapi_reserve_delalloc` takes the blocks with `xfs_mod_fdblocks`), and the step
+ends with an fdatasync of every cloned volume, so a full disk stops the run there, before its first rewrite
+(workspace#526).
 
 ## The spill arena
 

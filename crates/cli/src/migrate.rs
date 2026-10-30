@@ -19,13 +19,15 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use fastmig_catalog::output_sql::UPDATE_STATISTICS_SQL;
+use fastmig_copy::byte_copy::{CopyRange, copy_range};
 use fastmig_copy::out_of_volume_asset::{self, AssetOutcome};
-use fastmig_copy::volume_copy::{clone_targets, preallocate_targets};
+use fastmig_copy::volume_copy::{CHUNK_BYTES, IO_BUF_BYTES, clone_targets, preallocate_targets};
+use fastmig_copy::worker_pool;
 use fastmig_copy::{
     AsIs, CopyMethod, IncompleteMarker, VolumeJob, VolumeOutcome, copy_volumes, durable,
     lob_manifest, new_log, new_log_start, open_source, register_db, volinfo,
@@ -43,7 +45,6 @@ use fastmig_ondisk::volume_addition::VolumePlace;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_ondisk::{Oid, SourceVersion, Vsid};
 use fastmig_plan::Plan;
-use fastmig_plan::migration_plan::PageRange;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
 use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
@@ -367,40 +368,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let t = Instant::now();
     clone_targets(&mut jobs, &marker)?;
     if plan.unshare {
-        // one worker per volume: XFS takes a file's lock for each fallocate, so volumes go in parallel
-        let io = src.vols.io_pagesize() as u64;
-        // (a range whose content the run does not need is zeroed: blocks of its own without a copy)
-        let mut by_volume: Vec<(&VolumeJob, Vec<(&PageRange, bool)>)> = Vec::new();
-        let ranges = (target.unshare_ranges.iter().map(|r| (r, false)))
-            .chain(target.zero_ranges.iter().map(|r| (r, true)));
-        for (r, zero) in ranges {
-            match by_volume.iter_mut().find(|(j, _)| j.volid == r.volid) {
-                Some((_, rs)) => rs.push((r, zero)),
-                None => by_volume.push((
-                    jobs.iter().find(|j| j.volid == r.volid).ok_or_else(|| {
-                        io::Error::other(format!("no target for volume {}", r.volid))
-                    })?,
-                    vec![(r, zero)],
-                )),
-            }
-        }
-        let next = AtomicUsize::new(0);
-        let first_err: Mutex<Option<io::Error>> = Mutex::new(None);
-        std::thread::scope(|s| {
-            for _ in 0..o.worker_limit.clamp(1, by_volume.len().max(1)) {
-                s.spawn(|| {
-                    while let Some((job, rs)) = by_volume.get(next.fetch_add(1, Ordering::Relaxed))
-                    {
-                        if let Err(e) = unshare_ranges(job, rs, io) {
-                            first_err.lock().unwrap().get_or_insert(e);
-                        }
-                    }
-                });
-            }
-        });
-        if let Some(e) = first_err.into_inner().unwrap() {
-            return Err(e);
-        }
+        take_cloned_ranges(
+            &jobs,
+            &target,
+            src.vols.io_pagesize() as u64,
+            o.worker_limit,
+        )?;
     }
     rep.steps
         .push(("volumes.clone_unshare", t.elapsed().as_secs_f64()));
@@ -830,27 +803,73 @@ fn report_json(
     )
 }
 
-/// Unshares `ranges` of one cloned target volume, or zeroes those marked (`preallocate::zero`).
-fn unshare_ranges(job: &VolumeJob, ranges: &[(&PageRange, bool)], io: u64) -> io::Result<()> {
-    let f = OpenOptions::new().write(true).open(&job.target)?;
-    for &(r, zero) in ranges {
-        let (off, len) = (r.first as u64 * io, r.pages as u64 * io);
+/// Gives the ranges of the cloned volumes the run writes blocks of their own, before anything else is written: a
+/// rewritten range gets the source's bytes written over it, a range whose content the run does not need is zeroed
+/// (`preallocate::zero`). A whole-block write into a clone takes new blocks without reading the shared ones, from the
+/// source's page cache and on every worker; `FALLOC_FL_UNSHARE_RANGE` read them back from disk a page at a time,
+/// one worker per volume, about 10 times slower (workspace#556). XFS reserves the blocks of a buffered write into a
+/// clone before the write returns, and the step ends with an fdatasync of every cloned volume, so a full disk fails
+/// here, before the first rewrite (workspace#526).
+fn take_cloned_ranges(
+    jobs: &[VolumeJob],
+    target: &TargetSpace,
+    io: u64,
+    worker_limit: usize,
+) -> io::Result<()> {
+    let files = jobs
+        .iter()
+        .map(|j| OpenOptions::new().write(true).open(&j.target))
+        .collect::<io::Result<Vec<File>>>()?;
+    // (job index, range, zero), rewritten ranges cut into copy-engine chunks so all workers share the big ones
+    let mut tasks: Vec<(usize, u64, u64, bool)> = Vec::new();
+    let ranges = (target.unshare_ranges.iter().map(|r| (r, false)))
+        .chain(target.zero_ranges.iter().map(|r| (r, true)));
+    for (r, zero) in ranges {
+        let j = jobs
+            .iter()
+            .position(|j| j.volid == r.volid)
+            .ok_or_else(|| io::Error::other(format!("no target for volume {}", r.volid)))?;
+        let (start, end) = (r.first as u64 * io, (r.first as u64 + r.pages as u64) * io);
+        let step = if zero { end - start } else { CHUNK_BYTES };
+        tasks.extend(
+            (start..end)
+                .step_by(step.max(1) as usize)
+                .map(|s| (j, s, end.min(s + step), zero)),
+        );
+    }
+    worker_pool::run(tasks.len(), worker_limit, |i| {
+        let (j, start, end, zero) = tasks[i];
         let done = if zero {
-            preallocate::zero(&f, off, len)
+            preallocate::zero(&files[j], start, end - start)
         } else {
-            preallocate::unshare(&f, off, len)
+            let mut buf = vec![0u8; IO_BUF_BYTES];
+            let range = CopyRange {
+                src: &jobs[j].source,
+                dst: &files[j],
+                volid: jobs[j].volid,
+                io_pagesize: io as usize,
+                start,
+                end,
+            };
+            copy_range(&range, &mut buf, &AsIs)
         };
         done.map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!(
-                    "unsharing pages {}..{} of {}: {e}",
-                    r.first,
-                    r.first as i64 + r.pages as i64,
-                    job.target.display()
+                    "taking bytes {start}..{end} of {}: {e}",
+                    jobs[j].target.display()
                 ),
             )
-        })?;
-    }
-    Ok(())
+        })
+    })?;
+    // a delayed write error (ENOSPC included) shows here, before the first rewrite of these ranges
+    worker_pool::run(files.len(), worker_limit, |i| {
+        files[i].sync_data().map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("syncing {}: {e}", jobs[i].target.display()),
+            )
+        })
+    })
 }

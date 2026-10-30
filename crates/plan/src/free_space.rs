@@ -55,8 +55,9 @@ unsafe extern "C" {
     fn statfs(path: *const std::ffi::c_char, buf: *mut [i64; 16]) -> i32;
 }
 
-/// Whether the filesystem of `p` (or its nearest existing ancestor) can unshare a clone's blocks in place
-/// (`FALLOC_FL_UNSHARE_RANGE`): XFS (workspace#526; other filesystems keep the rewritten pages in the reservation).
+/// Whether the filesystem of `p` (or its nearest existing ancestor) gives a clone blocks of its own at the start, where
+/// a buffered write reserves them before it returns: XFS (workspace#526, #556; other filesystems keep the rewritten
+/// pages in the reservation).
 pub fn can_unshare(p: &Path) -> io::Result<bool> {
     let mut at = p;
     while !at.exists() {
