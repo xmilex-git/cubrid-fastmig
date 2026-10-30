@@ -97,13 +97,17 @@ fn owner_classes<'c>(defs: &[&'c IndexDef<'c>]) -> Result<Vec<OwnerClass<'c>>, B
                     (c, &defs[d].key_domain)
                 })
                 .collect();
-            let keys =
-                ClassKeys::new(class_oid, owner.class, owner.hfid, indexes).map_err(|e| {
-                    BuildError::Record {
-                        oid: class_oid,
-                        what: format!("class layout: {e}"),
-                    }
-                })?;
+            let keys = ClassKeys::new(
+                defs[d0].shape.target,
+                class_oid,
+                owner.class,
+                owner.hfid,
+                indexes,
+            )
+            .map_err(|e| BuildError::Record {
+                oid: class_oid,
+                what: format!("class layout: {e}"),
+            })?;
             Ok(OwnerClass { keys, feeds })
         })
         .collect()

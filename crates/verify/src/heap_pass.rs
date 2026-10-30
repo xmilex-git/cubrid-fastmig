@@ -539,7 +539,7 @@ fn row_keys(
 ) {
     for (ix, i) in indexes.iter().enumerate() {
         let name = String::from_utf8_lossy(&i.constraint.name).into_owned();
-        match extract_key(i.kd, layout, values, i.constraint) {
+        match extract_key(i.kd, layout, values, i.constraint, oid) {
             Ok(ExtractedKey::Key(k)) => emit(ix, oid, RowKey::Key(&k)),
             Ok(ExtractedKey::AllNull) => emit(ix, oid, RowKey::AllNull),
             // the builder refuses this row (R-ROW-4); here it is a defect of the row

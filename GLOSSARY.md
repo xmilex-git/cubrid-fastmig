@@ -100,6 +100,10 @@ _Avoid_: 보통 인덱스, 기본 인덱스
 키나 포함 여부가 식 평가에 달린 함수 인덱스와 필터 인덱스. 도구는 만들지 않고, 사용자가 도착 DB에서 실행할 DDL로만 넘긴다.
 _Avoid_: 미지원 인덱스, 누락 인덱스
 
+**중복 제거 키 (deduplicate key)**:
+11.3·11.4의 DEDUPLICATE 인덱스가 키 끝에 붙이는 숨은 SHORT 열. 속성 ID는 `0x8A8B8C90 − level`(level 1..14), 값은 행 홈 OID의 `pageid % 2^level`이고, 실제 키 열이 모두 NULL인 행은 트리에 없다. 도구는 클래스 객체 제약을 읽을 때 이 열을 실제 키에서 떼어 따로 든다(level과 asc_desc). develop 도착은 버리고 일반 인덱스로 다시 빌드하며, 11.4 도착은 MIDXKEY 마지막 원소로 다시 넣고 루트 @70에 키 열 수를 쓴다([workspace#530](https://github.com/xmilex-git/workspace/issues/530), 근거 R16 [workspace#532](https://github.com/xmilex-git/workspace/issues/532)).
+_Avoid_: dedup 열, 해시 열
+
 **시스템 이름 사상 (system name mapping)**:
 사용자 뷰 query spec과 trigger condition·action에 저장된 출발 시스템 클래스 이름을 develop 이름으로 바꿔 쓰는 일(`db_trig`→`db_trigger`, `db_password`→`_db_password`, owner가 DBA 그룹이면 `db_trigger`·`db_user`·`db_authorization`·`db_serial`→`_db_*`). FROM·JOIN 항의 클래스 이름 토큰만 바꾸고 별칭과 칼럼 참조는 둔다. 텍스트마다 결과는 재작성·거부(바꿔도 의미를 지킬 수 없음, 예: `db_authorizations`, `db_user`의 `triggers`)·그대로+경고 셋 중 하나다. 클래스 객체와 `_db_query_spec`·`_db_trigger` 행에 같은 값을 쓰고, 재작성 목록은 plan 출력과 plan.json `system_name_rewrites`에 남는다. 컴파일된 코드를 그대로 복사하는 PL/CSQL 소스는 바꾸지 않고 거부·경고만 한다([workspace#542](https://github.com/xmilex-git/workspace/issues/542), 근거 R11 [workspace#519](https://github.com/xmilex-git/workspace/issues/519)).
 _Avoid_: 이름 치환, 시스템 뷰 검사(옛 G1 거부·경고만 하던 검사)

@@ -1,5 +1,5 @@
 //! The index keys of one heap page of a target class: every live row's (key, OID) for each of the class's plain
-//! indexes, from records already in the target (develop) format.
+//! indexes, from records already in the target line's format (develop, or 11.4, workspace#530).
 //!
 //! Input: the target volumes, a [`ClassKeys`] (the class's layouts by repid and its indexes, resolved once before
 //! the scan) and a worker's page buffer. Output: `emit(index, oid, key)` calls for `heap_scan::scan_classes`.
@@ -30,6 +30,8 @@ use crate::heap_scan::RowKey;
 pub struct ClassKeys<'c> {
     pub class_oid: Oid,
     pub hfid: Hfid,
+    /// The line the records and class object are in.
+    line: VersionLine,
     layouts: HashMap<u32, RecordLayout>,
     indexes: Vec<(&'c Constraint, &'c KeyDomain)>,
     /// Records still in the 11.4 encoding go through this first (the plan's pair count on an 11.4 source of a
@@ -38,8 +40,9 @@ pub struct ClassKeys<'c> {
 }
 
 impl<'c> ClassKeys<'c> {
-    /// `indexes`: the class's plain indexes in the order their runs come out.
+    /// `indexes`: the class's plain indexes in the order their runs come out; `line`: the target line.
     pub fn new(
+        line: VersionLine,
         class_oid: Oid,
         class: &ClassObject,
         hfid: Hfid,
@@ -47,16 +50,12 @@ impl<'c> ClassKeys<'c> {
     ) -> DecodeResult<Self> {
         let layouts = std::iter::once(class.repid)
             .chain(class.representations.iter().map(|r| r.id))
-            .map(|id| {
-                Ok((
-                    id as u32,
-                    RecordLayout::for_repid(VersionLine::Develop, class, id as u32)?,
-                ))
-            })
+            .map(|id| Ok((id as u32, RecordLayout::for_repid(line, class, id as u32)?)))
             .collect::<DecodeResult<_>>()?;
         Ok(ClassKeys {
             class_oid,
             hfid,
+            line,
             layouts,
             indexes,
             re_encode: None,
@@ -147,11 +146,13 @@ pub fn record_keys(
         .layouts
         .get(&header.repid)
         .ok_or_else(|| bad(oid, format!("repid {} unknown to the class", header.repid)))?;
-    let values = decode_record(VersionLine::Develop, layout, bytes)
+    let values = decode_record(ck.line, layout, bytes)
         .map_err(|e| bad(oid, e.to_string()))?
         .values;
     for (ix, (constraint, kd)) in ck.indexes.iter().enumerate() {
-        match extract_key(kd, layout, &values, constraint).map_err(|e| bad(oid, e.to_string()))? {
+        match extract_key(kd, layout, &values, constraint, oid)
+            .map_err(|e| bad(oid, e.to_string()))?
+        {
             ExtractedKey::Key(k) => emit(ix, oid, RowKey::Key(&k)),
             ExtractedKey::AllNull => emit(ix, oid, RowKey::AllNull),
             ExtractedKey::NullInPrimaryKey(_) => emit(ix, oid, RowKey::NotNullViolation),

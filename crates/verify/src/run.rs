@@ -153,18 +153,30 @@ fn open_indexes(db: &Database) -> Indexes<'_> {
         let name = String::from_utf8_lossy(&c.name).into_owned();
         match IndexTree::open(db, class, name.clone(), spec.btid) {
             Ok(t) => {
-                let dedup = t.root.dedup_key_idx_114().is_some()
-                    && db.line == fastmig_ondisk::VersionLine::V11_4;
-                if !spec.is_plain() || dedup {
-                    x.not_checked.push(format!(
-                        "{}.{name}: {}",
-                        t.class,
-                        if dedup {
-                            "11.4 DEDUPLICATE index (hidden key column)"
-                        } else {
-                            "deferred index (function or filter)"
-                        }
-                    ));
+                // an 11.4 DEDUPLICATE tree is checked like any plain index: the heap side adds the hidden column
+                // the constraint names (workspace#530); a root and a class object that disagree get one defect and
+                // the structure check only, not a key-extract defect per row
+                let dedup_mismatch = db.line == fastmig_ondisk::VersionLine::V11_4
+                    && t.root.dedup_key_idx_114().is_some() != c.deduplicate_key.is_some();
+                if dedup_mismatch {
+                    x.defects.push(
+                        Defect::new(Check::IndexHeap, "deduplicate-key")
+                            .class(t.class.clone())
+                            .index(name.clone())
+                            .expected(format!(
+                                "root deduplicate_key_idx as the class object ({:?})",
+                                c.deduplicate_key
+                            ))
+                            .actual(format!("{:?}", t.root.dedup_key_idx_114())),
+                    );
+                }
+                if !spec.is_plain() || dedup_mismatch {
+                    if !spec.is_plain() {
+                        x.not_checked.push(format!(
+                            "{}.{name}: deferred index (function or filter)",
+                            t.class
+                        ));
+                    }
                     x.deferred.push((s, t));
                 } else {
                     x.trees.insert(s, t);

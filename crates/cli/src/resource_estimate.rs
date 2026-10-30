@@ -205,10 +205,17 @@ fn count(
     rows: Rows,
     workers: usize,
 ) -> io::Result<ResourceEstimate> {
-    let cons = class_constraints(classes).map_err(invalid)?;
+    // the estimate is for a develop target; an 11.4 target is wired by workspace#533
+    let cons = class_constraints(classes, VersionLine::Develop).map_err(invalid)?;
     let charset = vols.volume(0)?.header.db_charset as u8;
-    let (defs, _) =
-        plain_index_defs(classes, &cons, vols.io_pagesize(), charset).map_err(invalid)?;
+    let (defs, _) = plain_index_defs(
+        classes,
+        &cons,
+        vols.io_pagesize(),
+        charset,
+        VersionLine::Develop,
+    )
+    .map_err(invalid)?;
     let refs: Vec<&IndexDef> = defs.iter().collect();
     let from_heaps = matches!(rows, Rows::Heaps(..));
     let counted = match rows {

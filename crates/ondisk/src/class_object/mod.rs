@@ -25,7 +25,9 @@ pub use constraint::{
     ClassProperties, Constraint, ConstraintKind, ForeignKeyInfo, class_properties, format_btid,
     parse_btid,
 };
-pub use deduplicate_key::{is_deduplicate_key, without_deduplicate_key};
+pub use deduplicate_key::{
+    DeduplicateKey, deduplicate_level, is_deduplicate_key, without_deduplicate_key,
+};
 pub use domain::SchemaDomain;
 pub use encode::encode;
 pub use method::{Method, MethodArg, MethodFile, MethodSig, Resolution};

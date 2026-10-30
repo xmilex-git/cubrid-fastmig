@@ -9,9 +9,10 @@
 //! from the root, leaves doubly linked in that order with NULL ends; keys strictly increasing within and across
 //! leaves; a leaf's separator `sep` with `last key of the left leaf < sep ≤ first key`; leaf record flags match the
 //! record tail (OVERFLOW_OIDS/KEY, CLASS_OID only on a unique record with overflow OIDs, in a target); overflow
-//! OID pages (8 B legacy header in a unique index, 16 B + directory otherwise, in a target; directory entries =
-//! data pages with their first OID); unique root statistics = counted objects and keys, non-unique -1;
-//! `ovfid` set iff a key overflowed; in a target `rev_level`/`creator_mvccid` 0 and objects in the fixed form only
+//! OID pages (8 B legacy header in a unique index, 16 B + directory otherwise, in a develop target; 8 B always in an
+//! 11.4 target; directory entries = data pages with their first OID); unique root statistics = counted objects and
+//! keys, non-unique -1; `ovfid` set iff a key overflowed; in a target `rev_level`/`creator_mvccid` 0 (an 11.4
+//! DEDUPLICATE root: the key column count in the high half, workspace#530) and objects in the fixed form only
 //! (INSID 3 / DELID 0) where the engine's form is fixed size. Fill rules of the builder are not checked; 11.4
 //! fence keys and prefix-compressed leaves are read. In a source, objects with a delete MVCCID are not live; leaf
 //! records written by DML keep OIDs in insertion order, so each key's OIDs are sorted before they are streamed.
@@ -34,7 +35,7 @@ use fastmig_ondisk::page;
 use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::spage::SlottedPage;
 use fastmig_ondisk::value::KeyDomain;
-use fastmig_ondisk::{Btid, Oid, Vpid, db_pagesize};
+use fastmig_ondisk::{Btid, Oid, VersionLine, Vpid, db_pagesize};
 
 use crate::database::{Database, Role};
 use crate::defect::{Check, Defect, OidText, VpidText};
@@ -168,10 +169,19 @@ impl<'a> IndexTree<'a> {
     }
 
     fn walk_upper(&mut self) {
-        if self.db.role == Role::Target && (self.root.off68 != 0 || self.root.creator_mvccid != 0) {
+        // an 11.4 target keeps a DEDUPLICATE index's key column count in the high half (workspace#530)
+        let w = self.root.off68;
+        let dedup_word = self.db.line == VersionLine::V11_4
+            && w & 0xFFFF == 0
+            && (w as u32 >> 16) as usize == self.kd.n_columns();
+        if self.db.role == Role::Target
+            && ((w != 0 && !dedup_word) || self.root.creator_mvccid != 0)
+        {
             let d = self
                 .d("root-mvcc-fields", self.btid.vpid())
-                .expected("rev_level 0, creator_mvccid 0")
+                .expected(
+                    "rev_level 0 (11.4: high half 0 or the key column count), creator_mvccid 0",
+                )
                 .actual(format!(
                     "{:#x} {}",
                     self.root.off68, self.root.creator_mvccid
@@ -652,6 +662,8 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
     ) -> Vec<BtObject> {
         let unique = self.t.root.is_unique();
         let target = self.t.db.role == Role::Target;
+        // develop non-unique chains carry the directory header; 11.4 has none (CBRD-24094 came after it)
+        let dir_header = !unique && self.t.db.line == VersionLine::Develop;
         let has_ovf = r.ovf_oids.is_some();
         // defect text only when a defect is found: this runs once per leaf record
         let at = || format!("vpid {} slot {slot}", VpidText(v));
@@ -681,11 +693,15 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
                 self.push(d);
                 break;
             };
-            if target && hdr.dir.is_some() == unique {
+            if target && hdr.dir.is_some() != dir_header {
                 let d = self
                     .t
                     .d("ovf-oid-header", o)
-                    .expected(if unique { "8 B header" } else { "16 B header" })
+                    .expected(if dir_header {
+                        "16 B header"
+                    } else {
+                        "8 B header"
+                    })
                     .at(at());
                 self.push(d);
             }

@@ -36,6 +36,8 @@ comes from, without reading the rest of the tree.
   | [R8](https://github.com/xmilex-git/workspace/blob/research/fastmig-r8-older-pairs/docs/research/fastmig/r8-older-pairs.md) | 10.2..11.3 sources: on-disk differences from 11.4 |
   | [R11](https://github.com/xmilex-git/workspace/blob/research/fastmig-r11-old-system-class-text/docs/research/fastmig/r11-old-system-class-text.md) | system class names in user text before develop: the system name mapping table |
   | [R14](https://github.com/xmilex-git/workspace/blob/research/fastmig-r14-trailing-space-compare/docs/research/fastmig/r14-trailing-space-compare.md) | trailing-space compare and hash rules before 11.0: unique rebuild, HASH/LIST/RANGE partitions, foreign keys, `ignore_trailing_space` |
+  | [R15](https://github.com/xmilex-git/workspace/blob/research/fastmig-r15-target-114/docs/research/fastmig/r15-target-114.md) | an 11.4 target: what differs from develop, the 11.4 B-tree layout (overflow OID header, root @70, packed key domain, key images) |
+  | [R16](https://github.com/xmilex-git/workspace/blob/research/fastmig-r16-deduplicate-index/docs/research/fastmig/r16-deduplicate-index.md) | 11.3/11.4 DEDUPLICATE indexes: detection and the 11.4 rebuild rule of the hidden key |
 
   A later research doc gets a row here in the commit that first cites it.
 - **Engine source**: `~/dev/cubrid-worktree/develop` on the dev host, release lines at

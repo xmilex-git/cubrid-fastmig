@@ -10,7 +10,7 @@ use fastmig_ondisk::btree::{
     DISK_VPID_SIZE, PRIMARY_KEY_BIT, UNIQUE_BIT, max_keylen_inpage, max_oidlen_inpage,
     object_fixed_size,
 };
-use fastmig_ondisk::{Oid, db_pagesize};
+use fastmig_ondisk::{Oid, VersionLine, db_pagesize};
 
 /// Engine default of `bt_unfill_factor`.
 pub const DEFAULT_UNFILL_FACTOR: f64 = 0.05;
@@ -23,6 +23,11 @@ pub struct IndexShape {
     pub topclass: Oid,
     /// `or_put_domain(key_type)` in the target version's format (root header tail).
     pub packed_key_domain: Vec<u8>,
+    /// The root header @68 word: 0, or in 11.4 a DEDUPLICATE index's key column count `<< 16` (`rev_level:16 |
+    /// deduplicate_key_idx + 1:16`, workspace#532).
+    pub root_off68: i32,
+    /// The target line: the layout of overflow OID pages (11.4 has no OID directory, workspace#530).
+    pub target: VersionLine,
     pub io_pagesize: usize,
     pub unfill_factor: f64,
 }

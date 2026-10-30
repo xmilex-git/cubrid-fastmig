@@ -36,7 +36,7 @@ use fastmig_ondisk::sector_reserve;
 use fastmig_ondisk::sector_table::SECTOR_NPAGES;
 use fastmig_ondisk::spage::{SPAGE_HEADER_SIZE, SPAGE_SLOT_SIZE};
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Oid, Vpid, Vsid, db_pagesize, preallocate};
+use fastmig_ondisk::{Oid, VersionLine, Vpid, Vsid, db_pagesize, preallocate};
 use fastmig_plan::migration_plan::PageRange;
 use fastmig_plan::{CopyMethod, Plan};
 use fastmig_verify::btree_walk::LeafCounts;
@@ -262,6 +262,9 @@ pub fn btree_pages(f: &DefFigures, g: Option<&LeafCounts>, io_page: usize, worke
         primary_key: false,
         topclass: Oid::NULL,
         packed_key_domain: Vec::new(),
+        root_off68: 0,
+        // an upper bound for an 11.4 target too: develop's 16 B overflow header and directory need more pages
+        target: VersionLine::Develop,
         io_pagesize: io_page,
         unfill_factor: DEFAULT_UNFILL_FACTOR,
     };

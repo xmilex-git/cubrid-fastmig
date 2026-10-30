@@ -228,7 +228,7 @@ pub fn build_index(
         num_keys: stat(stats.keys),
         topclass_oid: shape.topclass,
         unique_pk: shape.unique_pk(),
-        off68: 0,
+        off68: shape.root_off68,
         ovfid: Vfid::NULL,
         creator_mvccid: 0,
         packed_key_domain: shape.packed_key_domain.clone(),

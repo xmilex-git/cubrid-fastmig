@@ -21,6 +21,20 @@ pub fn is_deduplicate_key(attr_id: i32) -> bool {
     (DEDUPLICATE_KEY_ID_BASE - 14..=DEDUPLICATE_KEY_ID_BASE - 1).contains(&attr_id)
 }
 
+/// The hidden key of an 11.3/11.4 DEDUPLICATE index as its constraint lists it: a SHORT column last in the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeduplicateKey {
+    /// 1..14: the value is `pageid % 2^level` of the row's home OID.
+    pub level: u8,
+    /// The key pair's asc_desc: a REVERSE index lists its hidden key DESC like its real ones.
+    pub desc: bool,
+}
+
+/// The level (1..14) of a DEDUPLICATE index's hidden key attribute id; `None` for any other attribute.
+pub fn deduplicate_level(attr_id: i32) -> Option<u8> {
+    is_deduplicate_key(attr_id).then(|| (DEDUPLICATE_KEY_ID_BASE - attr_id) as u8)
+}
+
 fn key_id(e: &SetElement) -> Option<i32> {
     match e.value {
         Value::Integer(i) => Some(i),

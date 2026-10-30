@@ -75,8 +75,11 @@ pub struct Constraint {
     pub btid: Option<Btid>,
     /// `SHARED:<name>`: the constraint whose index this one uses.
     pub shared_with: Option<Vec<u8>>,
-    /// `(attribute id, asc_desc)` per key in key order; asc_desc 1 = DESC.
+    /// `(attribute id, asc_desc)` per key in key order; asc_desc 1 = DESC. An 11.3/11.4 DEDUPLICATE index's hidden
+    /// key is not among them (see `deduplicate_key`).
     pub keys: Vec<(i32, i32)>,
+    /// The hidden key of an 11.3/11.4 DEDUPLICATE index (workspace#532).
+    pub deduplicate_key: Option<super::DeduplicateKey>,
     /// The optional element as stored (FK info, PK's referencing FKs, or the named filter/function/prefix
     /// sequence).
     pub optional: Option<Value>,
@@ -212,7 +215,18 @@ fn constraint(
         Some(n) => (None, Some(n.to_vec())),
         None => (parse_btid(id), None),
     };
-    // an 11.3/11.4 DEDUPLICATE index lists its hidden key like an attribute; the target has none (workspace#537)
+    // an 11.3/11.4 DEDUPLICATE index lists its hidden key like an attribute; `keys` holds the real ones and the hidden
+    // one is kept apart, so a develop target drops it and an 11.4 target puts it back last (workspace#537, #530)
+    let deduplicate_key = s.elements[1..e.len() - tail]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .find_map(|k| {
+            Some(super::DeduplicateKey {
+                level: int(&k[0].value).and_then(super::deduplicate_level)?,
+                desc: int(&k[1].value) == Some(1),
+            })
+        });
     let stripped = match line {
         VersionLine::V10_2 | VersionLine::V11_4 => {
             super::without_deduplicate_key(kind, &s.elements[1..e.len() - tail])
@@ -253,6 +267,7 @@ fn constraint(
         btid,
         shared_with,
         keys,
+        deduplicate_key,
         has_filter: special && optional.as_ref().is_some_and(|o| named(o, b"*FP*")),
         has_function: special && optional.as_ref().is_some_and(|o| named(o, b"*FI*")),
         optional,
