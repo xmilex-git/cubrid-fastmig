@@ -577,3 +577,16 @@ pub fn memory_min(heap_pages: usize, workers: usize) -> usize {
     heap_pages * crate::live_row_map::ESTIMATE_PAGE_BYTES
         + workers * (MERGE_FLOOR + fastmig_index::heap_scan::SCAN_MIN)
 }
+
+/// Per plain index of `db`, its class and name (first owner) and what its leaves hold (records, wide records,
+/// objects past a record): read on `workers` threads, one tree each (workspace#526: upper bounds of the keys and
+/// overflow OID chains a rebuild of the live rows makes, the source's index holding every live row's key).
+pub fn index_key_groups(db: &Database, workers: usize) -> Vec<(String, String, LeafCounts)> {
+    let x = open_indexes(db);
+    let trees: Vec<&IndexTree> = x.trees.values().collect();
+    run_jobs(workers, trees, |t| {
+        let mut lp = LeafPairs::new(t);
+        while lp.next_pair().is_some() {}
+        (t.class.clone(), t.name.clone(), lp.counts)
+    })
+}

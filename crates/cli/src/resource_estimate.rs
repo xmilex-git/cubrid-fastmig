@@ -45,12 +45,26 @@ pub struct IndexPairs {
     pub stats: PairStats,
 }
 
+/// One index definition as the target space bound sees it.
+pub struct DefFigures {
+    pub class: String,
+    pub index: String,
+    pub unique: bool,
+    pub stats: PairStats,
+    /// Counted from heaps the source's B-trees index (a develop source, an 11.4 source's user classes); false for
+    /// the system catalog rows an 11.4 run generates, which no source tree holds.
+    pub from_heaps: bool,
+}
+
 pub struct ResourceEstimate {
     pub indexes: Vec<IndexPairs>,
     /// Pair bytes per index definition (owners summed): the input of the batching.
     pub per_def: Vec<u64>,
-    /// Per index definition, owners merged: pairs, longest key, overflow key pages (the B-tree space bound).
-    pub per_def_stats: Vec<PairStats>,
+    /// Per index definition, owners merged: what the B-tree space bound needs (`target_space`).
+    pub per_def_figures: Vec<DefFigures>,
+    /// What the source's own B-trees hold, by (class, index) of their first owner (`verify::source_key_groups`):
+    /// upper bounds of the keys and overflow OID chains of a definition counted from the source's heaps.
+    pub source_groups: HashMap<(String, String), fastmig_verify::btree_walk::LeafCounts>,
     /// Seconds of the counting scan: one read of every indexed heap, the price of one more batch.
     pub scan_seconds: f64,
     pub workers: usize,
@@ -147,7 +161,7 @@ pub fn estimate(
             let s = count(vols, &tables(false), Rows::Records(&records), workers)?;
             e.indexes.extend(s.indexes);
             e.per_def.extend(s.per_def);
-            e.per_def_stats.extend(s.per_def_stats);
+            e.per_def_figures.extend(s.per_def_figures);
             e
         }
     };
@@ -178,6 +192,7 @@ fn count(
     let (defs, _) =
         plain_index_defs(classes, &cons, vols.io_pagesize(), charset).map_err(invalid)?;
     let refs: Vec<&IndexDef> = defs.iter().collect();
+    let from_heaps = matches!(rows, Rows::Heaps(..));
     let counted = match rows {
         Rows::Heaps(re_encoders, skip) => pair_bytes(
             vols,
@@ -214,14 +229,22 @@ fn count(
             .iter()
             .map(|b| b.values().map(|s| s.bytes).sum())
             .collect(),
-        per_def_stats: counted
+        per_def_figures: defs
             .iter()
-            .map(|b| {
-                let mut s = PairStats::default();
-                b.values().for_each(|c| s.merge(c));
-                s
+            .zip(&counted)
+            .map(|(d, b)| {
+                let mut stats = PairStats::default();
+                b.values().for_each(|c| stats.merge(c));
+                DefFigures {
+                    class: name_of(d.owners[0].class_oid),
+                    index: String::from_utf8_lossy(&d.owners[0].constraint.name).into(),
+                    unique: d.shape.unique,
+                    stats,
+                    from_heaps,
+                }
             })
             .collect(),
+        source_groups: HashMap::new(),
         scan_seconds: 0.0,
         workers,
         physical_memory: 0,

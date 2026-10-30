@@ -9,7 +9,7 @@
 //! G2 workspace#482 + workspace#495 (`--measured-classes`: one class OID `volid|pageid|slotid` per line; migrate
 //! writes `<dest>/fastmig/measured-classes`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +18,7 @@ use fastmig_ondisk::Oid;
 use fastmig_ondisk::databases_txt;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::volume_set::Locate;
+use fastmig_verify::btree_walk::LeafCounts;
 use fastmig_verify::report::{defect_line, exit_code, summary_line};
 use fastmig_verify::{Database, Role, classify, verify_database};
 
@@ -267,4 +268,24 @@ pub fn run_verifier(
     }
     std::fs::write(report, text)?;
     Ok((exit_code(&all), summary))
+}
+
+/// What the source's own plain B-trees hold, by (class, index) of their first owner
+/// (`fastmig_verify::run::index_key_groups`): the key groups the target space bound takes (workspace#526).
+pub fn source_key_groups(
+    src: &OpenSource,
+    locate: Locate,
+    workers: usize,
+) -> io::Result<HashMap<(String, String), LeafCounts>> {
+    let db = Database::open_with_log(
+        &src.entry.first_volume(),
+        locate,
+        &src.log,
+        Role::Source,
+        None,
+    )?;
+    Ok(fastmig_verify::run::index_key_groups(&db, workers)
+        .into_iter()
+        .map(|(c, i, n)| ((c, i), n))
+        .collect())
 }

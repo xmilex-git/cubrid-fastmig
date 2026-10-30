@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
 use std::time::{Duration, Instant};
 
 /// Entries per extra shard: below this, splitting the leaves costs more than it saves.
-const MIN_ENTRIES_PER_SHARD: usize = 4096;
+pub const MIN_ENTRIES_PER_SHARD: usize = 4096;
 
 pub struct BuiltIndex {
     pub root: Vpid,

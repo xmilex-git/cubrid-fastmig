@@ -230,6 +230,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         limits::worker_limit(&p)?,
         limits::physical_memory()?,
     )?;
+    est.source_groups = verify::source_key_groups(&s, o.locate, est.workers)?;
     if p.switch("--verify") {
         let (bytes, pages) = verify::source_pair_bytes(&s, o.locate, est.workers)?;
         est.verify_source = Some(bytes);

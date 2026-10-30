@@ -27,12 +27,14 @@ use fastmig_ondisk::btree::nonleaf_record::read_nonleaf_record;
 use fastmig_ondisk::btree::ovf_key::read_key;
 use fastmig_ondisk::btree::ovf_oid_page::{OvfDirEntry, OvfHeader};
 use fastmig_ondisk::btree::root_header::RootHeader;
-use fastmig_ondisk::btree::{DISK_VPID_SIZE, MVCCID_ALL_VISIBLE};
+use fastmig_ondisk::btree::{
+    DISK_VPID_SIZE, MVCCID_ALL_VISIBLE, max_oidlen_inpage, object_fixed_size,
+};
 use fastmig_ondisk::page;
 use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::spage::SlottedPage;
 use fastmig_ondisk::value::KeyDomain;
-use fastmig_ondisk::{Btid, Oid, Vpid};
+use fastmig_ondisk::{Btid, Oid, Vpid, db_pagesize};
 
 use crate::database::{Database, Role};
 use crate::defect::{Check, Defect, OidText, VpidText};
@@ -262,6 +264,14 @@ pub struct LeafCounts {
     pub ovf_keys: usize,
     /// Keys held by more than one live object of a unique index.
     pub unique_violations: usize,
+    /// Leaf records, a key of only deleted objects included (workspace#526: an upper bound of the keys a rebuild
+    /// of the live rows holds).
+    pub records: i64,
+    /// Records holding more objects, deleted ones included, than a rebuilt leaf record takes
+    /// (`max_oidlen_inpage / object_fixed_size`), and the objects past that count: upper bounds of the rebuild's
+    /// overflow OID chains and their objects.
+    pub wide_records: i64,
+    pub objects_past_record: i64,
 }
 
 impl std::ops::AddAssign for LeafCounts {
@@ -271,6 +281,9 @@ impl std::ops::AddAssign for LeafCounts {
         self.live_objects += o.live_objects;
         self.ovf_keys += o.ovf_keys;
         self.unique_violations += o.unique_violations;
+        self.records += o.records;
+        self.wide_records += o.wide_records;
+        self.objects_past_record += o.objects_past_record;
     }
 }
 
@@ -533,6 +546,13 @@ impl<'t, 'a> LeafPairs<'t, 'a> {
             self.check_order(v, slot, &key);
             let objects = self.objects_of(v, slot, &r);
             self.counts.objects += objects.len() as i64;
+            self.counts.records += 1;
+            let per_record = max_oidlen_inpage(db_pagesize(self.t.db.vols.io_pagesize()))
+                / object_fixed_size(self.t.root.is_unique());
+            if objects.len() > per_record {
+                self.counts.wide_records += 1;
+                self.counts.objects_past_record += (objects.len() - per_record) as i64;
+            }
             let target = self.t.db.role == Role::Target;
             let mut live = std::mem::take(&mut self.pending);
             live.clear();

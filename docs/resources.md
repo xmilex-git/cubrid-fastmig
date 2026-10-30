@@ -132,9 +132,8 @@ Right after the incomplete marker, before the first byte of the target, `migrate
   as holes; here they are zero);
 - one reservation file, `<dest>/fastmig/reserve-target`, holds an upper bound of everything else the run may
   write, until the run ends: the pages a cloned volume unshares (`Plan::rewritten_pages_bound` — every heap page
-  when the catalog is regenerated, else the treated pages and the root heap), the new B-trees (a leaf record takes
-  at most twice a pair's spill record, leaves at most 90 % full, non-leaf pages fewer than leaves:
-  `5 · T_i / page + 4` pages per index), 64 pages of catalog slack, the referenced LOB and Java files. The file is
+  when the catalog is regenerated, else the treated pages and the root heap), the new B-trees (`target_space::btree_pages`,
+  below), 64 pages of catalog slack, the referenced LOB and Java files. The file is
   removed only when the run ends, so while the run writes what it bounds the space is held twice (accepted,
   1번 세션 decision).
 
@@ -147,6 +146,35 @@ the filesystem while the run writes can still take that space, and the run then 
 prints the bound as `unreserved writes ≤ N MiB` (the reservation's size) so the run can be started with that much
 left to other writers. Only the byte-copied volumes, the new log and the spill arena are written inside space the
 run already holds.
+
+**The new B-trees' bound** (`target_space::btree_pages`, per index, from the builder's own rules): a leaf record
+takes its first object (8 B; the fixed object with a chain), the key (or a 6 B overflow link), 3 B of padding, 8 B
+(unique 16 B) per further object, an 8 B chain link, alignment to 4 and a 4 B slot; a leaf takes no record that
+would leave less than `leaf_reserve` free, so it holds at least its user area less that reserve less the largest
+record, and each shard (one per 4096 entries, at most the workers) ends on one partial leaf. Objects past a record
+fill overflow OID pages of `objects_per_page`, each chain ending on a partial page, plus directory pages. Above
+the leaves, one separator per child, levels filled with `nonleaf_reserve` up to the root; an overflow key is
+written again for every separator that holds it. Plus header pages of the B-tree and overflow key files.
+
+Its inputs: the pairs, key bytes, longest key and overflow key pages from `pair_count` (exact: estimate against
+the migrated target, 0 differing lines), and the keys and overflow OID chains of the source's own tree
+(`verify::source_key_groups`: its leaf records and the records holding more objects than a rebuilt record takes,
+deleted objects included — every live row's key is in the source's index, so these bound the rebuild's). The
+system catalog indexes of an 11.4 source, whose rows the run generates, take the worst case: every pair its own
+key, every 86th pair opening a chain. The former `5 · T_i / page + 4` was no bound: a key of 86 rows takes a
+16 KiB overflow OID page for its 86th object, against 1,032 B of spill records.
+
+| DB (`--workers 16`) | pages the run allocated | B-tree bound, pages | bound / actual |
+|---|---|---|---|
+| T1 develop clean | 648 | 1,381 | 2.13 |
+| T1 develop dirty | 605 | 1,302 | 2.15 |
+| T1 11.4 clean | 769 | 1,509 | 1.96 |
+| T1 11.4 dirty | 721 | 1,430 | 1.98 |
+
+The allocated pages also hold catalog pages and appended heap pages; on T1 most of the gap is the fixed pages of
+75 small indexes (file header, root, one partial leaf). A source index with a defect (a live row's key missing)
+can make the source's counts too small: not covered yet (1번 세션 decision: a check at build time before the
+first page is written).
 
 ## The spill arena
 

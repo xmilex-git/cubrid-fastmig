@@ -194,6 +194,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         o.worker_limit,
         limits::physical_memory()?,
     )?;
+    est.source_groups = verify::source_key_groups(&src, o.plan.locate, o.worker_limit)?;
     let mem = o.limits.memory_limit_bytes;
     if o.verify {
         let (bytes, pages) = verify::source_pair_bytes(&src, o.plan.locate, o.worker_limit)?;
@@ -597,13 +598,14 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &catalog.json(),
         added_volumes,
         &format!(
-            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_added_volume_bytes\": {added_bytes}}}",
+            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_btree_bound_pages\": {}, \"target_added_volume_bytes\": {added_bytes}}}",
             temp_limit,
             limits.temp_disk.is_some(),
             TEMP_DISK.now_and_peak().1,
             target.copy_bytes,
             target.log_bytes,
-            target.extra_bytes
+            target.extra_bytes,
+            target.btree_pages
         ),
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;
