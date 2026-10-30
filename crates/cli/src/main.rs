@@ -26,7 +26,6 @@ mod template_extract;
 mod unload_files;
 mod unload_normalize;
 mod unload_rules_before_11_4;
-mod unshare_gate;
 mod verify;
 mod volume_dirs;
 

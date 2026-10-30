@@ -12,7 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use crate::databases_txt::DatabaseEntry;
 use crate::ids::Vpid;
@@ -56,21 +56,7 @@ pub struct VolumeSet {
     /// The header layout of every volume in the set (a 10.2..11.3 source is opened read-only in its own).
     layout: HeaderLayout,
     volumes: RwLock<Vec<Arc<Volume>>>,
-    /// Called with every page before it is written (set once; workspace#526).
-    gate: OnceLock<Gate>,
 }
-
-struct Gate(WriteGate);
-
-impl std::fmt::Debug for Gate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("WriteGate")
-    }
-}
-
-/// Called with a page about to be written: the page's blocks are taken first, or the write fails before it starts
-/// (workspace#526: the pages a cloned volume unshares in the background while the run writes).
-pub type WriteGate = Arc<dyn Fn(Vpid) -> io::Result<()> + Send + Sync>;
 
 fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
@@ -146,7 +132,6 @@ impl VolumeSet {
             access,
             layout,
             volumes: RwLock::new(volumes),
-            gate: OnceLock::new(),
         })
     }
 
@@ -220,18 +205,8 @@ impl VolumeSet {
     /// Writes page `vpid` (opened [`Access::ReadWrite`] only). No fsync; the caller syncs with [`Self::sync`].
     pub fn write_page(&self, vpid: Vpid, buf: &[u8]) -> io::Result<()> {
         assert_eq!(buf.len(), self.io_pagesize, "page buffer of the wrong size");
-        if let Some(g) = self.gate.get() {
-            (g.0)(vpid)?;
-        }
         let (v, off) = self.offset(vpid)?;
         v.file.write_all_at(buf, off)
-    }
-
-    /// Sets the [`WriteGate`] every later [`Self::write_page`] passes; a second call is refused.
-    pub fn set_write_gate(&self, g: WriteGate) -> io::Result<()> {
-        self.gate
-            .set(Gate(g))
-            .map_err(|_| io::Error::other("write gate set twice"))
     }
 
     /// fsyncs every volume.
