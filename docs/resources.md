@@ -32,6 +32,14 @@ Foreign keys read only trees and go with the first batch.
   (and with no limit) the verifier makes one heap pass per database, as before; below it, the count and the
   batches past the first cost one heap read each, priced like the build's (`verify_extra_seconds`).
 
+Measured (`verify` target + source, big develop DB, `--workers 16 --mem 1G`, CPUs 16-31, d880015 against b11ab54):
+no limit 14.49 s median of 3 against 14.39 s before (+0.7 %); `--temp-disk` 1,530,677,151 B (target 1 batch,
+source 2) 17.9 s, 765 MB and 562 MB (3 + 3) 25.2 s and 26.6 s, verify min 280,800,000 B (6 + 6) 35.1 s. Of the
+20.6 s more at min: the pair count 1.8 s per database, the heap passes 2.5 s per database, and the check-2 merges
+5.4 s per database, a batch of few indexes keeping fewer workers busy. `migrate --temp-disk min --verify` on the
+big develop and big 11.4 DBs: rc 0, migration defects 0, temp peak 231,612,378 B and 236,048,384 B under the
+280,800,000 B limit.
+
 Before the first rule, T1 11.4 dirty at `--mem 2M --verify` stopped on the arena (limit temp max).
 
 ## The estimate
