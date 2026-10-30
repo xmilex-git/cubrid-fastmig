@@ -4,7 +4,7 @@
 # Input: bash e2e/run.sh <bin> <pristine dir> <target version> <out dir>
 #   <bin>             the cubrid-fastmig release binary
 #   <pristine dir>    <BASEDB_ROOT>/<label>/pristine/<variant>: a pristine copy of a baseline DB (basedb/README.md)
-#   <target version>  --target-version of plan and migrate (develop; 11.4 is refused by the plan)
+#   <target version>  --target-version of plan and migrate (develop, or 11.4 from an 11.4 source)
 #   <out dir>         a new directory; it holds the source copy, the target, logs and steps.tsv
 # env: FASTMIG_E2E_INSTALL (the target-line CUBRID install, the caller's own copy: its conf/cubrid.conf is
 #   overwritten), FASTMIG_E2E_PORT (claimed cubrid_port_id), FASTMIG_E2E_SERVER_CTL (workspace cubrid-server-control

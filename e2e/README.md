@@ -15,7 +15,8 @@ FASTMIG_E2E_SERVER_CTL=<workspace>/.agents/skills/cubrid-server-control/scripts/
 
 - `<install>`: the target-line install (develop). Use your own copy (`cp -a --reflink=always`): the run overwrites
   its `conf/cubrid.conf` (port, `data_buffer_size=512M`, `stored_procedure=yes`).
-- Target version: `develop` only; the plan refuses `11.4` (no 11.4 layout B-tree builder).
+- Target version: `develop`, or `11.4` from an 11.4 source with the 11.4.6 install (workspace#530); the plan refuses
+  `11.4` from an older source.
 - Optional env: `FASTMIG_E2E_WORKERS` (worker limit, default 4), `FASTMIG_E2E_CPUS` (taskset CPU list for migrate and
   verify; also turns on the quiet gate), `FASTMIG_E2E_CHECKDB=1` (engine checkdb, #484 (5): the small 11.4 -> develop
   target only), `FASTMIG_E2E_BREAKER` (the #484 (6) probe binary), `FASTMIG_E2E_SOURCE_UNLOAD` (unloaddb prefix of the

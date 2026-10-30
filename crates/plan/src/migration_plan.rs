@@ -322,7 +322,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         target: i.target_line,
     };
     let regenerates = pair.regenerates_catalog();
-    refusals.extend(pair.refusal());
+    refusals.extend(pair.refusal(version));
     // the tool orders VARCHAR keys with trailing spaces counted; a target comparing without them reads its indexes
     // out of order (G10 workspace#541: refused, not a warning)
     if i.target_ignores_trailing_space {

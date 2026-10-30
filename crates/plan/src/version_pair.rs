@@ -4,7 +4,8 @@
 //! a pair the tool cannot migrate, the refusal. Later stages read the pair and never re-derive the target line.
 //! Source: workspace#505 (target version `11.4|develop`, default develop, decided by the plan; relayed decision of
 //! the map supervisor 2026-10-29); ADR 0003 (direct pairs only, no downgrade); target 11.4 refused while the index
-//! builder writes the develop layout only (map supervisor 2026-10-29, workspace#472 Not yet specified).
+//! builder writes the develop layout only (map supervisor 2026-10-29); an 11.4 source to an 11.4 target since
+//! workspace#530.
 
 use fastmig_ondisk::{SourceVersion, VersionLine};
 
@@ -16,14 +17,16 @@ pub struct VersionPair {
 }
 
 impl VersionPair {
-    /// Why the tool refuses this pair; `None` when it migrates it.
-    pub fn refusal(self) -> Option<String> {
+    /// Why the tool refuses this pair from source `version`; `None` when it migrates it.
+    pub fn refusal(self, version: SourceVersion) -> Option<String> {
         match (self.source, self.target) {
-            // the index builder writes the develop B-tree layout only (map supervisor 2026-10-29)
-            (_, VersionLine::V11_4) => Some(
-                "target 11.4: 11.4 layout B-tree builder not implemented (workspace#472 Not yet specified)"
-                    .into(),
-            ),
+            // an 11.4 target: the same-version path only (11.4 B-tree layout workspace#530, catalog writer #533);
+            // 10.2..11.3 read with an 11.4 codec line are not the same version
+            (VersionLine::V11_4, VersionLine::V11_4) if version == SourceVersion::V11_4 => None,
+            (_, VersionLine::V11_4) => Some(format!(
+                "target 11.4 from source {}: only an 11.4 source is wired to an 11.4 target (workspace#472)",
+                version.name()
+            )),
             (s, t) if s == t => None,
             // 10.2: values (workspace#520), names (#544), TDE metadata (#515), system classes (#549), partition streams
             // (#540)
