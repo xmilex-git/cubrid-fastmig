@@ -249,12 +249,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         est.verify_source = Some(bytes);
         est.verify_heap_pages = Some(pages);
     }
-    let t = target_space::bound(
-        &plan,
-        &est,
-        s.vols.io_pagesize() as u64,
-        new_log::file_bytes(&s.log),
-    );
+    let t = target_space::bound(&plan, &est, &s.vols, new_log::file_bytes(&s.log))?;
     let mut plan = plan;
     if t.needed() > plan.available_bytes {
         plan.refusals.push(format!(

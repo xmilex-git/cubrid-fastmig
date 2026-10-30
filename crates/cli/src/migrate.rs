@@ -15,11 +15,12 @@
 //! Source: decisions G1 workspace#481 (command surface, plan, marker; verify opt-in per ADR 0015), G4 workspace#485
 //! (new log), G6 workspace#488 (LOB and Java assets), workspace#495 (verify), workspace#505 (this wiring).
 
-use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use fastmig_catalog::output_sql::UPDATE_STATISTICS_SQL;
@@ -36,10 +37,11 @@ use fastmig_ondisk::file_alloc::SpaceManager;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::preallocate;
 use fastmig_ondisk::sector_reserve::{VolumeGrowth, sectors_of_bytes};
+use fastmig_ondisk::sector_table::SECTOR_NPAGES;
 use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::volume_addition::VolumePlace;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
-use fastmig_ondisk::{Oid, SourceVersion};
+use fastmig_ondisk::{Oid, SourceVersion, Vsid};
 use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
@@ -223,12 +225,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             ))));
         }
     }
-    let target = target_space::bound(
-        &plan,
-        &est,
-        src.vols.io_pagesize() as u64,
-        new_log::file_bytes(&src.log),
-    );
+    let target = target_space::bound(&plan, &est, &src.vols, new_log::file_bytes(&src.log))?;
     let temp_limit = temp_disk_choice::choose(
         temp_disk,
         &est,
@@ -366,7 +363,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     clone_targets(&mut jobs, &marker)?;
     if plan.unshare {
         let io = src.vols.io_pagesize() as u64;
-        for r in &plan.unshare_ranges {
+        for r in &target.unshare_ranges {
             let job = jobs
                 .iter()
                 .find(|j| j.volid == r.volid)
@@ -390,7 +387,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let _reservation = Reservation::take(
         &marker,
         &fastmig_dir.join("reserve-target"),
-        b.target.extra_bytes,
+        target.extra_bytes,
     )?;
     marker.create_dir_all(&limits.spill_dir)?;
     let target_keys = po.target_dir.join(format!("{}_keys", po.target_name));
@@ -462,7 +459,35 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             vinf: None,
         }),
     };
-    let space = SpaceManager::new(&vols, pair.target, trk).with_growth(growth);
+    let mut space = SpaceManager::new(&vols, pair.target, trk).with_growth(growth);
+    // a sector reserved off the list on a cloned volume takes its blocks when reserved; failing that, the space change
+    // fails before a page of it is written (workspace#526)
+    let off_list = Arc::new(AtomicU64::new(0));
+    if plan.unshare {
+        let listed: HashSet<Vsid> = target.sectors.iter().copied().collect();
+        let mut cloned: HashMap<i16, (File, i32)> = HashMap::new();
+        for (j, v) in jobs.iter().zip(&plan.volumes) {
+            if v.copy_method == CopyMethod::Clone {
+                let total = src.vols.volume(v.volid)?.header.nsect_total;
+                cloned.insert(
+                    v.volid,
+                    (OpenOptions::new().write(true).open(&j.target)?, total),
+                );
+            }
+        }
+        let sector = SECTOR_NPAGES as u64 * vols.io_pagesize() as u64;
+        let count = off_list.clone();
+        space = space.with_claim(Arc::new(move |s: Vsid| {
+            if listed.contains(&s) {
+                return Ok(());
+            }
+            if let Some((f, _)) = cloned.get(&s.volid).filter(|(_, total)| s.sectid < *total) {
+                preallocate::unshare(f, s.sectid as u64 * sector, sector)?;
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        }));
+    }
     marker.create_dir_all(&limits.spill_dir)?;
     // laps: page_treatment after prepare, index_build after the rebuild; the catalog writes and BT_STATS of finish
     // fall in catalog_regeneration, lapped after the closure
@@ -641,7 +666,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &catalog.json(),
         added_volumes,
         &format!(
-            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_btree_bound_pages\": {}, \"target_appended_bound_pages\": {}, \"target_added_volume_bytes\": {added_bytes}}}",
+            "{{\"limit_bytes\": {}, \"batched\": {}, \"peak_bytes\": {}, \"target_copy_bytes\": {}, \"target_log_bytes\": {}, \"target_reserved_bytes\": {}, \"target_allocated_pages\": {allocated_pages}, \"target_btree_bound_pages\": {}, \"target_appended_bound_pages\": {}, \"target_added_volume_bytes\": {added_bytes}, \"target_listed_sectors\": {}, \"target_short_sectors\": {}, \"target_off_list_sectors\": {}}}",
             temp_limit,
             limits.temp_disk.is_some(),
             TEMP_DISK.now_and_peak().1,
@@ -649,7 +674,10 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             target.log_bytes,
             target.extra_bytes,
             target.btree_pages,
-            b_appended
+            b_appended,
+            target.sectors.len(),
+            target.short_sectors,
+            off_list.load(Ordering::Relaxed)
         ),
     );
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;

@@ -205,8 +205,12 @@ _Avoid_: 스왑, 임시 볼륨(엔진 용어와 섞인다)
 _Avoid_: 디스크 쿼터, temp 크기
 
 **예약 밖 쓰기 (unreserved writes)**:
-migrate가 시작할 때 잡은 공간(통째로 할당한 바이트 복사 볼륨과 새 로그, XFS에서 미리 공유를 푼 clone 볼륨의 재작성 페이지, spill 아레나) 밖에 쓰는 바이트: 새 B-tree, 덧붙는 힙 페이지, LOB·Java 파일, 그리고 XFS가 아닌 파일시스템에서는 clone 볼륨이 공유를 푸는 페이지. 시작할 때 그 상한만큼 예약 파일을 잡아 끝까지 두지만, 쓰기는 예약 파일이 아니라 남은 빈 공간에 들어가므로, 실행 중 다른 프로세스가 파일시스템을 채우면 이 쓰기는 디스크 부족으로 멈출 수 있다. `plan`은 그 상한을 `unreserved writes ≤ N MiB`로 보인다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
+migrate가 시작할 때 잡은 공간(통째로 할당한 바이트 복사 볼륨과 새 로그, XFS에서 미리 공유를 푼 clone 볼륨의 재작성 페이지와 목록 섹터, spill 아레나) 밖에 쓰는 바이트: 목록 밖 섹터, 볼륨 확장·추가, LOB·Java 파일. XFS가 아닌 파일시스템에서는 새 B-tree, 덧붙는 힙 페이지, clone 볼륨이 공유를 푸는 페이지도 여기 든다. 시작할 때 그 상한만큼 예약 파일을 잡아 끝까지 두지만, 쓰기는 예약 파일이 아니라 남은 빈 공간에 들어가므로, 실행 중 다른 프로세스가 파일시스템을 채우면 이 쓰기는 디스크 부족으로 멈출 수 있다. `plan`은 그 상한을 `unreserved writes ≤ N MiB`로 보인다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
 _Avoid_: 예약 공간, 여유 공간
+
+**목록 섹터 (listed sectors)**:
+migrate가 시작할 때 정하는, 실행이 받을 섹터의 목록. 엔진 섹터 예약 순서를 재현해 얻고, clone 볼륨 위의 목록 섹터는 시작할 때 공유를 푼다. 실행 중 목록에 없는 섹터를 받으면(목록 밖 섹터) 그때 공유를 풀고, 그마저 실패하면 페이지를 쓰기 전에 실패한다([ADR 0013](docs/adr/0013-target-grows-like-engine-auto-extension.md), [workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
+_Avoid_: 예약 섹터(엔진 STAB 예약과 섞인다), 사전 할당 섹터
 
 **인덱스 묶음 (index batch)**:
 임시 디스크 한도 안에 spill 상한이 들어가도록 나눈 인덱스들의 무리. 묶음마다 그 인덱스들의 클래스 힙을 한 번 스캔하고, 인덱스를 짓고, spill 파일을 지운 뒤 다음 묶음으로 간다. 묶음 수만큼 힙을 다시 읽는다. 한도가 없으면 모든 인덱스가 한 묶음이다.

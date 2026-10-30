@@ -30,7 +30,7 @@ use zerocopy::IntoBytes;
 use crate::file_table::PartialSectorLe;
 use crate::page::{self, PageType, db_pagesize};
 use crate::page_batch::PageBatch;
-use crate::sector_reserve::{DiskCache, VolumeGrowth};
+use crate::sector_reserve::{Claim, DiskCache, VolumeGrowth};
 use crate::sector_table::SECTOR_NPAGES;
 use crate::version_line::VersionLine;
 use crate::volume_set::VolumeSet;
@@ -61,6 +61,7 @@ pub struct SpaceManager<'v> {
     disk: Mutex<Option<DiskCache>>,
     /// User pages allocated so far (workspace#526: what the run writes outside the space it took at the start).
     allocated: AtomicU64,
+    claim: Option<Claim>,
 }
 
 impl<'v> SpaceManager<'v> {
@@ -75,12 +76,20 @@ impl<'v> SpaceManager<'v> {
             growth: VolumeGrowth::engine_default(vols.io_pagesize()),
             disk: Mutex::new(None),
             allocated: AtomicU64::new(0),
+            claim: None,
         }
     }
 
     /// How the target grows when its volumes are full (set before the first space change).
     pub fn with_growth(mut self, growth: VolumeGrowth) -> Self {
         self.growth = growth;
+        self
+    }
+
+    /// Called with every sector the target reserves, before a page of it is written (set before the first space
+    /// change; workspace#526).
+    pub fn with_claim(mut self, claim: Claim) -> Self {
+        self.claim = Some(claim);
         self
     }
 
@@ -97,7 +106,11 @@ impl<'v> SpaceManager<'v> {
     fn run<T>(&self, f: impl FnOnce(&mut SpaceOp) -> io::Result<T>) -> io::Result<T> {
         let mut g = self.disk.lock().unwrap();
         if g.is_none() {
-            *g = Some(DiskCache::load(self.vols, self.growth.clone())?);
+            *g = Some(DiskCache::load(
+                self.vols,
+                self.growth.clone(),
+                self.claim.clone(),
+            )?);
         }
         let mut op = SpaceOp {
             pages: PageBatch::new(self.vols),

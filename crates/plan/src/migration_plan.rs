@@ -8,7 +8,7 @@
 //! workspace#488 (LOB scan, Java directories, lob-base-path rules), workspace#498 (`attr_default` refusals),
 //! workspace#491 (LDML collations are not ordered here), workspace#505 (this assembly).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,13 +33,13 @@ use fastmig_catalog::{attr_default, template_store};
 use fastmig_ondisk::boot_parm::BootDbParm;
 use fastmig_ondisk::class_object::{ClassType, class_properties};
 use fastmig_ondisk::databases_txt::DatabaseEntry;
-use fastmig_ondisk::file_header::{FileHeader, FileType};
+use fastmig_ondisk::file_header::{FileDescriptor, FileHeader, FileType};
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::heap_rewrite::VacuumHorizon;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::value::{Collation, DbType};
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, Vfid, Vpid, file_tracker};
+use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, Vfid, Vpid, Vsid, file_tracker};
 
 use crate::compare_rule_mismatch::{self, OldRules, OwnerNames};
 use crate::copy_method::{self, CopyMethod};
@@ -150,6 +150,13 @@ pub struct Plan {
     pub unshare: bool,
     /// Pages of cloned volumes the run rewrites in place (the allocated pages of the files above), merged.
     pub unshare_ranges: Vec<PageRange>,
+    /// Sectors of the files the run frees before it allocates: every B-tree, overflow key and catalog file; with a
+    /// regenerated catalog also the heaps and overflow heaps of the reallocated and dropped system classes.
+    pub freed_sectors: Vec<Vsid>,
+    /// Sectors the new catalog file and system heaps take at most: one per new file (the catalog file; with a
+    /// regenerated catalog a heap per develop system class whose slot is not kept), plus the sectors the files they
+    /// replace held past their first.
+    pub catalog_sectors: u64,
     /// Free bytes of the target filesystem (the need is `cubrid-fastmig` `target_space`, with the resource estimate).
     pub available_bytes: u64,
     /// Non-empty means migrate does not start.
@@ -371,11 +378,16 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     let (items, _) = file_tracker::read(i.vols, boot.trk_vfid)?;
     let mut heap_pages = std::collections::HashMap::new();
     // pages of the files the run frees: destroy_file retypes every allocated page of them, which a cloned volume
-    // unshares (workspace#526): every B-tree and overflow key file; with a regenerated catalog also the catalog,
+    // unshares (workspace#526): every B-tree, overflow key and catalog file; with a regenerated catalog also the
     // heap and overflow heap files (an upper bound of the system ones freed)
     let mut freed_pages = 0u64;
     // files whose allocated pages the run rewrites in place: unshared at the start on a filesystem that can (below)
     let mut rewritten_files: Vec<Vfid> = Vec::new();
+    let mut freed_files: Vec<Vfid> = Vec::new();
+    // heap and overflow heap files by class: freed when the class's heap is (`free_old_files`)
+    let mut class_files: Vec<(Vfid, Oid)> = Vec::new();
+    // the catalog file and the freed class heaps: the regenerated catalog writes their content into new files
+    let mut replaced_files: Vec<Vfid> = Vec::new();
     for it in &items {
         let h = FileHeader::read(&i.vols.read_page(it.vfid.header_vpid())?);
         if h.is_tde_encrypted() {
@@ -394,21 +406,30 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         // in the heap bound already)
         let (user, ftab) = (h.n_page_user.max(0) as u64, h.n_page_ftab.max(0) as u64);
         let freed = match h.file_type() {
-            Some(FileType::Btree | FileType::BtreeOverflowKey) => true,
-            Some(
-                FileType::Catalog
-                | FileType::MultipageObjectHeap
-                | FileType::Heap
-                | FileType::HeapReuseSlots,
-            ) => regenerates,
+            Some(FileType::Btree | FileType::BtreeOverflowKey | FileType::Catalog) => true,
+            Some(FileType::MultipageObjectHeap | FileType::Heap | FileType::HeapReuseSlots) => {
+                regenerates
+            }
             _ => false,
         };
         if freed {
             rewritten_files.push(it.vfid);
+            match (h.file_type(), h.descriptor()) {
+                (
+                    Some(FileType::Heap | FileType::HeapReuseSlots),
+                    FileDescriptor::Heap { class_oid, .. },
+                )
+                | (
+                    Some(FileType::MultipageObjectHeap),
+                    FileDescriptor::HeapOverflow { class_oid, .. },
+                ) => class_files.push((it.vfid, class_oid)),
+                (Some(FileType::Catalog), _) => replaced_files.push(it.vfid),
+                _ => freed_files.push(it.vfid),
+            }
         }
         freed_pages += match h.file_type() {
-            Some(FileType::Btree | FileType::BtreeOverflowKey) => user + ftab,
-            Some(FileType::Catalog | FileType::MultipageObjectHeap) if regenerates => user + ftab,
+            Some(FileType::Btree | FileType::BtreeOverflowKey | FileType::Catalog) => user + ftab,
+            Some(FileType::MultipageObjectHeap) if regenerates => user + ftab,
             Some(FileType::Heap | FileType::HeapReuseSlots) if regenerates => ftab,
             _ => 0,
         };
@@ -529,11 +550,21 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         ));
     }
 
+    let mut new_heaps_bound = 0usize;
     // catalog regeneration inputs that refuse: collations, default values (regenerates-line only)
     if regenerates {
         let charset = i.vols.volume(0)?.header.db_charset as u8;
         match template_store::builtin(i.target_line, charset) {
             Some(t) => {
+                // reallocated and new system tables get new heaps: every template class but those keeping their slot
+                let same_slot = class_plans
+                    .iter()
+                    .flatten()
+                    .filter(|p| {
+                        matches!(p.kind, ClassKind::System(SystemClassRole::SameSlot { .. }))
+                    })
+                    .count();
+                new_heaps_bound = t.classes.len().saturating_sub(same_slot);
                 let c = check_collations(
                     &rows_of(i.vols, line, &classes, SystemTable::DbCollation)?,
                     &t,
@@ -759,6 +790,34 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         .map(|v| v.volid)
         .collect();
     let unshare = !cloned.is_empty() && free_space::can_unshare(i.target_dir)?;
+    let freed_classes: HashSet<Oid> = treatments
+        .iter()
+        .filter(|t| t.heap == HeapTreatment::Freed)
+        .map(|t| t.oid)
+        .collect();
+    replaced_files.extend(
+        class_files
+            .iter()
+            .filter(|(_, c)| freed_classes.contains(c))
+            .map(|(v, _)| *v),
+    );
+    // sectors the run frees before it allocates: free to the sector sequence the target space bound previews
+    let mut freed_sectors: Vec<Vsid> = Vec::new();
+    // the new catalog file and heaps: one sector each new file, plus what the replaced files held past their first
+    let mut catalog_sectors = 1 + new_heaps_bound as u64;
+    for vfid in &replaced_files {
+        let s = FileTable::read(i.vols, *vfid)?.sectors;
+        catalog_sectors += (s.len() as u64).saturating_sub(1);
+        freed_sectors.extend(s.iter().map(|s| s.vsid));
+    }
+    for vfid in &freed_files {
+        freed_sectors.extend(
+            FileTable::read(i.vols, *vfid)?
+                .sectors
+                .iter()
+                .map(|s| s.vsid),
+        );
+    }
     let mut pages: Vec<Vpid> = Vec::new();
     if unshare {
         rewritten_files.sort();
@@ -806,6 +865,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         java_static,
         unshare,
         unshare_ranges,
+        freed_sectors,
+        catalog_sectors,
         rewritten_pages_bound: rewritten_pages_bound
             + if regenerates { 0 } else { treated_pages }
             + freed_pages,

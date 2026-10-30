@@ -1,9 +1,11 @@
 //! The target space a migrate takes before its first write (workspace#526: no disk full during a run): the
 //! byte-copied volumes (`volume_copy::preallocate_targets`) and the new log (`new_log::allocate`) are allocated in
-//! full, and one reservation file holds an upper bound of everything else the run may write — pages a cloned
-//! volume unshares, new B-trees, LOB and Java files — until the run ends (held twice meanwhile, which 1번 세션
-//! accepted: the free-space check needs twice the reservation). Those writes go outside the space the run took, so
-//! a process filling the filesystem meanwhile can still take it; `plan` shows their bound as unreserved writes.
+//! full; on XFS the pages and sectors (listed sectors, ADR 0013) the run will write in a cloned volume are unshared;
+//! and one reservation file holds an upper bound of everything else the run may write — sectors off the list, an
+//! expansion, LOB and Java files; elsewhere also the rewritten pages and the new B-trees — until the run ends
+//! (held twice meanwhile, which 1번 세션 accepted: the free-space check needs twice the reservation). Those writes
+//! go outside the space the run took, so a process filling the filesystem meanwhile can still take it; `plan` shows
+//! their bound as unreserved writes.
 //!
 //! Input: the plan, the resource estimate, the IO page size, the size of the new log. Output: [`TargetSpace`] and
 //! the [`Reservation`] file, a scratch line of the marker (a rerun removes it, the fsync skips it), removed on drop.
@@ -13,6 +15,7 @@
 //! The former `5 · T_i / page + 4` was no bound: a key of 86 rows takes a 16 KiB overflow OID page for one object.
 //! Source: workspace#526 (1번 세션 decision: copy volumes allocated at the start, one reservation for the rest).
 
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -28,8 +31,12 @@ use fastmig_ondisk::btree::{
     BTREE_MAX_ALIGN, DISK_VPID_SIZE, max_keylen_inpage, max_oidlen_inpage, object_fixed_size,
     ovf_key,
 };
+use fastmig_ondisk::sector_reserve;
+use fastmig_ondisk::sector_table::SECTOR_NPAGES;
 use fastmig_ondisk::spage::{SPAGE_HEADER_SIZE, SPAGE_SLOT_SIZE};
-use fastmig_ondisk::{Oid, Vpid, db_pagesize, preallocate};
+use fastmig_ondisk::volume_set::VolumeSet;
+use fastmig_ondisk::{Oid, Vpid, Vsid, db_pagesize, preallocate};
+use fastmig_plan::migration_plan::PageRange;
 use fastmig_plan::{CopyMethod, Plan};
 use fastmig_verify::btree_walk::LeafCounts;
 
@@ -38,19 +45,30 @@ use crate::resource_estimate::{DefFigures, ResourceEstimate};
 /// Pages for the catalog file and class records a run writes beyond the bounds above.
 const CATALOG_SLACK_PAGES: u64 = 64;
 
-#[derive(Clone, Copy, Debug)]
+/// Sectors reserved besides 2 % of the listed ones for sectors a run takes off the list.
+const OFF_LIST_SECTORS: u64 = 8;
+
+#[derive(Clone, Debug)]
 pub struct TargetSpace {
     /// Byte-copied volumes, allocated at the start.
     pub copy_bytes: u64,
     /// The new log, allocated at the start.
     pub log_bytes: u64,
-    /// Cloned pages the run rewrites, unshared at the start (`Plan::unshare_ranges`; 0 where the target cannot).
+    /// Cloned pages the run writes, unshared at the start (`unshare_ranges`; 0 where the target cannot).
     pub unshare_bytes: u64,
     /// The reservation file: everything else the run may write, outside the space allocated at the start (the
     /// unreserved writes).
     pub extra_bytes: u64,
-    /// The new B-trees' part of it, in pages (`btree_pages` summed).
+    /// The new B-trees, in pages (`btree_pages` summed).
     pub btree_pages: u64,
+    /// The sectors the run takes in the order the disk cache hands them out (`sector_reserve::next_sectors`), listed
+    /// at the start where the target can unshare; a sector reserved off the list is claimed when reserved.
+    pub sectors: Vec<Vsid>,
+    /// Sectors the free ones cannot give: an expansion, reserved.
+    pub short_sectors: u64,
+    /// Cloned pages unshared at the start: the rewritten pages (`Plan::unshare_ranges`), the listed sectors on cloned
+    /// volumes, each cloned volume's header and sector table; merged.
+    pub unshare_ranges: Vec<PageRange>,
 }
 
 impl TargetSpace {
@@ -61,14 +79,21 @@ impl TargetSpace {
     }
 }
 
-pub fn bound(plan: &Plan, est: &ResourceEstimate, io_page: u64, new_log_bytes: u64) -> TargetSpace {
+pub fn bound(
+    plan: &Plan,
+    est: &ResourceEstimate,
+    vols: &VolumeSet,
+    new_log_bytes: u64,
+) -> io::Result<TargetSpace> {
+    let io_page = vols.io_pagesize() as u64;
     let copy_bytes = plan
         .volumes
         .iter()
         .filter(|v| v.copy_method == CopyMethod::Copy)
         .map(|v| v.bytes)
         .sum();
-    let btree_pages: u64 = est
+    let in_page = max_keylen_inpage(db_pagesize(io_page as usize));
+    let per_index: Vec<(u64, bool)> = est
         .per_def_figures
         .iter()
         .map(|f| {
@@ -76,26 +101,116 @@ pub fn bound(plan: &Plan, est: &ResourceEstimate, io_page: u64, new_log_bytes: u
                 .from_heaps
                 .then(|| est.source_groups.get(&(f.class.clone(), f.index.clone())))
                 .flatten();
-            btree_pages(f, g, io_page as usize, est.workers)
+            (
+                btree_pages(f, g, io_page as usize, est.workers),
+                f.stats.max_key as usize >= in_page,
+            )
         })
-        .sum();
-    // rewritten pages: unshared at the start where the target can (on a byte-copied volume they are inside it already)
-    let (unshare_bytes, rewritten) = if plan.unshare {
-        let pages: u64 = plan.unshare_ranges.iter().map(|r| r.pages as u64).sum();
-        (pages * io_page, 0)
-    } else {
-        (0, plan.rewritten_pages_bound)
-    };
-    let pages = rewritten + btree_pages + est.appended_pages + CATALOG_SLACK_PAGES;
-    let extra_bytes =
-        pages * io_page + plan.lob.referenced_bytes() + plan.java.bytes + plan.java_static.bytes;
-    TargetSpace {
+        .collect();
+    let btree_pages: u64 = per_index.iter().map(|(p, _)| p).sum();
+    let mut t = TargetSpace {
         copy_bytes,
         log_bytes: new_log_bytes,
-        unshare_bytes,
-        extra_bytes,
+        unshare_bytes: 0,
+        extra_bytes: plan.lob.referenced_bytes() + plan.java.bytes + plan.java_static.bytes,
         btree_pages,
+        sectors: Vec::new(),
+        short_sectors: 0,
+        unshare_ranges: Vec::new(),
+    };
+    if !plan.unshare {
+        // rewritten and new pages: inside a byte-copied volume, outside a cloned one this filesystem cannot unshare
+        let pages =
+            plan.rewritten_pages_bound + btree_pages + est.appended_pages + CATALOG_SLACK_PAGES;
+        t.extra_bytes += pages * io_page;
+        return Ok(t);
     }
+    // the sectors the run takes, listed now and unshared at the start with the rewritten pages: per index its
+    // B-tree file (and overflow key file), the appended heap pages and the catalog slack, the new catalog files
+    let n: u64 = per_index
+        .iter()
+        .map(|&(p, ovf)| file_sectors(p) + ovf as u64)
+        .sum::<u64>()
+        + (est.appended_pages + CATALOG_SLACK_PAGES).div_ceil(SECTOR_NPAGES as u64)
+        + plan.catalog_sectors;
+    let freed: HashSet<Vsid> = plan.freed_sectors.iter().copied().collect();
+    let (sectors, short) = sector_reserve::next_sectors(vols, &freed, n as usize)?;
+    let cloned: Vec<i16> = plan
+        .volumes
+        .iter()
+        .filter(|v| v.copy_method == CopyMethod::Clone)
+        .map(|v| v.volid)
+        .collect();
+    let mut ranges = plan.unshare_ranges.clone();
+    for v in vols.volumes().iter().filter(|v| cloned.contains(&v.volid)) {
+        // the volume header and sector table: the run sets sector bits, an expansion rewrites both
+        ranges.push(PageRange {
+            volid: v.volid,
+            first: 0,
+            pages: 1,
+        });
+        ranges.push(PageRange {
+            volid: v.volid,
+            first: v.header.stab_first_page,
+            pages: v.header.stab_npages as u32,
+        });
+    }
+    ranges.extend(
+        sectors
+            .iter()
+            .filter(|s| cloned.contains(&s.volid))
+            .map(|s| PageRange {
+                volid: s.volid,
+                first: s.sectid * SECTOR_NPAGES,
+                pages: SECTOR_NPAGES as u32,
+            }),
+    );
+    t.unshare_ranges = merge_ranges(ranges);
+    t.unshare_bytes = t.unshare_ranges.iter().map(|r| r.pages as u64).sum::<u64>() * io_page;
+    // reserved: what the free sectors cannot give, as the engine's expansion takes it (1 % of the data sectors or
+    // 64, plus the request), and room for sectors taken off the list (a request of more than one sector)
+    let total: u64 = vols
+        .volumes()
+        .iter()
+        .filter(|v| v.header.purpose == 0 && v.header.vol_type == 0)
+        .map(|v| v.header.nsect_total as u64)
+        .sum();
+    let expansion = if short > 0 {
+        (total / 100).max(64) + short as u64
+    } else {
+        0
+    };
+    let off_list = OFF_LIST_SECTORS + n / 50;
+    t.extra_bytes += (expansion + off_list) * SECTOR_NPAGES as u64 * io_page;
+    t.sectors = sectors;
+    t.short_sectors = short as u64;
+    Ok(t)
+}
+
+/// Sectors a permanent file of `pages` pages holds: one at its creation, then `file_perm_expand` adds 1 % of its
+/// sectors (at least one) each time it is full.
+fn file_sectors(pages: u64) -> u64 {
+    let mut s: u64 = 1;
+    while s * (SECTOR_NPAGES as u64) < pages {
+        s += (s / 100).max(1);
+    }
+    s
+}
+
+/// `ranges` sorted, overlapping and adjacent ones merged.
+fn merge_ranges(mut ranges: Vec<PageRange>) -> Vec<PageRange> {
+    ranges.sort_by_key(|r| (r.volid, r.first));
+    let mut out: Vec<PageRange> = Vec::new();
+    for r in ranges {
+        match out.last_mut() {
+            Some(l) if l.volid == r.volid && l.first as i64 + l.pages as i64 >= r.first as i64 => {
+                let end = (l.first as i64 + l.pages as i64).max(r.first as i64 + r.pages as i64);
+                l.pages = (end - l.first as i64) as u32;
+            }
+            _ => out.push(r),
+        }
+    }
+    out
 }
 
 /// Pages the rebuild of one index writes at most, from the builder's own rules (`leaf_builder`, `nonleaf_builder`,

@@ -163,23 +163,42 @@ Right after the incomplete marker, before the first byte of the target, `migrate
   file it frees and, on the same-version path, of the root heap and the treated heaps, on the 11.x path of every
   heap (`Plan::unshare_ranges`) — get blocks of their own (`preallocate::unshare`, `FALLOC_FL_UNSHARE_RANGE`): taken
   once, not held twice in the reservation. Another filesystem keeps them in the reservation, and `plan` says so;
+- on XFS with a cloned volume, the sectors the run will take are listed once, here (listed sectors,
+  `TargetSpace::sectors`; ADR 0013): the engine's reservation order replayed one sector at a time
+  (`sector_reserve::next_sectors`; the sectors of the files the run frees first count as free, `Plan::freed_sectors`),
+  as many as the new B-trees take (`btree_pages` per index turned into sectors by `file_perm_expand`'s 1 % rule, one
+  more for an overflow key file), plus the appended heap pages and catalog slack, plus the new catalog files
+  (`Plan::catalog_sectors`). The listed sectors on cloned volumes, and each cloned volume's header and sector
+  table, are unshared with the rewritten pages (`TargetSpace::unshare_ranges`, merged). A sector the run reserves
+  off the list is unshared when reserved (`SpaceManager::with_claim`), and a failure there ends the space change
+  before any page of it is written; report.json counts them as `temp_disk.target_off_list_sectors`;
 - one reservation file, `<dest>/fastmig/reserve-target`, holds an upper bound of everything else the run may
-  write, until the run ends: where the target cannot unshare, the pages a cloned volume unshares
-  (`Plan::rewritten_pages_bound` — every heap page when the catalog is regenerated, else the treated pages and the
-  root heap, and the freed files' pages), the new B-trees (`target_space::btree_pages`,
-  below), 64 pages of catalog slack, the referenced LOB and Java files. The file is
-  removed only when the run ends, so while the run writes what it bounds the space is held twice (accepted,
-  1번 세션 decision).
+  write, until the run ends: the referenced LOB and Java files, and with listed sectors the expansion the free
+  sectors cannot give (the engine's: max(1 % of the data sectors, 64) plus the shortfall) and 8 sectors + 2 % of
+  the list for sectors taken off it. Where the target cannot unshare it also holds the pages a cloned volume
+  unshares (`Plan::rewritten_pages_bound` — every heap page when the catalog is regenerated, else the treated
+  pages and the root heap, and the freed files' pages), the new B-trees (`target_space::btree_pages`, below), the
+  appended heap pages and 64 pages of catalog slack. The file is removed only when the run ends, so while the run
+  writes what it bounds the space is held twice (accepted, 1번 세션 decision).
 
 The free-space check (with the temp limit when the spill directory is on the target filesystem) therefore needs
-the byte-copied volumes, the new log and twice the reservation (`TargetSpace::needed`); `plan` prints it, refuses
-when the target filesystem has less, and writes it to `plan.json` as `target_space`.
+the byte-copied volumes, the new log, the unshared pages and twice the reservation (`TargetSpace::needed`); `plan`
+prints it, refuses when the target filesystem has less, and writes it to `plan.json` as `target_space` (with
+`listed_sectors` and `short_sectors`).
 
 **Unreserved writes.** What the reservation bounds is written outside the space the run took: a process that fills
 the filesystem while the run writes can still take that space, and the run then stops on a full disk. `plan`
 prints the bound as `unreserved writes ≤ N MiB` (the reservation's size) so the run can be started with that much
-left to other writers. Only the byte-copied volumes, the new log and the spill arena are written inside space the
-run already holds.
+left to other writers. With listed sectors that is only the sectors off the list, an expansion and the LOB and
+Java files.
+
+Measured on T1 (develop and 11.4, clean and dirty, `--workers 16 --mem 64M`; `filefrag -v` extents of the cloned
+volumes without `shared`): 0 sectors off the list on all four, also with `--workers 1` and with `--verify` (rc 0);
+written beyond the space taken at the start 49,152 / 196,608 / 1,064,960 / 1,064,960 B against a reservation of
+9.5–10.6 MB (before the list: 4.8–7.1 MB beyond against 22.5–25.9 MB). The price is whole sectors: a B-tree or
+new heap file takes at least one 1 MiB sector, so the unshared pages grew from 18–36 MB to 88–169 MB (83 and 146
+listed sectors) while the reservation shrank. On a target so migrated, develop SA inserting 2,000,000 rows
+expanded volume 1 from 8192 to 16384 pages like on any engine database (`_vinf` names only the target).
 
 **The new B-trees' bound** (`target_space::btree_pages`, per index, from the builder's own rules): a leaf record
 takes its first object (8 B; the fixed object with a chain), the key (or a 6 B overflow link), 3 B of padding, 8 B

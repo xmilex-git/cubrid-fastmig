@@ -12,7 +12,9 @@
 //! Decision: a target that runs out of space grows exactly as the engine would have grown it (workspace#500,
 //! ADR 0013).
 
+use std::collections::HashSet;
 use std::io;
+use std::sync::Arc;
 
 use crate::ids::Vsid;
 use crate::sector_table::{self, SECTOR_NPAGES};
@@ -47,8 +49,11 @@ pub fn sectors_of_bytes(io_pagesize: usize, bytes: u64) -> i32 {
     sector_table::round_up_sectors((bytes / (SECTOR_NPAGES as u64 * io_pagesize as u64)) as i32)
 }
 
+/// Called with every sector reserved, before any page of it is written (workspace#526: a sector outside the space a
+/// run took at the start is taken here, or the reservation fails).
+pub type Claim = Arc<dyn Fn(Vsid) -> io::Result<()> + Send + Sync>;
+
 /// The engine's disk cache for permanent data volumes.
-#[derive(Debug)]
 pub struct DiskCache {
     /// Per volid: counts toward permanent data (purpose and type permanent).
     data: Vec<bool>,
@@ -57,16 +62,18 @@ pub struct DiskCache {
     /// Per volid: `hint_allocsect`, where the next search in the volume starts.
     hint: Vec<i32>,
     growth: VolumeGrowth,
+    claim: Option<Claim>,
 }
 
 impl DiskCache {
     /// Engine `disk_cache_load_volume` over every volume.
-    pub fn load(vols: &VolumeSet, growth: VolumeGrowth) -> io::Result<Self> {
+    pub fn load(vols: &VolumeSet, growth: VolumeGrowth, claim: Option<Claim>) -> io::Result<Self> {
         let mut s = DiskCache {
             data: Vec::new(),
             free: Vec::new(),
             hint: Vec::new(),
             growth,
+            claim,
         };
         for v in vols.volumes() {
             let used = sector_table::used_sectors(vols, v.volid)?.len() as i32;
@@ -100,6 +107,11 @@ impl DiskCache {
         let mut out = Vec::with_capacity(n as usize);
         for (volid, count) in plan {
             self.take_in_volume(vols, volid, count, &mut out)?;
+        }
+        if let Some(c) = &self.claim {
+            for v in &out {
+                c(*v)?;
+            }
         }
         Ok(out)
     }
@@ -258,4 +270,49 @@ impl DiskCache {
         self.free[vsid.volid as usize] += 1;
         Ok(())
     }
+}
+
+/// The next `n` sectors the disk cache of `vols` hands out to one-sector requests, `freed` counted as free (the
+/// files a run frees before it allocates), and how many more the free sectors cannot give (the expansion the
+/// engine would make). Simulates `disk_reserve_from_cache_vols` with one-sector requests (the first data volume by
+/// volid with a free sector) and `disk_reserve_sectors_in_volume` (from the hint to `nsect_total`, then from 0;
+/// the hint moves to the STAB unit of the sector after the one taken). A request of more sectors skips volumes
+/// with less than half of it free and does not look behind the sector it took, so a run takes exactly this
+/// sequence only as long as neither happens (workspace#526: the rest is claimed when reserved).
+pub fn next_sectors(
+    vols: &VolumeSet,
+    freed: &HashSet<Vsid>,
+    n: usize,
+) -> io::Result<(Vec<Vsid>, usize)> {
+    let mut out = Vec::new();
+    for v in vols.volumes() {
+        if out.len() >= n {
+            break;
+        }
+        if !(v.header.purpose == 0 && v.header.vol_type == 0) {
+            continue;
+        }
+        let total = v.header.nsect_total;
+        let mut used = vec![false; total.max(0) as usize];
+        for s in sector_table::used_sectors(vols, v.volid)? {
+            if s < total && !freed.contains(&Vsid::new(v.volid, s)) {
+                used[s as usize] = true;
+            }
+        }
+        let mut free = used.iter().filter(|u| !**u).count();
+        let mut h = v.header.hint_allocsect;
+        while out.len() < n && free > 0 {
+            let start = if h > 0 && h < total { h } else { 0 };
+            let s = (start..total)
+                .chain(0..start)
+                .find(|&s| !used[s as usize])
+                .expect("a free sector is counted");
+            used[s as usize] = true;
+            free -= 1;
+            out.push(Vsid::new(v.volid, s));
+            h = (s + 1) / 64 * 64;
+        }
+    }
+    let short = n - out.len();
+    Ok((out, short))
 }
