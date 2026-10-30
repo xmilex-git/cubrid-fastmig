@@ -7,7 +7,7 @@ indexes, G2 #482 for header statistics); implementation ticket P1f
 [workspace#495](https://github.com/xmilex-git/workspace/issues/495); [ADR 0007](adr/0007-rust-verifier-instead-of-checkdb.md).
 
 ```sh
-cubrid-fastmig verify <target-db> --source <source-db> [--workers N] [--mem 16G] [--spill-dir DIR]
+cubrid-fastmig verify <target-db> --source <source-db> [--workers N] [--mem 16G] [--spill-dir DIR] [--temp-disk SIZE]
 cubrid-fastmig verify /path/to/first-volume --role source      # one database, source rules (vacuum residue allowed)
 ```
 

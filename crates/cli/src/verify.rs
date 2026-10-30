@@ -37,7 +37,8 @@ cubrid-fastmig verify <db | first-volume-path> [options]
   --measured-classes <file>      classes whose heap header statistics are compared (volid|pageid|slotid lines)
   --workers <n>                  thread cap (default: CPUs / 2)
   --mem <size>                   memory limit, e.g. 16G (default: physical memory / 4, at least 256M)
-  --spill-dir <dir>              where sorted runs spill (default: <target volume dir>/fastmig/spill)";
+  --spill-dir <dir>              where sorted runs spill (default: <target volume dir>/fastmig/spill)
+  --temp-disk <size>             spill bytes at once: indexes are checked in batches that fit (default: one batch)";
 
 const FLAGS: &[&str] = &[
     "--source",
@@ -47,6 +48,7 @@ const FLAGS: &[&str] = &[
     "--report",
     "--measured-classes",
     "--workers",
+    "--temp-disk",
 ];
 
 /// Where one database is and how to read it.
@@ -104,14 +106,14 @@ fn open(a: &DbArg, role: Role) -> io::Result<Database> {
     }
 }
 
-/// Spill bytes the verifier's source side takes when every pair spills, and its heap pages
-/// (`fastmig_verify::run::heap_pair_bytes`), the
-/// log read through the header `src` holds locked (workspace#526: the temp disk `--verify` needs).
+/// Spill bytes of each plain index the verifier's source side takes when every pair spills, and its heap pages
+/// (`fastmig_verify::run::heap_pair_bytes`), the log read through the header `src` holds locked (workspace#526,
+/// #553: the temp disk `--verify` needs).
 pub fn source_pair_bytes(
     src: &OpenSource,
     locate: Locate,
     workers: usize,
-) -> io::Result<(u64, usize)> {
+) -> io::Result<(Vec<u64>, usize)> {
     let db = Database::open_with_log(
         &src.entry.first_volume(),
         locate,
@@ -193,7 +195,15 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         .parent()
         .unwrap_or(Path::new("/"))
         .to_path_buf();
-    let lim = Limits::from(&p, &tdir)?;
+    let lim = Limits {
+        temp_disk: p
+            .value("--temp-disk")
+            .map(|v| {
+                limits::parse_size(v).ok_or_else(|| CliError::Usage(format!("bad --temp-disk {v}")))
+            })
+            .transpose()?,
+        ..Limits::from(&p, &tdir)?
+    };
     let report = p
         .value("--report")
         .map_or_else(|| tdir.join("fastmig").join("verify.jsonl"), PathBuf::from);
@@ -237,6 +247,7 @@ pub fn run_verifier(
         workers: &wb,
         memory: &mb,
         spill: &spill,
+        temp_disk: lim.temp_disk,
     };
     let mut tdb = open(target, role)?;
     if let Some(s) = source {

@@ -4,10 +4,11 @@
 //! target space the plan needs, and the free space of the target and spill filesystems.
 //! Output: the limit in bytes.
 //! Rules (user, 2026-10-30): no option on a terminal → show min and max and ask; no option otherwise → max when it
-//! fits the free space, else refuse naming the choices; with `--verify` min and max are the verifier's need (it
-//! spills every index in one scan, on the target then on the source: `ResourceEstimate::verify_min`); a limit below min or a limit plus the target growth over
-//! the free space → refuse. Nothing is retried or grown during the run.
-//! Source: workspace#526.
+//! fits the free space, else refuse naming the choices; with `--verify` min and max are the verifier's (it batches
+//! its indexes like the build, on the target then on the source: `ResourceEstimate::verify_min`, `verify_max`,
+//! workspace#553); a limit below min or a limit plus the target growth over the free space → refuse. Nothing is
+//! retried or grown during the run.
+//! Source: workspace#526, #553.
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
@@ -42,10 +43,13 @@ fn room_for(
 }
 
 fn choices(e: &ResourceEstimate, verify: bool) -> String {
-    if let Some(v) = e.verify_min().filter(|_| verify) {
+    if let (Some(v), Some(vmax), true) = (e.verify_min(), e.verify_max(), verify) {
+        let (tb, sb) = e.verify_batches(v).unwrap_or((0, 0));
         return format!(
-            "a limit of at least {} MiB (--verify: the verifier spills every index at once), or no --verify",
-            mib(v)
+            "--temp-disk min ({} MiB; --verify: {tb} index batches on the target, {sb} on the source, about {:.1} s more) or --temp-disk max ({} MiB, one batch each), or a size in between",
+            mib(v),
+            e.verify_extra_seconds(v),
+            mib(vmax)
         );
     }
     let (lo, hi) = (e.temp_min(), e.temp_max());
@@ -69,17 +73,19 @@ pub fn choose(
     spill: &Path,
     target: &Path,
 ) -> io::Result<u64> {
-    // the verifier scans every index at once, on the target then on the source, after the build's spill is gone
-    // (docs/resources.md): its need is both the least and the most the run takes
-    let (lo, hi) = match e.verify_min() {
-        Some(v) if verify => (v, v),
+    // the verifier runs after the build's spill is gone and batches its indexes the same way (docs/resources.md,
+    // workspace#553): its least and most cover the build's
+    let (lo, hi) = match (e.verify_min(), e.verify_max()) {
+        (Some(v), Some(vmax)) if verify => (v, vmax),
         _ => (e.temp_min(), e.temp_max()),
     };
     let limit = match choice {
         Some(TempDiskChoice::Min) => lo,
         Some(TempDiskChoice::Max) => hi,
         Some(TempDiskChoice::Bytes(b)) => b,
-        None if io::stdin().is_terminal() && io::stderr().is_terminal() => ask(e, mem, lo, hi)?,
+        None if io::stdin().is_terminal() && io::stderr().is_terminal() => {
+            ask(e, mem, verify, lo, hi)?
+        }
         None => {
             if !room_for(hi, needed, target_available, spill, target)? {
                 return Err(refuse(format!(
@@ -98,7 +104,7 @@ pub fn choose(
             mib(limit),
             mib(lo),
             if verify {
-                "--verify spills every index at once, on the target then on the source"
+                "--verify: the largest index of the target or the source"
             } else {
                 "the largest index's pair bytes"
             }
@@ -116,13 +122,13 @@ pub fn choose(
 }
 
 /// Shows the table and reads `min`, `max` or a size from the terminal (empty: max).
-fn ask(e: &ResourceEstimate, mem: u64, lo: u64, hi: u64) -> io::Result<u64> {
+fn ask(e: &ResourceEstimate, mem: u64, verify: bool, lo: u64, hi: u64) -> io::Result<u64> {
     let mut err = io::stderr();
     write!(
         err,
         "{}Choose the temp disk limit of this run: {}.\ntemp disk [max]: ",
         e.table(mem),
-        choices(e, lo == hi)
+        choices(e, verify)
     )?;
     err.flush()?;
     let mut line = String::new();

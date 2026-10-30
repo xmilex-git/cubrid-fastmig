@@ -61,7 +61,7 @@ fn db_summary(r: &DbResult) -> String {
         .collect();
     let nc: Vec<String> = r.not_checked.iter().map(|s| json_str(s)).collect();
     format!(
-        "{{\"heaps\":{},\"live_rows\":{},\"indexes\":{},\"index_pairs\":{},\"object_refs\":{},\"lobs\":{},\"foreign_keys\":{},\"not_checked\":[{}],\"phases_s\":{{{}}}}}",
+        "{{\"heaps\":{},\"live_rows\":{},\"indexes\":{},\"index_pairs\":{},\"object_refs\":{},\"lobs\":{},\"foreign_keys\":{},\"index_batches\":{},\"not_checked\":[{}],\"phases_s\":{{{}}}}}",
         r.heaps,
         r.live_rows,
         r.indexes,
@@ -69,6 +69,7 @@ fn db_summary(r: &DbResult) -> String {
         r.object_refs,
         r.lobs,
         r.foreign_keys,
+        r.index_batches,
         nc.join(","),
         phases.join(",")
     )

@@ -11,6 +11,8 @@
 //! counting scan's time. mem_recommended spills less, not nothing; mem_min is the fixed buffers per worker (copy I/O
 //! buffer, index build merge floor and spill buffer, `limits::mem_min`) — the keys spill under a smaller limit.
 //! Temp disk the verifier needs comes after the build's spill is gone: a run needs max(build, verify), not the sum.
+//! The verifier cuts its indexes into batches the same way (workspace#553): its min is the largest index of the
+//! target or the source, its max every index of the larger side in one scan.
 //! Source: workspace#526 (user requests: the sizes before the start, no disk full in the middle).
 
 use std::collections::{HashMap, HashSet};
@@ -77,8 +79,9 @@ pub struct ResourceEstimate {
     pub appended_pages: u64,
     /// Seconds `appended_pages_bound` took (part of `scan_seconds`).
     pub appended_seconds: f64,
-    /// Spill bytes the verifier's source side takes (`verify::source_pair_bytes`), counted only for `--verify`.
-    pub verify_source: Option<u64>,
+    /// Spill bytes the verifier's source side takes per plain index (`verify::source_pair_bytes`), counted only for
+    /// `--verify`.
+    pub verify_source: Option<Vec<u64>>,
     /// Heap pages of the source the verifier reads (its live row map), counted with `verify_source`.
     pub verify_heap_pages: Option<usize>,
 }
@@ -282,10 +285,37 @@ impl ResourceEstimate {
         self.per_def.iter().sum()
     }
 
-    /// The smallest limit `--verify` takes: the verifier spills every index in one scan, on the target (temp max) and
-    /// then on the source; None when the source side was not counted.
+    /// The smallest limit `--verify` takes: the verifier batches its indexes like the build (workspace#553), on the
+    /// target (the build's pairs) and then on the source, so the largest index of either; None when the source side
+    /// was not counted.
     pub fn verify_min(&self) -> Option<u64> {
-        self.verify_source.map(|s| s.max(self.temp_max()))
+        let s = self.verify_source.as_ref()?;
+        Some(s.iter().copied().max().unwrap_or(0).max(self.temp_min()))
+    }
+
+    /// The limit at which the verifier keeps one heap pass per database: every index of the target (temp max) or of
+    /// the source in one scan, the larger; None when the source side was not counted.
+    pub fn verify_max(&self) -> Option<u64> {
+        let s = self.verify_source.as_ref()?;
+        Some(s.iter().sum::<u64>().max(self.temp_max()))
+    }
+
+    /// Batches the verifier cuts a temp limit into, (target, source); None below `verify_min`.
+    pub fn verify_batches(&self, limit: u64) -> Option<(usize, usize)> {
+        let s = self.verify_source.as_ref()?;
+        Some((
+            index_batches(&self.per_def, limit).ok()?.len(),
+            index_batches(s, limit).ok()?.len(),
+        ))
+    }
+
+    /// Seconds the verifier's batches add at `limit`: under `verify_max` it first counts its pairs on each database,
+    /// then reads the heaps once more per batch past the first; each read priced at the counting scan.
+    pub fn verify_extra_seconds(&self, limit: u64) -> f64 {
+        match (self.verify_max(), self.verify_batches(limit)) {
+            (Some(max), Some((t, s))) if limit < max => self.scan_seconds * (t + s) as f64,
+            _ => 0.0,
+        }
     }
 
     /// The least `--mem` `--verify` runs in (`fastmig_verify::run::memory_min` on the source's heap pages, at least
@@ -320,7 +350,11 @@ impl ResourceEstimate {
         let mut outside =
             12.0 + if self.regenerates { 18.0 } else { 0.0 } + 32.0 * gib(self.temp_max());
         if verify {
-            outside += 24.0 * gib(self.verify_source.unwrap_or(self.temp_max()));
+            outside += 24.0
+                * gib(self
+                    .verify_source
+                    .as_ref()
+                    .map_or(self.temp_max(), |s| s.iter().sum()));
         }
         mem + (outside * MIB).ceil() as u64
     }
@@ -348,7 +382,7 @@ impl ResourceEstimate {
             })
             .collect();
         format!(
-            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"appended_pages\": {}, \"appended_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_mem_min_bytes\": {}, \"rss_expected_max_bytes\": {}, \"rss_expected_max_verify_bytes\": {}, \"indexes\": [{}]}}",
+            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"appended_pages\": {}, \"appended_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_max_bytes\": {}, \"verify_batches_at_min\": {}, \"verify_extra_seconds_at_min\": {:.1}, \"verify_mem_min_bytes\": {}, \"rss_expected_max_bytes\": {}, \"rss_expected_max_verify_bytes\": {}, \"indexes\": [{}]}}",
             self.scan_seconds,
             self.appended_pages,
             self.appended_seconds,
@@ -356,8 +390,17 @@ impl ResourceEstimate {
             self.extra_seconds(b),
             self.mem_min(),
             self.mem_recommended(),
-            opt(self.verify_source),
+            opt(self.verify_source.as_ref().map(|s| s.iter().sum())),
             opt(self.verify_min()),
+            opt(self.verify_max()),
+            self.verify_min()
+                .and_then(|v| self.verify_batches(v))
+                .map_or_else(
+                    || "null".into(),
+                    |(t, s)| format!("{{\"target\": {t}, \"source\": {s}}}")
+                ),
+            self.verify_min()
+                .map_or(0.0, |v| self.verify_extra_seconds(v)),
             opt(self.verify_mem_min()),
             self.rss_expected_max(mem, false),
             self.rss_expected_max(mem, true),
@@ -370,15 +413,20 @@ impl ResourceEstimate {
         let mib = |b: u64| b.div_ceil(1 << 20);
         let (lo, hi) = (self.temp_min(), self.temp_max());
         let b = self.batches(lo).unwrap_or(0);
-        let verify = match self.verify_min() {
-            Some(v) => format!(
-                "--verify needs >= {} MiB: the verifier spills every index in one scan, on the target ({} MiB) then on the source ({} MiB) and --mem >= {} MiB (its live row map, merge floors and scan shares)",
-                mib(v),
-                mib(hi),
-                mib(self.verify_source.unwrap_or(0)),
-                mib(self.verify_mem_min().unwrap_or(0))
-            ),
-            None => "--verify needs >= temp max and the source side (counted by plan --verify; docs/resources.md)".into(),
+        let verify = match (self.verify_min(), self.verify_max()) {
+            (Some(v), Some(vmax)) => {
+                let (tb, sb) = self.verify_batches(v).unwrap_or((0, 0));
+                format!(
+                    "--verify: temp disk min {} MiB (index batches: {tb} on the target, {sb} on the source, about {:.1} s more), max {} MiB (one batch each: target {} MiB, source {} MiB); --mem >= {} MiB (its live row map, merge floors and scan shares)",
+                    mib(v),
+                    self.verify_extra_seconds(v),
+                    mib(vmax),
+                    mib(hi),
+                    mib(self.verify_source.as_ref().map_or(0, |s| s.iter().sum())),
+                    mib(self.verify_mem_min().unwrap_or(0))
+                )
+            }
+            _ => "--verify: temp disk counted by plan --verify (docs/resources.md)".into(),
         };
         format!(
             "resources (index rebuild, --workers {}; counted in {:.1} s, one heap scan):\n  temp disk: min {} MiB ({b} index batches, about {:.1} s more), max {} MiB (one batch)\n  {verify}\n  memory: min {} MiB, this run {} MiB, recommended {} MiB (fewer spills; temp does not depend on it)\n  expected max RSS at this run's --mem: {} MiB, {} MiB with --verify (--mem plus what stays outside it, measured: docs/resources.md)\n",

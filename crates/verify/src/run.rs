@@ -8,6 +8,9 @@
 //! index merged with its heap side in leaf-range shards (check 2, `merge_shards`) and each foreign key against its
 //! primary key → per index the checks across its shards and its root statistics → the root heap → the live row map
 //! sealed → deferred indexes against it → catalog references and OBJECT values (check 3) → LOB files (check 5).
+//! With a temp disk limit the plain indexes are cut into index batches (`temp_disk::index_batches` on their pair bytes,
+//! counted first): the first batch's pass reads every heap and does every heap check, each later batch reads again
+//! only the heaps of its indexes for their keys, and every batch's spill is gone before the next (workspace#553).
 //! Source: G3 workspace#483 Q9 (one scan per class, all its indexes at once; merges per index; workers and --mem of
 //! migrate), G5 workspace#486 (deferred indexes: structure + OID survival, key values "not checked"); workspace#509
 //! (sorts, shards and foreign keys on the workers; measured on the big develop DB).
@@ -18,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use fastmig_index::intermediate_merge::{MERGE_FLOOR, bound_open_runs};
 use fastmig_index::job_pool::run_jobs;
+use fastmig_index::memory_limit::MemoryGrant;
 use fastmig_index::splitter::ShardBounds;
+use fastmig_index::temp_disk::index_batches;
 use fastmig_index::{BuildError, IndexRuns, MemoryLimit, Run, SpillDir, WorkerLimit};
 use fastmig_ondisk::class_object::{Constraint, class_properties};
 use fastmig_ondisk::file_table::FileTable;
@@ -43,6 +48,8 @@ pub struct Limits<'a> {
     pub workers: &'a WorkerLimit,
     pub memory: &'a MemoryLimit,
     pub spill: &'a SpillDir,
+    /// Bytes spill files may hold at once (`--temp-disk`); None: every index in one heap pass (workspace#553).
+    pub temp_disk: Option<u64>,
 }
 
 #[derive(Default)]
@@ -58,6 +65,8 @@ pub struct DbResult {
     pub object_refs: usize,
     pub lobs: usize,
     pub foreign_keys: usize,
+    /// Heap passes the keys took: 1, or the index batches of a temp disk limit (workspace#553).
+    pub index_batches: usize,
     pub phases: Vec<(&'static str, Duration)>,
 }
 
@@ -168,57 +177,90 @@ fn open_indexes(db: &Database) -> Indexes<'_> {
     x
 }
 
-/// Every class with a heap, by position in `db.classes`; per class the plain indexes its rows feed (spec positions)
-/// and its heap scan job.
+/// Every class with a heap, by position in `db.classes`.
+fn heap_classes(db: &Database) -> Vec<usize> {
+    (0..db.classes.len())
+        .filter(|&i| !db.classes[i].class.heap.is_null())
+        .collect()
+}
+
+/// The heap scan jobs of `heap_classes` for the plain indexes in `batch` (spec positions): per class the batch's
+/// indexes its rows feed and its job. `every_heap`: a class that feeds none is scanned too (the heap checks), else
+/// left out. Returns the classes kept, their feeds and their jobs.
 fn heap_jobs<'a>(
     db: &'a Database,
     specs: &'a [IndexSpec],
     trees: &'a BTreeMap<usize, IndexTree<'a>>,
+    heap_classes: &[usize],
+    batch: &BTreeSet<usize>,
+    every_heap: bool,
 ) -> (Vec<usize>, Vec<Vec<usize>>, Vec<HeapScanJob<'a>>) {
-    let heap_classes: Vec<usize> = (0..db.classes.len())
-        .filter(|&i| !db.classes[i].class.heap.is_null())
-        .collect();
+    let mut kept = Vec::with_capacity(heap_classes.len());
     let mut feeds: Vec<Vec<usize>> = Vec::with_capacity(heap_classes.len());
-    let jobs: Vec<HeapScanJob> = heap_classes
-        .iter()
-        .map(|&ci| {
-            let sc = &db.classes[ci];
-            let mine: Vec<usize> = trees
-                .keys()
-                .copied()
-                .filter(|s| specs[*s].owners.iter().any(|(j, _)| *j == ci))
-                .collect();
-            let indexes = mine
-                .iter()
-                .map(|s| IndexKeys {
-                    constraint: &specs[*s].owners.iter().find(|(j, _)| *j == ci).unwrap().1,
-                    kd: &trees[s].kd,
-                })
-                .collect();
-            feeds.push(mine);
-            HeapScanJob {
-                target: HeapTarget {
-                    name: db.class_name(sc.oid),
-                    class_oid: sc.oid,
-                    class: Some(&sc.class),
-                    hfid: sc.class.heap,
-                },
-                indexes,
-            }
-        })
-        .collect();
-    (heap_classes, feeds, jobs)
+    let mut jobs: Vec<HeapScanJob> = Vec::with_capacity(heap_classes.len());
+    for &ci in heap_classes {
+        let mine: Vec<usize> = batch
+            .iter()
+            .copied()
+            .filter(|s| specs[*s].owners.iter().any(|(j, _)| *j == ci))
+            .collect();
+        if mine.is_empty() && !every_heap {
+            continue;
+        }
+        let sc = &db.classes[ci];
+        let indexes = mine
+            .iter()
+            .map(|s| IndexKeys {
+                constraint: &specs[*s].owners.iter().find(|(j, _)| *j == ci).unwrap().1,
+                kd: &trees[s].kd,
+            })
+            .collect();
+        kept.push(ci);
+        feeds.push(mine);
+        jobs.push(HeapScanJob {
+            target: HeapTarget {
+                name: db.class_name(sc.oid),
+                class_oid: sc.oid,
+                class: Some(&sc.class),
+                hfid: sc.class.heap,
+            },
+            indexes,
+        });
+    }
+    (kept, feeds, jobs)
 }
 
-/// The spill bytes the heap side of this verifier takes on `db` when every pair spills: the pairs its own reader
-/// extracts, counted without keeping them (workspace#526: the temp disk `--verify` needs on the source); and the
-/// heap pages its live row map is reserved for.
-pub fn heap_pair_bytes(db: &Database, workers: usize) -> std::io::Result<(u64, usize)> {
+/// Spill bytes of each plain index's pairs on `db` (by spec position, `trees` order): the verifier's own reader over
+/// the heaps that feed them, nothing kept (`heap_pass::pair_bytes`).
+fn index_pair_bytes(
+    db: &Database,
+    specs: &[IndexSpec],
+    trees: &BTreeMap<usize, IndexTree>,
+    workers: usize,
+) -> std::io::Result<BTreeMap<usize, u64>> {
+    let all: BTreeSet<usize> = trees.keys().copied().collect();
+    let (_, feeds, jobs) = heap_jobs(db, specs, trees, &heap_classes(db), &all, false);
+    let mut out: BTreeMap<usize, u64> = trees.keys().map(|&s| (s, 0)).collect();
+    for (mine, bytes) in feeds
+        .iter()
+        .zip(crate::heap_pass::pair_bytes(db, &jobs, workers)?)
+    {
+        for (s, b) in mine.iter().zip(bytes) {
+            *out.get_mut(s).unwrap() += b;
+        }
+    }
+    Ok(out)
+}
+
+/// The spill bytes of each plain index of this verifier on `db` when every pair spills, and the heap pages its live
+/// row map is reserved for (workspace#526, #553: the temp disk `--verify` needs on the source, its least the largest
+/// index, its most the sum).
+pub fn heap_pair_bytes(db: &Database, workers: usize) -> std::io::Result<(Vec<u64>, usize)> {
     let x = open_indexes(db);
-    let (heap_classes, _, jobs) = heap_jobs(db, &x.specs, &x.trees);
+    let bytes = index_pair_bytes(db, &x.specs, &x.trees, workers)?;
     Ok((
-        crate::heap_pass::pair_bytes(db, &jobs, workers)?,
-        heap_pages(db, &heap_classes),
+        bytes.into_values().collect(),
+        heap_pages(db, &heap_classes(db)),
     ))
 }
 
@@ -232,6 +274,33 @@ fn heap_pages(db: &Database, heap_classes: &[usize]) -> usize {
         .sum()
 }
 
+/// The plain indexes cut into batches: one with no temp disk limit, else `temp_disk::index_batches` on their pair
+/// bytes (workspace#553). Err: the limit is below the largest index.
+fn batches(
+    db: &Database,
+    specs: &[IndexSpec],
+    trees: &BTreeMap<usize, IndexTree>,
+    lim: &Limits,
+) -> std::io::Result<Vec<BTreeSet<usize>>> {
+    // no plain index: still one batch, whose pass does the heap checks
+    let Some(limit) = lim.temp_disk.filter(|_| !trees.is_empty()) else {
+        return Ok(vec![trees.keys().copied().collect()]);
+    };
+    let (at, bytes): (Vec<usize>, Vec<u64>) =
+        index_pair_bytes(db, specs, trees, lim.workers.limit())?
+            .into_iter()
+            .unzip();
+    let cut = index_batches(&bytes, limit).map_err(|min| {
+        tool_err(format!(
+            "temp disk: {limit} B is below {min} B, the pair bytes of the verifier's largest index"
+        ))
+    })?;
+    Ok(cut
+        .into_iter()
+        .map(|b| b.into_iter().map(|i| at[i]).collect())
+        .collect())
+}
+
 pub fn verify_database(
     db: &Database,
     measured: &BTreeSet<Oid>,
@@ -242,7 +311,6 @@ pub fn verify_database(
     let (files, d4) = phase(&mut phases, "sectors", || check_sectors(db))?;
     r.defects.extend(d4);
 
-    let t_heaps = Instant::now();
     let Indexes {
         constraints,
         specs,
@@ -254,153 +322,92 @@ pub fn verify_database(
     r.indexes = specs.len();
     r.not_checked.extend(not_checked);
     r.defects.extend(defects);
-    let mut refs: Vec<ObjectRef> = Vec::new();
-    // one multi-class scan over every heap (workspace#503), then the class checks in class order
-    let (heap_classes, feeds, jobs) = heap_jobs(db, &specs, &trees);
+    // a tree's own defects (from open) are reported once, whatever its shards find
+    for t in trees.values_mut() {
+        r.defects.extend(std::mem::take(&mut t.defects));
+    }
+    let trees = trees;
+    let batches = phase(&mut phases, "pair count", || {
+        batches(db, &specs, &trees, lim)
+    })?;
+    r.index_batches = batches.len();
+    let heap_classes = heap_classes(db);
     // the live row map is reserved before the scan, from the heaps' page counts (workspace#509)
     let mut live = LiveRowMap::reserve(lim.memory, heap_pages(db, &heap_classes))?;
-    // merge memory (fastmig_index::intermediate_merge): a floor per worker held from before the scan, which cannot
-    // take it, and after the sorts all the limit has free; each check-2 job merges within one worker's part
-    let floor = lim.memory.try_acquire(lim.workers.limit() * MERGE_FLOOR);
-    let mut runs: BTreeMap<usize, IndexRuns> = BTreeMap::new();
-    let mut nulls: BTreeMap<usize, u64> = BTreeMap::new();
-    {
+    let mut refs: Vec<ObjectRef> = Vec::new();
+    let fks = foreign_key_jobs(db, &constraints);
+    r.foreign_keys = fks.len();
+    let (mut t_heaps, mut t_sort, mut t_merge) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    for (k, batch) in batches.iter().enumerate() {
+        // the first batch's pass reads every heap for every heap check; a later one only its indexes' heaps, for keys
+        let first = k == 0;
+        let t = Instant::now();
+        let (kept, feeds, jobs) = heap_jobs(db, &specs, &trees, &heap_classes, batch, first);
+        // merge memory (fastmig_index::intermediate_merge): a floor per worker held from before the scan, which
+        // cannot take it, and after the sorts all the limit has free; each check-2 job merges within one worker's part
+        let floor = lim.memory.try_acquire(lim.workers.limit() * MERGE_FLOOR);
+        let mut runs: BTreeMap<usize, IndexRuns> = BTreeMap::new();
+        let mut nulls: BTreeMap<usize, u64> = BTreeMap::new();
         let passes =
             scan_heaps(db, &jobs, lim.workers, lim.memory, lim.spill).map_err(build_err)?;
-        for (((job, &ci), mine), p) in jobs.iter().zip(&heap_classes).zip(&feeds).zip(passes) {
-            let sc = &db.classes[ci];
-            let t = &job.target;
-            r.heaps += 1;
-            r.defects
-                .extend(check_chain(t, &p, measured.contains(&sc.oid)));
-            r.defects.extend(check_lobs(
-                &p.lobs,
-                db.lob_base.as_deref(),
-                db.line,
-                &t.name,
-            ));
-            r.lobs += p.lobs.len();
-            live.add(sc.oid, p.live)?;
-            refs.extend(p.refs);
-            r.defects.extend(p.defects);
+        for (((job, &ci), mine), p) in jobs.iter().zip(&kept).zip(&feeds).zip(passes) {
+            if first {
+                let sc = &db.classes[ci];
+                let t = &job.target;
+                r.heaps += 1;
+                r.defects
+                    .extend(check_chain(t, &p, measured.contains(&sc.oid)));
+                r.defects.extend(check_lobs(
+                    &p.lobs,
+                    db.lob_base.as_deref(),
+                    db.line,
+                    &t.name,
+                ));
+                r.lobs += p.lobs.len();
+                live.add(sc.oid, p.live)?;
+                refs.extend(p.refs);
+                r.defects.extend(p.defects);
+            } else {
+                // the first pass reported the heap's own defects; a key defect is of this batch's indexes only
+                r.defects.extend(
+                    p.defects
+                        .into_iter()
+                        .filter(|d| d.check == Check::IndexHeap),
+                );
+            }
             for ((s, run), n) in mine.iter().zip(p.runs.runs).zip(p.runs.nulls) {
                 runs.entry(*s).or_default().append(run);
                 *nulls.entry(*s).or_default() += n;
             }
         }
-    }
-    // the jobs borrow the trees, which give up their defects below
-    drop((jobs, feeds));
-    phases.push(("heap pass", t_heaps.elapsed()));
-    let t_sort = Instant::now();
-    // a tree's own defects (from open) are reported once, whatever its shards find
-    for t in trees.values_mut() {
-        r.defects.extend(std::mem::take(&mut t.defects));
-    }
-    let mut index_runs: Vec<(usize, IndexRuns, u64)> = trees
-        .keys()
-        .map(|s| {
-            (
-                *s,
-                runs.remove(s).unwrap_or_default(),
-                nulls.get(s).copied().unwrap_or(0),
-            )
-        })
-        .collect();
-    {
-        // every in-memory run sorted on --workers threads, largest first, not on its index's merge thread
-        // (workspace#509)
-        let mut sorts: Vec<(&mut Run, &KeyDomain)> = index_runs
-            .iter_mut()
-            .flat_map(|(s, run, _)| {
-                let kd = &trees[s].kd;
-                run.mem.iter_mut().map(move |m| (m, kd))
+        drop((jobs, feeds));
+        t_heaps += t.elapsed();
+        let index_runs: Vec<(usize, IndexRuns, u64)> = batch
+            .iter()
+            .map(|s| {
+                (
+                    *s,
+                    runs.remove(s).unwrap_or_default(),
+                    nulls.get(s).copied().unwrap_or(0),
+                )
             })
             .collect();
-        sorts.sort_by_key(|(m, _)| std::cmp::Reverse(m.len()));
-        run_jobs(lim.workers.limit(), sorts, |(m, kd)| m.sort(kd));
+        // foreign keys read only trees: they go with the first batch's pool
+        let fk_jobs = if first { fks.as_slice() } else { &[] };
+        check_batch(
+            &trees,
+            index_runs,
+            floor,
+            fk_jobs,
+            lim,
+            &mut r,
+            &mut t_sort,
+            &mut t_merge,
+        )?;
     }
-    let free = lim.memory.try_acquire(lim.memory.limit());
-    let merge_budget = (floor.bytes + free.bytes) / lim.workers.limit().max(1);
-    let bounded = run_jobs(
-        lim.workers.limit(),
-        index_runs.iter_mut().collect(),
-        |(s, run, _): &mut (usize, IndexRuns, u64)| {
-            bound_open_runs(run, &trees[s].kd, lim.spill, merge_budget)
-        },
-    );
-    bounded.into_iter().collect::<std::io::Result<()>>()?;
-    let plans = index_runs
-        .iter()
-        .map(|(s, run, _)| {
-            let t = &trees[s];
-            plan_shards(t, run, shard_count(t.leaves.len(), lim.workers.limit()))
-        })
-        .collect::<std::io::Result<Vec<_>>>()?;
-    phases.push(("run sort", t_sort.elapsed()));
-
-    let t_merge = Instant::now();
-    // every shard of every plain index merged with its heap side, and every foreign key against its primary key, in
-    // one pool on --workers threads, the most leaf pages first (workspace#503, #509)
-    let fks = foreign_key_jobs(db, &constraints);
-    r.foreign_keys = fks.len();
-    let mut jobs: Vec<TreeJob> = Vec::new();
-    for (i, ((s, runs, _), (ranges, bounds))) in index_runs.iter().zip(&plans).enumerate() {
-        for (k, leaves) in ranges.iter().enumerate() {
-            jobs.push(TreeJob::Shard {
-                index: i,
-                shard: k,
-                tree: &trees[s],
-                runs,
-                slice: bounds.as_ref().map(|b| (b, k)),
-                leaves: leaves.clone(),
-            });
-        }
-    }
-    jobs.extend(fks.iter().map(|(fk, pks)| TreeJob::ForeignKey { fk, pks }));
-    jobs.sort_by_key(|j| std::cmp::Reverse(j.leaf_pages()));
-    let results = run_jobs(lim.workers.limit(), jobs, |j| match j {
-        TreeJob::Shard {
-            index,
-            shard,
-            tree,
-            runs,
-            slice,
-            leaves,
-        } => {
-            let mut lp = LeafPairs::shard(tree, leaves);
-            let mut d = merge_pairs(runs, slice, &mut lp)?;
-            let (ld, counts, end) = lp.into_shard();
-            d.extend(ld);
-            Ok::<_, std::io::Error>((d, Some((index, shard, counts, end))))
-        }
-        TreeJob::ForeignKey { fk, pks } => Ok((check_fk(fk, pks), None)),
-    });
-    let mut shards: Vec<Vec<(usize, LeafCounts, ShardEnd)>> =
-        index_runs.iter().map(|_| Vec::new()).collect();
-    for res in results {
-        let (d, shard) = res?;
-        r.defects.extend(d);
-        if let Some((i, k, counts, end)) = shard {
-            shards[i].push((k, counts, end));
-        }
-    }
-    // per index: the checks across its shards' edges, then its root statistics over all of them
-    for ((s, _, nulls), mut parts) in index_runs.iter().zip(shards) {
-        parts.sort_by_key(|p| p.0);
-        let t = &trees[s];
-        let mut sum = LeafCounts::default();
-        for (_, c, _) in &parts {
-            sum += *c;
-        }
-        let ends: Vec<ShardEnd> = parts.into_iter().map(|p| p.2).collect();
-        r.defects.extend(join_shards(t, &ends));
-        r.defects.extend(t.check_stats(&sum, Some(*nulls)));
-        r.index_pairs += sum.live_objects as u64;
-    }
-    phases.push(("index merge and foreign keys", t_merge.elapsed()));
-    // the keys are checked: their runs, spill space and the merge memory go back before the root heap's own scan
-    drop((plans, index_runs, free, floor));
+    phases.push(("heap pass", t_heaps));
+    phases.push(("run sort", t_sort));
+    phases.push(("index merge and foreign keys", t_merge));
 
     phase(&mut phases, "root heap", || -> std::io::Result<()> {
         let t = HeapTarget {
@@ -471,6 +478,118 @@ pub fn verify_database(
     });
     r.phases = phases;
     Ok(r)
+}
+
+/// One batch's indexes after its heap pass: every in-memory run sorted, the spilled ones bounded to the merge memory,
+/// then every shard merged with its heap side (check 2) and `fks` against their primary keys in one pool, then per
+/// index the checks across its shards and its root statistics. The runs, their spill space and the merge memory go
+/// back when it returns.
+#[allow(clippy::too_many_arguments)]
+fn check_batch(
+    trees: &BTreeMap<usize, IndexTree>,
+    mut index_runs: Vec<(usize, IndexRuns, u64)>,
+    floor: MemoryGrant,
+    fks: &[(IndexTree, Vec<IndexTree>)],
+    lim: &Limits,
+    r: &mut DbResult,
+    t_sort: &mut Duration,
+    t_merge: &mut Duration,
+) -> std::io::Result<()> {
+    let t = Instant::now();
+    {
+        // every in-memory run sorted on --workers threads, largest first, not on its index's merge thread
+        // (workspace#509)
+        let mut sorts: Vec<(&mut Run, &KeyDomain)> = index_runs
+            .iter_mut()
+            .flat_map(|(s, run, _)| {
+                let kd = &trees[s].kd;
+                run.mem.iter_mut().map(move |m| (m, kd))
+            })
+            .collect();
+        sorts.sort_by_key(|(m, _)| std::cmp::Reverse(m.len()));
+        run_jobs(lim.workers.limit(), sorts, |(m, kd)| m.sort(kd));
+    }
+    let free = lim.memory.try_acquire(lim.memory.limit());
+    let merge_budget = (floor.bytes + free.bytes) / lim.workers.limit().max(1);
+    let bounded = run_jobs(
+        lim.workers.limit(),
+        index_runs.iter_mut().collect(),
+        |(s, run, _): &mut (usize, IndexRuns, u64)| {
+            bound_open_runs(run, &trees[s].kd, lim.spill, merge_budget)
+        },
+    );
+    bounded.into_iter().collect::<std::io::Result<()>>()?;
+    let plans = index_runs
+        .iter()
+        .map(|(s, run, _)| {
+            let t = &trees[s];
+            plan_shards(t, run, shard_count(t.leaves.len(), lim.workers.limit()))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    *t_sort += t.elapsed();
+
+    let t = Instant::now();
+    // every shard of every plain index merged with its heap side, and every foreign key against its primary key, in
+    // one pool on --workers threads, the most leaf pages first (workspace#503, #509)
+    let mut jobs: Vec<TreeJob> = Vec::new();
+    for (i, ((s, runs, _), (ranges, bounds))) in index_runs.iter().zip(&plans).enumerate() {
+        for (k, leaves) in ranges.iter().enumerate() {
+            jobs.push(TreeJob::Shard {
+                index: i,
+                shard: k,
+                tree: &trees[s],
+                runs,
+                slice: bounds.as_ref().map(|b| (b, k)),
+                leaves: leaves.clone(),
+            });
+        }
+    }
+    jobs.extend(fks.iter().map(|(fk, pks)| TreeJob::ForeignKey { fk, pks }));
+    jobs.sort_by_key(|j| std::cmp::Reverse(j.leaf_pages()));
+    let results = run_jobs(lim.workers.limit(), jobs, |j| match j {
+        TreeJob::Shard {
+            index,
+            shard,
+            tree,
+            runs,
+            slice,
+            leaves,
+        } => {
+            let mut lp = LeafPairs::shard(tree, leaves);
+            let mut d = merge_pairs(runs, slice, &mut lp)?;
+            let (ld, counts, end) = lp.into_shard();
+            d.extend(ld);
+            Ok::<_, std::io::Error>((d, Some((index, shard, counts, end))))
+        }
+        TreeJob::ForeignKey { fk, pks } => Ok((check_fk(fk, pks), None)),
+    });
+    let mut shards: Vec<Vec<(usize, LeafCounts, ShardEnd)>> =
+        index_runs.iter().map(|_| Vec::new()).collect();
+    for res in results {
+        let (d, shard) = res?;
+        r.defects.extend(d);
+        if let Some((i, k, counts, end)) = shard {
+            shards[i].push((k, counts, end));
+        }
+    }
+    // per index: the checks across its shards' edges, then its root statistics over all of them
+    for ((s, _, nulls), mut parts) in index_runs.iter().zip(shards) {
+        parts.sort_by_key(|p| p.0);
+        let t = &trees[s];
+        let mut sum = LeafCounts::default();
+        for (_, c, _) in &parts {
+            sum += *c;
+        }
+        let ends: Vec<ShardEnd> = parts.into_iter().map(|p| p.2).collect();
+        r.defects.extend(join_shards(t, &ends));
+        r.defects.extend(t.check_stats(&sum, Some(*nulls)));
+        r.index_pairs += sum.live_objects as u64;
+    }
+    *t_merge += t.elapsed();
+    // the keys are checked: their runs, spill space and the merge memory go back before the next batch or the root
+    // heap's own scan
+    drop((plans, index_runs, free, floor));
+    Ok(())
 }
 
 fn build_err(e: BuildError) -> std::io::Error {

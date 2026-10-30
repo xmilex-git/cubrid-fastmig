@@ -12,14 +12,27 @@ pair per index. Pairs that do not fit the memory limit (`--mem`) are sorted and 
 at once by the end of the scan; the builds that follow read them back and write nothing more to disk.
 
 The verifier (`--verify`) spills in its own pass after the build's spill files are gone, so a run needs
-**max(build, verify)** temp disk, not the sum. The verifier scans every index at once under the same memory rule,
-first on the target (the build's pairs: temp max) and then on the source, whose pairs are not the target's: a
-develop source still holds the deferred indexes' catalog rows, an 11.4 source its own catalog rows (T1: develop
-+504 B; 11.4 dirty 10,094,800 B against temp max 9,186,674 B). Its need, **verify min** = max(temp max, source
-side), is counted only with `--verify` (`plan --verify`, `migrate --verify`): the verifier's own reader over the
-source heaps, nothing kept (`fastmig_verify::run::heap_pair_bytes`, one more heap read). With `--verify` it is both
-the least and the most the run takes. Before this rule, T1 11.4 dirty at `--mem 2M --verify` stopped on the arena
-(limit temp max).
+**max(build, verify)** temp disk, not the sum. The verifier keys its indexes under the same memory rule, first
+on the target (the build's pairs) and then on the source, whose pairs are not the target's: a develop source still
+holds the deferred indexes' catalog rows, an 11.4 source its own catalog rows (T1: develop +504 B; 11.4 dirty
+10,094,800 B against temp max 9,186,674 B). The source side is counted per index only with `--verify` (`plan
+--verify`, `migrate --verify`): the verifier's own reader over the source heaps, nothing kept
+(`fastmig_verify::run::heap_pair_bytes`, one more heap read).
+
+Like the build, the verifier cuts its plain indexes into index batches under a limit (workspace#553,
+`fastmig_verify::run`): it counts each index's pairs on the database it checks (one more heap read), cuts them
+with the build's `index_batches`, and checks one batch at a time. The first batch's pass reads every heap and does
+every heap check (pages, chains, live row map, OBJECT and LOB values) with that batch's keys; each later batch reads
+only the heaps of its indexes again for their keys, and keeps from that pass only the key defects of its own
+indexes, so a defect is reported once whatever the batches. Each batch's runs and spill are gone before the next.
+Foreign keys read only trees and go with the first batch.
+
+- **verify min** = the largest index of the target (temp min) or of the source;
+- **verify max** = every index of the target (temp max) or of the source in one scan, the larger. At or above it
+  (and with no limit) the verifier makes one heap pass per database, as before; below it, the count and the
+  batches past the first cost one heap read each, priced like the build's (`verify_extra_seconds`).
+
+Before the first rule, T1 11.4 dirty at `--mem 2M --verify` stopped on the arena (limit temp max).
 
 ## The estimate
 
@@ -135,7 +148,8 @@ The verifier read the whole active log to parse its header (64 MiB on T1); it re
 - Without it otherwise: max when it fits the free space, else a refusal naming `--temp-disk min` and its cost.
 - A limit at or above temp max runs as one batch; below it the run counts the pairs again on the target (after
   page treatment, exact) and batches by those counts.
-- With `--verify`, min and max are both verify min.
+- With `--verify`, min and max are verify min and verify max; the verifier batches against verify max the way the
+  build batches against temp max.
 - Over a target a killed run left (`FASTMIG_INCOMPLETE`), the free space counts the files that run listed on the
   target filesystem as free: the rerun removes them before it writes (`incomplete_marker::reclaimable_bytes`). Only
   their own blocks count (FIEMAP extents without `FIEMAP_EXTENT_SHARED`, `own_blocks::own_bytes`): a cloned
@@ -292,8 +306,3 @@ counters, `TEMP_DISK`).
 
 `report.json` records `temp_disk.limit_bytes`, whether it batched, and `peak_bytes`, the most spill bytes on disk
 at any moment of the run (the build and, with `--verify`, the verifier).
-
-## Not covered yet
-
-- The verifier does not batch: with `--verify` the limit must be verify min (T1 develop dirty, `--mem 64M`,
-  `--temp-disk min --verify` before this rule: build peak 0.85 MB under a 1.48 MB limit, the verifier 7.5 MB).

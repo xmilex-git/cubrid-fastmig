@@ -37,7 +37,7 @@ not reported as migration defects.
 
 `plan` shows the temp disk the index rebuild needs at least (one index at a time) and at most
 (every index at once), and what the batches in between cost in time; `migrate --temp-disk min|max|<size>` picks
-one before anything is written and keeps to it by building the indexes in batches (`plan --verify` adds what the
+one before anything is written and keeps to it by building the indexes in batches, and with `--verify` checking them in batches (`plan --verify` adds what the
 verifier needs on the source). The index build and the verifier keep their keys, sort and merge buffers inside
 `--mem`, merging spilled runs in more passes when few fit. How the bounds are computed:
 [docs/resources.md](docs/resources.md) (workspace#526).

@@ -313,6 +313,9 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         temp_disk: Some(b.temp_limit).filter(|&l| l < b.est.temp_max()),
         ..o.limits.clone()
     };
+    // the verifier batches against its own max: one heap pass per database when the limit holds it (workspace#553)
+    let verify_temp_disk =
+        Some(b.temp_limit).filter(|&l| b.est.verify_max().is_some_and(|m| l < m));
     let resources = b.est.json(mem);
     let temp_limit = b.temp_limit;
     let target = b.target;
@@ -628,7 +631,10 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             Role::Target,
             &measured,
             o.worker_limit,
-            &limits,
+            &Limits {
+                temp_disk: verify_temp_disk,
+                ..limits.clone()
+            },
             &verify_report,
         )?;
         (code == 0, summary)

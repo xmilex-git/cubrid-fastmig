@@ -207,9 +207,14 @@ pub fn scan_heaps<'m>(
         .collect())
 }
 
-/// Spill bytes of every (key, OID) pair the live rows of `jobs` give (`temp_disk::spill_record_bytes` per key), read
-/// as [`scan_heaps`] reads them but with nothing kept: pages on `workers` threads, 64 at a time.
-pub fn pair_bytes(db: &Database, jobs: &[HeapScanJob], workers: usize) -> io::Result<u64> {
+/// Spill bytes of the (key, OID) pairs the live rows of `jobs` give (`temp_disk::spill_record_bytes` per key), per
+/// job and per index in `IndexKeys` order, read as [`scan_heaps`] reads them but with nothing kept: pages on
+/// `workers` threads, 64 at a time.
+pub fn pair_bytes(
+    db: &Database,
+    jobs: &[HeapScanJob],
+    workers: usize,
+) -> io::Result<Vec<Vec<u64>>> {
     let mut pages: Vec<(usize, Vpid)> = Vec::new();
     let mut layouts = Vec::with_capacity(jobs.len());
     for (c, j) in jobs.iter().enumerate() {
@@ -224,10 +229,28 @@ pub fn pair_bytes(db: &Database, jobs: &[HeapScanJob], workers: usize) -> io::Re
             pages.extend(ft.user_pages().into_iter().map(|p| (c, p)));
         }
     }
-    let total = AtomicU64::new(0);
+    let total: Vec<Vec<AtomicU64>> = jobs
+        .iter()
+        .map(|j| j.indexes.iter().map(|_| AtomicU64::new(0)).collect())
+        .collect();
     let done = run_jobs(workers, pages.chunks(64).collect(), |chunk| {
-        let mut n = 0u64;
+        // a chunk's pages are of one job or two neighbours: added up per run of one job
+        let mut n: Vec<u64> = Vec::new();
+        let mut at = usize::MAX;
+        let flush = |c: usize, n: &[u64]| {
+            if let Some(t) = total.get(c) {
+                for (t, &b) in t.iter().zip(n) {
+                    t.fetch_add(b, Ordering::Relaxed);
+                }
+            }
+        };
         for &(c, vpid) in chunk {
+            if c != at {
+                flush(at, &n);
+                n.clear();
+                n.resize(jobs[c].indexes.len(), 0);
+                at = c;
+            }
             let page = db.vols.read_page(vpid)?;
             let j = &jobs[c];
             let mut out = Shared::default();
@@ -239,18 +262,21 @@ pub fn pair_bytes(db: &Database, jobs: &[HeapScanJob], workers: usize) -> io::Re
                 vpid,
                 &page,
                 &mut out,
-                &mut |_, _, k| {
+                &mut |ix, _, k| {
                     if let RowKey::Key(k) = k {
-                        n += spill_record_bytes(k.len() as u64);
+                        n[ix] += spill_record_bytes(k.len() as u64);
                     }
                 },
             );
         }
-        total.fetch_add(n, Ordering::Relaxed);
+        flush(at, &n);
         Ok::<(), io::Error>(())
     });
     done.into_iter().collect::<io::Result<()>>()?;
-    Ok(total.into_inner())
+    Ok(total
+        .into_iter()
+        .map(|t| t.into_iter().map(AtomicU64::into_inner).collect())
+        .collect())
 }
 
 /// The layout of every representation the class still knows (records may carry an old repid).
