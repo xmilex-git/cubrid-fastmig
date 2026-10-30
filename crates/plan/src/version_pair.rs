@@ -3,7 +3,7 @@
 //! Input: the source version (log header `db_compatibility`, `db_release`) and `--target-version`. Output: a [`VersionPair`] and, for
 //! a pair the tool cannot migrate, the refusal. Later stages read the pair and never re-derive the target line.
 //! Source: workspace#505 (target version `11.4|develop`, default develop, decided by the plan; relayed decision of
-//! the map supervisor 2026-10-29); ADR 0003 (direct pairs only, no downgrade); target 11.4 refused while the index
+//! the map supervisor 2026-10-29); ADR 0003 (direct pairs only, no downgrade); target 11.4 was refused while the index
 //! builder writes the develop layout only (map supervisor 2026-10-29); an 11.4 source to an 11.4 target since
 //! workspace#530; 10.2..11.3 to 11.4 since workspace#552.
 

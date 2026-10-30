@@ -2,7 +2,8 @@
 //! stream of an 11.4, 11.3, 11.2 or 10.2 database to develop and compares each with the stream the develop engine
 //! wrote for the same class in a develop database built from the same script.
 //!
-//! Input: `<source first volume> <develop first volume> --out <dir> [--from 11.4|11.3|11.2|10.2]` (default 11.4).
+//! Input: `<source first volume> <target first volume> --out <dir> [--from 11.4|11.3|11.2|10.2] [--to develop|11.4]`
+//! (defaults 11.4 and develop; `--to 11.4` compares with the streams 11.4.6 wrote, workspace#552).
 //! A 10.2 class name has no owner, so a 10.2 run matches develop classes by the name after the owner. Output: one line per
 //! partitioned class (stream sizes, whether the trees and the bytes match) and, in `<dir>`, each stream's bytes and
 //! canonical tree text.
@@ -76,7 +77,7 @@ fn failed(e: impl std::fmt::Display) -> CliError {
 }
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
-    let flags = [&["--out", "--from"], progress_args::FLAGS].concat();
+    let flags = [&["--out", "--from", "--to"], progress_args::FLAGS].concat();
     let p = args::parse(argv, &flags, &[])?;
     let [src, dev] = p.positional.as_slice() else {
         return Err(CliError::Usage(
@@ -101,10 +102,16 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             )));
         }
     };
+    // the target line: develop, or 11.4 for a 10.2..11.3 source (workspace#552)
+    let to = match p.value("--to").unwrap_or("develop") {
+        "develop" => VersionLine::Develop,
+        "11.4" => VersionLine::V11_4,
+        x => return Err(CliError::Usage(format!("--to {x}: develop or 11.4"))),
+    };
     let unowned = from == VersionLine::V10_2;
     let src = streams(src, from, layout, false)?;
     progress.advance();
-    let dev = streams(dev, VersionLine::Develop, HeaderLayout::Since11_4, unowned)?;
+    let dev = streams(dev, to, HeaderLayout::Since11_4, unowned)?;
     progress.set_total(TRANSCODE, src.len() as u64);
     progress.advance();
     let meter = progress.meter(TRANSCODE);
@@ -120,7 +127,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         let file = |ext: &str| out.join(format!("{name}.{ext}"));
         std::fs::write(file("src.bin"), s)?;
         std::fs::write(file("src.txt"), parse(from, s).map_err(failed)?.canonical())?;
-        let t = match transcode_partition_stream(from, VersionLine::Develop, s) {
+        let t = match transcode_partition_stream(from, to, s) {
             Ok(t) => t,
             Err(e) => {
                 let _ = writeln!(table, "{name}\t{}\t-\t-\ttranscode failed: {e}\t-", s.len());
@@ -128,7 +135,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
                 continue;
             }
         };
-        let t_parsed = parse(VersionLine::Develop, &t).map_err(failed)?;
+        let t_parsed = parse(to, &t).map_err(failed)?;
         let t_tree = t_parsed.canonical();
         std::fs::write(file("trans.bin"), &t)?;
         std::fs::write(file("trans.txt"), &t_tree)?;
@@ -142,12 +149,12 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             bad += 1;
             continue;
         };
-        let d_parsed = parse(VersionLine::Develop, d).map_err(failed)?;
+        let d_parsed = parse(to, d).map_err(failed)?;
         std::fs::write(file("dev.bin"), d)?;
         std::fs::write(file("dev.txt"), d_parsed.canonical())?;
         let tree_eq = d_parsed.canonical() == t_tree;
         // a byte the writer leaves unwritten holds the engine's buffer garbage, so only written bytes must match
-        let (_, written) = serialize_with_mask(VersionLine::Develop, &t_parsed);
+        let (_, written) = serialize_with_mask(to, &t_parsed);
         let bytes = if t.len() != d.len() {
             format!("len {} vs {}", t.len(), d.len())
         } else {
