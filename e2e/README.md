@@ -43,7 +43,7 @@ Each step is one row `step seconds rc` in `<out>/steps.tsv`, its output in `<out
 | `plan` | `plan --json` → `<out>/plan.json`; a refusal ends the run | (9) |
 | `migrate` | `migrate --volumes-in-first-dir`; migrate's own phases go to `<out>/phases.tsv` | (4) |
 | `verify-target`, `verify-source` | the target against the source, the source alone | (2) |
-| `sql-*` | `deferred-indexes.sql`, `recompile-plcsql.sql`, `update-statistics.sql` with csql -S | (1), (8), (10) |
+| `sql-*` | `deferred-indexes.sql`, `recompile-plcsql.sql`, `update-statistics.sql` with csql -S; an ERROR in the output fails the step (csql -i exits 0 after a failed statement) | (1), (8), (10) |
 | `target-unload`, `set-comparison` | engine unloaddb of the target against the source's engine unload | (1) |
 | `server-start` … `server-stop` | CS server: `smoke.sql` (index-scan SELECTs), `lob.sql` (LOB contents) | (10) |
 | `smoke-plans` | every smoke SELECT errored nowhere and planned an index scan | |

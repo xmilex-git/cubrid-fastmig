@@ -38,10 +38,13 @@ fastmig_tc_migrate_one() {
   if [ -f "$d/volumes/fastmig/verify.jsonl" ]; then
     /usr/bin/grep -q '"kind":"summary","migration":0,' "$d/volumes/fastmig/verify.jsonl" && r_ve=0 || r_ve=1
   fi
+  # csql -i goes on after a failed statement and exits 0, so an ERROR in its output fails the step (workspace#555)
   for f in deferred-indexes.sql recompile-plcsql.sql update-statistics.sql; do
     [ -f "$d/volumes/fastmig/$f" ] || continue
     CUBRID_DATABASES="$FASTMIG_TC_TARGET_DBS" "$CUBRID/bin/csql" -S -u dba -i "$d/volumes/fastmig/$f" "$db" \
-      >>"$d/sql.log" 2>&1 || r_sq=$?
+      >"$d/sql-$f.log" 2>&1 || r_sq=$?
+    /usr/bin/grep -qE '^[[:space:]]*ERROR' "$d/sql-$f.log" && r_sq=1
+    cat "$d/sql-$f.log" >>"$d/sql.log"
   done
   ( cd "$d" && CUBRID_DATABASES="$FASTMIG_TC_TARGET_DBS" "$CUBRID/bin/cubrid" unloaddb -S -O "$d/target-unload" "$db" ) \
     >"$d/target-unload.log" 2>&1

@@ -66,6 +66,17 @@ step() {
   return "$rc"
 }
 
+# csql -i of one SQL file as one step: exit 1 when its output holds an ERROR, whatever csql's own exit code (csql -i
+# goes on after a failed statement and exits 0: six failed deferred indexes passed as rc 0, workspace#555)
+sql_file() {
+  local out rc
+  out=$(csql -S -u dba -i "$1" "$2" 2>&1)
+  rc=$?
+  printf '%s\n' "$out"
+  [ "$rc" = 0 ] || return "$rc"
+  ! /usr/bin/grep -qE '^[[:space:]]*ERROR' <<<"$out"
+}
+
 { echo "db=$DB pristine=$PRISTINE target_version=$TV workers=$W cpus=${FASTMIG_E2E_CPUS:-} bin=$BIN"
   echo "bin_sha256=$(sha256sum "$BIN" | cut -d' ' -f1) install=$INST"
   echo "pre: $(date -Is) load=$(cut -d' ' -f1-3 /proc/loadavg) home=[$(df -h /home | awk 'NR == 2 { print $4 " avail" }')]"
@@ -103,7 +114,7 @@ grep -q "^$DB[[:space:]]" "$OUT/dbs/databases.txt" && registered=1
 if [ $registered = 1 ]; then
   # 5. the SQL migrate leaves for the user: deferred indexes before the set comparison (G5)
   for f in deferred-indexes recompile-plcsql update-statistics; do
-    [ ! -f "$TGT/fastmig/$f.sql" ] || step "sql-$f" 0 csql -S -u dba -i "$TGT/fastmig/$f.sql" "$DB"
+    [ ! -f "$TGT/fastmig/$f.sql" ] || step "sql-$f" 0 sql_file "$TGT/fastmig/$f.sql" "$DB"
   done
   # 6. target unloaddb, set comparison against the source's engine unload
   step target-unload 0 bash -c 'cd "$1" && cubrid unloaddb -S -O "$1" "$2"' _ "$OUT/unload" "$DB"
