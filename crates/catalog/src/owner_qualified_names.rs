@@ -1,14 +1,14 @@
 //! The pre-check of a source written before user schema (10.2, 11.0): every class, serial, trigger and stored
 //! procedure name must still be valid once it becomes an owner-qualified name in the target.
 //!
-//! Input: the source volume set and its source version. Output: one refusal per offending name (rules P1-P6), or an
+//! Input: the source volume set and its source version. Output: one refusal per offending name (rules P1-P7), or an
 //! error when the names cannot be read. Only the naming fields are decoded (class heads, the name and owner
 //! attributes of four system classes), so values this tool cannot read yet (10.2 LZO strings, workspace#520) do not
 //! stop the check.
 //! Source: R10 § 5 (workspace#511) P1-P6 and its develop sites (`parser_support.c:10987` 222 B identifier,
 //! `execute_schema.c:5101-5106` partition name, `csql_grammar.y:20633` no `.`, `schema_system_catalog.cpp:40-125`
 //! system names, `authenticate_context.cpp:984-1008` INFORMATION_SCHEMA, `install.cpp:917` SP unique_name
-//! varchar(255)); 10.2 system classes `db_user`, `db_serial`, `db_trigger` (`name`, `owner`) and
+//! varchar(255)); P7 `intl_identifier_lower` (`identifier_lower`, workspace#544); 10.2 system classes `db_user`, `db_serial`, `db_trigger` (`name`, `owner`) and
 //! `_db_stored_procedure` (`sp_name`, `owner`) per release/10.2 `boot_cl.c:1841,3062,3105,3244-3250`,
 //! `transform.h:133-140`, `authenticate.c:108`; workspace#518.
 
@@ -22,6 +22,7 @@ use fastmig_ondisk::value::Value;
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 
+use crate::identifier_lower::IdentifierCasing;
 use crate::system_rows::{serial, stored_procedure, trigger, user};
 use crate::system_table::SystemTable;
 
@@ -49,6 +50,7 @@ const DEVELOP_SYSTEM_NAMES: &[&str] = &[
     "dual",
 ];
 const TICKET: &str = "workspace#518";
+const TICKET_P7: &str = "workspace#544";
 /// The codec line of a source before user schema: 11.0 writes the 11.4 class objects and LZ4 strings (R8 § 2.8, § 2.9).
 fn line_of(version: SourceVersion) -> VersionLine {
     version.line().unwrap_or(VersionLine::V11_4)
@@ -120,7 +122,7 @@ fn is_partition(c: &ClassHead) -> bool {
     c.partitions.iter().any(|p| p.pname.is_some())
 }
 
-/// Refusals P1-P6 for a source written before user schema; empty for 11.2 and later, whose names are already
+/// Refusals P1-P7 for a source written before user schema; empty for 11.2 and later, whose names are already
 /// owner-qualified.
 pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String>> {
     if !matches!(version, SourceVersion::V10_2 | SourceVersion::V11_0) {
@@ -142,6 +144,7 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
             SystemTable::DbSerial,
             SystemTable::DbTrigger,
             SystemTable::DbStoredProcedure,
+            SystemTable::DbRoot,
         ]
         .iter()
         .any(|t| t.source_name().map(str::as_bytes) == Some(head.name.as_slice()))
@@ -183,11 +186,21 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
     for c in user_classes() {
         name_rules("class", &c.name);
     }
-    for (_, s) in rows(vs, line, &system, SystemTable::DbSerial, &["name"])? {
+    // owners of a qualified name, for P7
+    let mut owners: Vec<Option<Oid>> = user_classes().map(|c| Some(c.owner)).collect();
+    for (_, s) in rows(vs, line, &system, SystemTable::DbSerial, &["name", "owner"])? {
         name_rules("serial", serial::name(&s).unwrap_or_default());
+        owners.push(oid(s.get("owner")));
     }
-    for (_, t) in rows(vs, line, &system, SystemTable::DbTrigger, &["name"])? {
+    for (_, t) in rows(
+        vs,
+        line,
+        &system,
+        SystemTable::DbTrigger,
+        &["name", "owner"],
+    )? {
         name_rules("trigger", trigger::name(&t).unwrap_or_default());
+        owners.push(oid(t.get("owner")));
     }
     for (_, u) in &users {
         let name = user::name(u).unwrap_or_default();
@@ -229,6 +242,7 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
         &["sp_name", "owner"],
     )? {
         let name = stored_procedure::sp_name(&p).unwrap_or_default();
+        owners.push(oid(stored_procedure::owner(&p)));
         let owner = owner_of(oid(stored_procedure::owner(&p)));
         if owner.len() + 1 + name.len() > SP_UNIQUE_NAME_MAX {
             out.push(format!(
@@ -238,6 +252,27 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
                 show(name),
                 owner.len() + 1 + name.len()
             ));
+        }
+    }
+    let lang = rows(vs, line, &system, SystemTable::DbRoot, &["lang"])?
+        .into_iter()
+        .find_map(|(_, r)| match r.get("lang") {
+            Some(Value::Varchar(l) | Value::Char(l)) => Some(l.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let casing = IdentifierCasing::of(vs.volume(0)?.header.db_charset as u8, &lang);
+    let mut shown: Vec<Vec<u8>> = Vec::new();
+    for o in owners {
+        let name = owner_of(o);
+        if casing.lower(&name).is_none() && !shown.contains(&name) {
+            out.push(format!(
+                "P7: user {} owns objects; its name is not ASCII and locale {} takes its lowercase from a locale \
+                 library this tool does not read ({TICKET_P7})",
+                show(&name),
+                show(&lang)
+            ));
+            shown.push(name);
         }
     }
     Ok(out)

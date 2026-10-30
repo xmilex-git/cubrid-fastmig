@@ -28,9 +28,8 @@ impl VersionPair {
             (VersionLine::V11_4, VersionLine::Develop) => None,
             // 10.2 values are read (workspace#520); what the target still lacks is named by the ticket that adds it
             (VersionLine::V10_2, VersionLine::Develop) => Some(
-                "source 10.2: target TDE metadata (workspace#515) and owner-qualified names (workspace#544) not \
-                 written yet; partition streams (workspace#540), cross-owner text (workspace#517) and trailing-space \
-                 rules (workspace#541) not handled yet"
+                "source 10.2: target TDE metadata (workspace#515) and system class roles (workspace#549) not \
+                 written yet; partition streams (workspace#540) and trailing-space rules (workspace#548) not handled yet"
                     .into(),
             ),
             (s, t) => Some(format!(

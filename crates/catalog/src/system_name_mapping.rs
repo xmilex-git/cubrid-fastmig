@@ -117,7 +117,7 @@ fn word_in(t: &Token, text: &[u8], words: &[&str]) -> bool {
 }
 
 /// Token indexes in a class position, each with the index of its alias token.
-fn class_terms(text: &[u8], ts: &[Token]) -> Vec<(usize, Option<usize>)> {
+pub(crate) fn class_terms(text: &[u8], ts: &[Token]) -> Vec<(usize, Option<usize>)> {
     // per parenthesis depth: whether a `,` there still separates FROM-list classes
     let mut in_from = vec![false];
     let mut out = Vec::new();

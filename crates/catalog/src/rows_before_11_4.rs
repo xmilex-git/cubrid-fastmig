@@ -1,4 +1,4 @@
-//! Brings the same-slot rows of an 11.2 or 11.3 source to the 11.4 shape the rest of regeneration reads: grants gain
+//! Brings the same-slot rows of a 10.2, 11.2 or 11.3 source to the 11.4 shape the rest of regeneration reads: grants gain
 //! their object type and the grantor 11.4 would record, stored procedures gain their unique name and split target,
 //! arguments point to their procedure, the serial's `att_name` becomes `attr_name`.
 //!
@@ -16,6 +16,9 @@
 //! - `_db_stored_procedure_args`: `sp_of` = the procedure whose `args` holds the row, `sp_name` dropped,
 //!   `is_system_generated` 0, `default_value` NULL, `is_optional` 0.
 //! - `db_serial.att_name` → `attr_name` (b85c07b27 #5346).
+//!
+//! 10.2 rows have the same old shape (T15 workspace#538 measured 10.2 → develop load against this mapping; R10
+//! workspace#511 the SP `unique_name` rule; workspace#544).
 
 use std::collections::HashMap;
 
@@ -84,7 +87,10 @@ pub fn to_11_4_shape(
     rows: &mut HashMap<SystemTable, Vec<Row>>,
     classes: &[SourceClass],
 ) -> DecodeResult<()> {
-    if !matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
+    if !matches!(
+        version,
+        SourceVersion::V10_2 | SourceVersion::V11_0 | SourceVersion::V11_2 | SourceVersion::V11_3
+    ) {
         return Ok(());
     }
     let users = Users::of(

@@ -15,6 +15,7 @@ use fastmig_ondisk::{SourceVersion, VersionLine};
 
 use crate::class_rows::{Row, read_rows};
 use crate::classify::{ClassPlan, classify};
+use crate::owner_qualification::qualify_names;
 use crate::rows_before_11_4::to_11_4_shape;
 use crate::source_classes::{SourceClass, read_classes};
 use crate::static_rows::FROM_SOURCE;
@@ -78,13 +79,18 @@ impl SourceCatalog {
             .unwrap_or_default();
         map_stored_texts(version, &mut classes, users, &mut triggers);
         same_slot.insert(SystemTable::DbTrigger, triggers);
+        // a source before user schema gets owner-qualified names and texts (workspace#544); the plan reports the
+        // warnings
+        let charset = vs.volume(0)?.header.db_charset as u8;
+        qualify_names(version, &mut classes, &mut same_slot, charset)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.what))?;
         Ok(SourceCatalog {
             version,
             line,
             plans,
             same_slot,
             static_source,
-            charset: vs.volume(0)?.header.db_charset as u8,
+            charset,
             classes,
         })
     }

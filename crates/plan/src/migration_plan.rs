@@ -8,6 +8,7 @@
 //! workspace#488 (LOB scan, Java directories, lob-base-path rules), workspace#498 (`attr_default` refusals),
 //! workspace#491 (LDML collations are not ordered here), workspace#505 (this assembly).
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use fastmig_catalog::classify::{ClassKind, classify};
 use fastmig_catalog::collation_check::check_collations;
 use fastmig_catalog::deferred_indexes::{deferred_indexes, report_name};
 use fastmig_catalog::output_sql::{deferred_indexes_sql, plcsql_routines, recompile_plcsql_sql};
+use fastmig_catalog::owner_qualification::qualify_names;
 use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
 use fastmig_catalog::sp_target_signature::{TARGET_CLASS_LEN, split_target_signature};
@@ -240,7 +242,8 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     };
     let regenerates = pair.regenerates_catalog();
     refusals.extend(pair.refusal());
-    // 10.2 values read (workspace#520), but its catalog tables are not laid out yet (workspace#515, #544)
+    // 10.2 values read (workspace#520), names and texts owner-qualified (workspace#544); still open: workspace#515,
+    // #540, #548, #549
     if pair.source == VersionLine::V10_2 {
         return Err(io::Error::other(Refused(refusals)));
     }
@@ -481,6 +484,23 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                 )
             }));
         }
+        // a source before user schema: its texts get owner-qualified names; a call of another owner's procedure needs
+        // EXECUTE on develop (workspace#544, #545)
+        let mut owned: HashMap<SystemTable, Vec<Row>> = HashMap::new();
+        for t in [
+            SystemTable::DbRoot,
+            SystemTable::DbSerial,
+            SystemTable::DbStoredProcedure,
+        ] {
+            owned.insert(t, rows_of(i.vols, line, &classes, t)?);
+        }
+        owned.insert(SystemTable::DbUser, users);
+        owned.insert(SystemTable::DbTrigger, triggers);
+        let charset = i.vols.volume(0)?.header.db_charset as u8;
+        warnings.extend(
+            qualify_names(version, &mut mapped, &mut owned, charset)
+                .map_err(|e| invalid(format!("owner-qualified names: {}", e.what)))?,
+        );
         // PL/CSQL keeps its compiled code, which develop cannot recompile from a rewritten source (workspace#542)
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedureCode)? {
             let name = stored_procedure_code::name(&r.values)

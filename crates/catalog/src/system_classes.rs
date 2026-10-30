@@ -71,16 +71,19 @@ pub const NEW: [SystemTable; 2] = [SystemTable::DbHistogram, SystemTable::DbGlob
 /// 11.4 tables develop lacks.
 pub const DROPPED: [SystemTable; 1] = [SystemTable::DbAuthorizations];
 
-/// Same-slot tables of [`SAME_SLOT`] a source version does not have: 11.2 and 11.3 have no
+/// Same-slot tables of [`SAME_SLOT`] a source version does not have: 10.2 to 11.3 have no
 /// `_db_stored_procedure_code` (added with the stored procedure redesign, 1ea4a86e0 #5438; R8 § 2.11). Their develop
 /// class comes from the template with an empty heap, like a [`SystemClassRole::New`] one.
 pub fn absent_same_slot(version: SourceVersion) -> &'static [SystemTable] {
     match version {
         SourceVersion::V11_2 | SourceVersion::V11_3 => &[SystemTable::DbStoredProcedureCode],
-        SourceVersion::V10_2
-        | SourceVersion::V11_0
-        | SourceVersion::V11_4
-        | SourceVersion::Develop => &[],
+        // 10.2 has neither synonyms nor DBLink servers (R8 § 2; the T4 10.2 root heap has no such class, workspace#544)
+        SourceVersion::V10_2 => &[
+            SystemTable::DbStoredProcedureCode,
+            SystemTable::DbSynonym,
+            SystemTable::DbServer,
+        ],
+        SourceVersion::V11_0 | SourceVersion::V11_4 | SourceVersion::Develop => &[],
     }
 }
 
