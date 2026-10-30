@@ -26,6 +26,7 @@ use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
 use fastmig_catalog::sp_target_signature::target_refusal;
 use fastmig_catalog::stored_texts::map_stored_texts;
+use fastmig_catalog::system_class_domains::read_denied_domains;
 use fastmig_catalog::system_classes::SystemClassRole;
 use fastmig_catalog::system_name_mapping::judge;
 use fastmig_catalog::system_rows::{stored_procedure, stored_procedure_code, text, user};
@@ -653,6 +654,9 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                 )
             }));
         }
+        // a non-DBA owner's attribute on a same-slot system class keeps its values, which develop lets only DBA read
+        // (workspace#554)
+        warnings.extend(read_denied_domains(&classes, &users, i.target_line));
         // a source before user schema: its texts get owner-qualified names; a call of another owner's procedure needs
         // EXECUTE on develop (workspace#544, #545)
         let mut owned: HashMap<SystemTable, Vec<Row>> = HashMap::new();

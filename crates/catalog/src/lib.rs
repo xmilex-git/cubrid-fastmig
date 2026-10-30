@@ -37,6 +37,7 @@ pub mod sp_target_signature;
 pub mod sql_text_tokens;
 pub mod static_rows;
 pub mod stored_texts;
+pub mod system_class_domains;
 pub mod system_classes;
 pub mod system_name_mapping;
 pub mod system_rows;
