@@ -1,5 +1,6 @@
 //! The pre-check of a source written before user schema (10.2, 11.0): every class, serial, trigger and stored
-//! procedure name must still be valid once it becomes an owner-qualified name in the target.
+//! procedure name must still be valid once it becomes an owner-qualified name in the target; up to 11.3 also no
+//! stored procedure name may hold a dot (P3, workspace#554).
 //!
 //! Input: the source volume set and its source version. Output: one refusal per offending name (rules P1-P6), or an
 //! error when the names cannot be read. Only the naming fields are decoded (class heads, the name and owner
@@ -122,10 +123,11 @@ fn is_partition(c: &ClassHead) -> bool {
     c.partitions.iter().any(|p| p.pname.is_some())
 }
 
-/// Refusals P1-P6 for a source written before user schema; empty for 11.2 and later, whose names are already
-/// owner-qualified.
+/// Refusals P1-P6 for a source written before user schema, and P3 for a stored procedure name up to 11.3; empty for
+/// 11.4 and later, whose names are already owner-qualified and dot-free.
 pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String>> {
-    if !matches!(version, SourceVersion::V10_2 | SourceVersion::V11_0) {
+    let before_user_schema = matches!(version, SourceVersion::V10_2 | SourceVersion::V11_0);
+    if !before_user_schema && !matches!(version, SourceVersion::V11_2 | SourceVersion::V11_3) {
         return Ok(Vec::new());
     }
     let line = line_of(version);
@@ -155,6 +157,30 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
         }
         heads.push(head);
     }
+    let procedures = rows(
+        vs,
+        line,
+        &system,
+        SystemTable::DbStoredProcedure,
+        &["sp_name", "owner"],
+    )?;
+    // up to 11.3 a quoted procedure name may hold a dot ("dbms_output.put_line"); 11.4 and develop refuse one, and the
+    // develop parser crashes on its CREATE, so the official path stops there too (workspace#554)
+    let mut out: Vec<String> = procedures
+        .iter()
+        .map(|(_, p)| stored_procedure::sp_name(p).unwrap_or_default())
+        .filter(|name| name.contains(&b'.'))
+        .map(|name| {
+            format!(
+                "P3: stored procedure name {} contains '.'; 11.4 and develop take no such name, rename or drop it \
+                 on the source (workspace#554)",
+                show(name)
+            )
+        })
+        .collect();
+    if !before_user_schema {
+        return Ok(out);
+    }
     let users = rows(vs, line, &system, SystemTable::DbUser, &["name"])?;
     let user_name: HashMap<Oid, Vec<u8>> = users
         .iter()
@@ -178,7 +204,6 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
     };
     let user_classes = || heads.iter().filter(|c| !c.is_system_class());
 
-    let mut out = Vec::new();
     let mut name_rules = |kind: &str, name: &[u8]| {
         if name.len() > NAME_MAX {
             out.push(format!(
@@ -241,15 +266,9 @@ pub fn refusals(vs: &VolumeSet, version: SourceVersion) -> io::Result<Vec<String
             ));
         }
     }
-    for (_, p) in rows(
-        vs,
-        line,
-        &system,
-        SystemTable::DbStoredProcedure,
-        &["sp_name", "owner"],
-    )? {
-        let name = stored_procedure::sp_name(&p).unwrap_or_default();
-        let owner = owner_of(oid(stored_procedure::owner(&p)));
+    for (_, p) in &procedures {
+        let name = stored_procedure::sp_name(p).unwrap_or_default();
+        let owner = owner_of(oid(stored_procedure::owner(p)));
         if owner.len() + 1 + name.len() > SP_UNIQUE_NAME_MAX {
             out.push(format!(
                 "P6: stored procedure {}.{} is {} bytes; develop unique_name holds at most {SP_UNIQUE_NAME_MAX} \
