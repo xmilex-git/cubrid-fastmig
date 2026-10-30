@@ -204,6 +204,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         limits::physical_memory()?,
     )?;
     pre.push(("precheck.pair_count", t.elapsed().as_secs_f64()));
+    pre.push(("precheck.appended_bound", est.appended_seconds));
     let t = Instant::now();
     est.source_groups = verify::source_key_groups(&src, o.plan.locate, o.worker_limit)?;
     pre.push(("precheck.source_key_groups", t.elapsed().as_secs_f64()));

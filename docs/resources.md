@@ -159,9 +159,13 @@ Right after the incomplete marker, before the first byte of the target, `migrate
   written last, so until then page 0 has no log magic and the target does not boot (copydb leaves the other pages
   as holes; here they are zero);
 - every volume the plan clones is cloned now (`volume_copy::clone_targets`; a filesystem that refuses stops the
-  run before anything else is written), and on XFS the pages the run rewrites in it — the allocated pages of every
-  file it frees and, on the same-version path, of the root heap and the treated heaps, on the 11.x path of every
-  heap (`Plan::unshare_ranges`) — get blocks of their own (`preallocate::unshare`, `FALLOC_FL_UNSHARE_RANGE`): taken
+  run before anything else is written), and on XFS the pages the run rewrites in it — the allocated pages of the
+  heaps it rewrites (on the 11.x path every live heap; on the same-version path every heap but the user classes',
+  which hold catalog rows and the boot parameters, and with vacuum work pending the treated heaps), of every live
+  overflow heap and of the file tracker (single-page deallocations retype their pages), and the whole sectors of
+  the heaps that take new pages inside their own sectors (on the 11.x path every live heap gets develop's
+  bestspace pages after its header; elsewhere the catalog rows), where no reserved sector could be claimed
+  (`Plan::unshare_ranges`) — get blocks of their own (`preallocate::unshare`, `FALLOC_FL_UNSHARE_RANGE`): taken
   once, not held twice in the reservation. Another filesystem keeps them in the reservation, and `plan` says so;
 - on XFS with a cloned volume, the sectors the run will take are listed once, here (listed sectors,
   `TargetSpace::sectors`; ADR 0013): the engine's reservation order replayed one sector at a time
@@ -176,8 +180,8 @@ Right after the incomplete marker, before the first byte of the target, `migrate
   write, until the run ends: the referenced LOB and Java files, and with listed sectors the expansion the free
   sectors cannot give (the engine's: max(1 % of the data sectors, 64) plus the shortfall) and 8 sectors + 2 % of
   the list for sectors taken off it. Where the target cannot unshare it also holds the pages a cloned volume
-  unshares (`Plan::rewritten_pages_bound` — every heap page when the catalog is regenerated, else the treated
-  pages and the root heap, and the freed files' pages), the new B-trees (`target_space::btree_pages`, below), the
+  unshares (`Plan::rewritten_pages_bound` — every live heap page and its bestspace pages when the catalog is
+  regenerated, else the treated pages and the root heap, and every overflow heap and tracker page), the new B-trees (`target_space::btree_pages`, below), the
   appended heap pages and 64 pages of catalog slack. The file is removed only when the run ends, so while the run
   writes what it bounds the space is held twice (accepted, 1번 세션 decision).
 
@@ -194,10 +198,13 @@ Java files.
 
 Measured on T1 (develop and 11.4, clean and dirty, `--workers 16 --mem 64M`; `filefrag -v` extents of the cloned
 volumes without `shared`): 0 sectors off the list on all four, also with `--workers 1` and with `--verify` (rc 0);
-written beyond the space taken at the start 49,152 / 196,608 / 1,064,960 / 1,064,960 B against a reservation of
-9.5–10.6 MB (before the list: 4.8–7.1 MB beyond against 22.5–25.9 MB). The price is whole sectors: a B-tree or
-new heap file takes at least one 1 MiB sector, so the unshared pages grew from 18–36 MB to 88–169 MB (83 and 146
-listed sectors) while the reservation shrank. On a target so migrated, develop SA inserting 2,000,000 rows
+written beyond the space taken at the start 0 B on all four against a reservation of 9.5–10.6 MB (before the
+list: 4.8–7.1 MB beyond against 22.5–25.9 MB). The price is whole sectors: a B-tree or new heap file takes at
+least one 1 MiB sector, and a heap that takes new pages is unshared to the end of its sectors, so the pages
+unshared at the start grew from 18–36 MB to 121–231 MB on these small databases (develop dirty 138,280,960 B,
+clean 122,781,696 B, 11.4 230,785,024 B; 83 and 146 listed sectors) while the reservation shrank. Before the
+whole sectors, the run wrote 16–164 KB (develop) and 0.5–1.06 MB (11.4) beyond: bestspace pages and catalog rows
+appended inside heaps' own sectors, which no claim sees. On a target so migrated, develop SA inserting 2,000,000 rows
 expanded volume 1 from 8192 to 16384 pages like on any engine database (`_vinf` names only the target).
 
 **The new B-trees' bound** (`target_space::btree_pages`, per index, from the builder's own rules): a leaf record
@@ -227,10 +234,11 @@ key, every 86th pair opening a chain. The former `5 · T_i / page + 4` was no bo
 The allocated pages also hold catalog pages and appended heap pages; on T1 most of the gap is the fixed pages of
 75 small indexes (file header, root, one partial leaf).
 
-Freeing a file writes too: `destroy_file` retypes every allocated page of every B-tree and overflow key file (and,
-with a regenerated catalog, of the catalog and the freed system heaps), and on a cloned volume each such write
-unshares a block. The rewritten-pages bound counts them (`n_page_user + n_page_ftab` of each file the run frees);
-5cbe96d had left them out. What the run really writes outside the space it took at the start, measured as the
+Until c551e67 freeing a file wrote too: `destroy_file` retyped every allocated page of every B-tree and overflow
+key file (and, with a regenerated catalog, of the catalog and the freed system heaps), and on a cloned volume each
+such write unshared a block. Since then a freed file's pages are left as they are; only single-page deallocations
+retype (`perm_dealloc`: overflow chains a rewritten record leaves, tracker pages a removed entry merges), so the
+bound counts every overflow heap and tracker page instead of the freed files'. What the run really writes outside the space it took at the start, measured as the
 blocks of the cloned volumes no longer shared with the source (`filefrag -v`) plus added volumes, against the
 reservation (`--workers 16 --mem 64M`):
 
@@ -258,7 +266,13 @@ before (develop dirty 40.4 MB against 30.3 MB), but taken once: the free space n
 
 Heap pages the page treatment appends are bounded too (`page_treatment::appended_pages_bound`): only a re-encoded
 record can grow, so every record of a re-encoded class is re-encoded as the treatment will (the same encoder, LOB
-directories included) and one that grows is counted whole on new pages. report.json: `catalog.appended_pages`
+directories included) and one that grows is counted whole on new pages. The pages are taken a sector at a time from
+one queue over every re-encoded heap (big 11.4 DB, 75,869 treated pages, bound 2 pages: 12.7 s at `--workers 16`
+and 12.2 s at 4 with one heap per worker, 1.36–1.39 s and 5.0 s by sector; about 20 s at 1 either way;
+resources `appended_seconds`, report.json `precheck.appended_bound`). A bound from the class representation alone
+(the most a record can grow, times the records of a page beyond its free space) needs no re-encoding, but a full
+page of records that may grow counts whole: on that DB it would scale with the 75,869 pages, not the 2 the
+records give, so the re-encoding stays. report.json: `catalog.appended_pages`
 against `temp_disk.target_appended_bound_pages`; T1 11.4 clean and dirty 0 against 2, T1 develop, T4 11.3 dirty
 and 11.2 clean 0 against 0. A source index with a defect (a live row's key missing)
 can make the source's counts too small: not covered yet (1번 세션 decision: a check at build time before the

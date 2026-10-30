@@ -9,9 +9,10 @@
 //!
 //! Input: the plan, the resource estimate, the IO page size, the size of the new log. Output: [`TargetSpace`] and
 //! the [`Reservation`] file, a scratch line of the marker (a rerun removes it, the fsync skips it), removed on drop.
-//! Bound of the rewritten pages (`Plan::rewritten_pages_bound`): every heap page when the catalog is regenerated,
-//! else the treated pages and the root heap. Bound of the new B-trees: [`btree_pages`] per index, from the builder's
-//! rules and the index's pairs, keys and overflow OID chains (the source's own tree, `verify::source_key_groups`).
+//! Bound of the rewritten pages (`Plan::rewritten_pages_bound`): every live heap page and its bestspace pages when
+//! the catalog is regenerated, else the treated pages and the root heap; every overflow heap and tracker page.
+//! Bound of the new B-trees: [`btree_pages`] per index, from the builder's rules and the index's pairs, keys and
+//! overflow OID chains (the source's own tree, `verify::source_key_groups`).
 //! The former `5 · T_i / page + 4` was no bound: a key of 86 rows takes a 16 KiB overflow OID page for one object.
 //! Source: workspace#526 (1번 세션 decision: copy volumes allocated at the start, one reservation for the rest).
 

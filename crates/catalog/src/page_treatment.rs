@@ -27,7 +27,7 @@ use fastmig_ondisk::record::heap_chain::HeapChain;
 use fastmig_ondisk::record::heap_scan::resolve_record;
 use fastmig_ondisk::spage::{SPAGE_HEADER_SIZE, SPAGE_SLOT_SIZE, SlottedPage};
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Oid, db_pagesize};
+use fastmig_ondisk::{Hfid, Oid, Vpid, db_pagesize};
 use fastmig_progress::Meter;
 
 use crate::classify::ClassKind;
@@ -126,32 +126,52 @@ fn encoder_of(
 /// moved to a new page — a record of a quarter page or more as its own pages (overflow pages plus one), the smaller
 /// ones packed three quarters full (a page takes another record of under a quarter page while it is less full than
 /// that) — plus one partial page per heap. A record the encoder cannot read counts twice its size.
+/// The pages are re-encoded a sector at a time from one queue over every heap, so one big heap spreads over the
+/// workers.
 pub fn appended_pages_bound(
     vols: &VolumeSet,
     source: &SourceCatalog,
     lob_base: Option<&Path>,
     worker_limit: usize,
 ) -> io::Result<u64> {
-    let jobs: Vec<usize> = (0..source.classes.len())
-        .filter(|&i| {
-            source.plans[i].kind == ClassKind::User
-                && source.plans[i].re_encoded
-                && !source.classes[i].class.heap.is_null()
-        })
-        .collect();
+    let mut encoders = Vec::new();
+    for i in 0..source.classes.len() {
+        if source.plans[i].kind == ClassKind::User
+            && source.plans[i].re_encoded
+            && !source.classes[i].class.heap.is_null()
+            && let Some(enc) = encoder_of(source, lob_base, i)?
+        {
+            encoders.push((source.classes[i].class.heap, enc));
+        }
+    }
+    // the user pages of every heap by sector, in one queue: a big heap is no longer one worker's (workspace#526)
+    let mut units: Vec<(usize, Vec<Vpid>)> = Vec::new();
+    for (k, (hfid, _)) in encoders.iter().enumerate() {
+        for (_, pages) in FileTable::read(vols, hfid.vfid)?.user_pages_by_sector() {
+            units.push((k, pages));
+        }
+    }
     let usable = db_pagesize(vols.io_pagesize()) - SPAGE_HEADER_SIZE - 64;
+    let grown: Vec<(AtomicU64, AtomicU64)> = encoders
+        .iter()
+        .map(|_| (AtomicU64::new(0), AtomicU64::new(0)))
+        .collect();
     let next = AtomicUsize::new(0);
-    let total = AtomicU64::new(0);
     let first_err: Mutex<Option<io::Error>> = Mutex::new(None);
     std::thread::scope(|s| {
-        for _ in 0..worker_limit.clamp(1, jobs.len().max(1)) {
+        for _ in 0..worker_limit.clamp(1, units.len().max(1)) {
             s.spawn(|| {
+                let mut buf = vec![0u8; vols.io_pagesize()];
                 loop {
                     let j = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&i) = jobs.get(j) else { break };
-                    match heap_growth_pages(vols, source, lob_base, i, usable) {
-                        Ok(p) => {
-                            total.fetch_add(p, Ordering::Relaxed);
+                    let Some((k, pages)) = units.get(j) else {
+                        break;
+                    };
+                    let (hfid, enc) = &encoders[*k];
+                    match pages_growth(vols, *hfid, enc, pages, usable, &mut buf) {
+                        Ok((small, big)) => {
+                            grown[*k].0.fetch_add(small, Ordering::Relaxed);
+                            grown[*k].1.fetch_add(big, Ordering::Relaxed);
                         }
                         Err(e) => {
                             first_err.lock().unwrap().get_or_insert(e);
@@ -161,31 +181,40 @@ pub fn appended_pages_bound(
             });
         }
     });
-    match first_err.into_inner().unwrap() {
-        Some(e) => Err(e),
-        None => Ok(total.into_inner()),
+    if let Some(e) = first_err.into_inner().unwrap() {
+        return Err(e);
     }
+    Ok(grown
+        .iter()
+        .map(|(small, big)| {
+            let (small, big_pages) = (small.load(Ordering::Relaxed), big.load(Ordering::Relaxed));
+            let packed = small.div_ceil((usable * 3 / 4) as u64);
+            if big_pages + packed == 0 {
+                0
+            } else {
+                big_pages + packed + 1
+            }
+        })
+        .sum())
 }
 
-fn heap_growth_pages(
+/// The grown records of `pages` of heap `hfid`: bytes of the small ones packed (aligned, with their slot) and pages
+/// of the big ones.
+fn pages_growth(
     vols: &VolumeSet,
-    source: &SourceCatalog,
-    lob_base: Option<&Path>,
-    i: usize,
+    hfid: Hfid,
+    enc: &ClassReEncoder,
+    pages: &[Vpid],
     usable: usize,
-) -> io::Result<u64> {
-    let Some(enc) = encoder_of(source, lob_base, i)? else {
-        return Ok(0);
-    };
-    let hfid = source.classes[i].class.heap;
+    buf: &mut [u8],
+) -> io::Result<(u64, u64)> {
     let (mut small, mut big_pages) = (0u64, 0u64);
-    let mut buf = vec![0u8; vols.io_pagesize()];
-    for vpid in FileTable::read(vols, hfid.vfid)?.user_pages() {
-        vols.read_page_into(vpid, &mut buf)?;
-        if page::ptype(&buf) != Some(PageType::Heap) {
+    for &vpid in pages {
+        vols.read_page_into(vpid, buf)?;
+        if page::ptype(buf) != Some(PageType::Heap) {
             continue;
         }
-        let Some(sp) = SlottedPage::new(page::db_area(&buf)) else {
+        let Some(sp) = SlottedPage::new(page::db_area(buf)) else {
             continue;
         };
         if vpid != hfid.vpid()
@@ -216,10 +245,5 @@ fn heap_growth_pages(
             }
         }
     }
-    let packed = small.div_ceil((usable * 3 / 4) as u64);
-    Ok(if big_pages + packed == 0 {
-        0
-    } else {
-        big_pages + packed + 1
-    })
+    Ok((small, big_pages))
 }

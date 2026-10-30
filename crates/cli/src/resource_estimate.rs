@@ -75,6 +75,8 @@ pub struct ResourceEstimate {
     /// Heap pages the page treatment may append (`page_treatment::appended_pages_bound`; 0 on the same-version
     /// path, which only patches).
     pub appended_pages: u64,
+    /// Seconds `appended_pages_bound` took (part of `scan_seconds`).
+    pub appended_seconds: f64,
     /// Spill bytes the verifier's source side takes (`verify::source_pair_bytes`), counted only for `--verify`.
     pub verify_source: Option<u64>,
     /// Heap pages of the source the verifier reads (its live row map), counted with `verify_source`.
@@ -166,11 +168,14 @@ pub fn estimate(
                 workers,
             )?;
             let s = count(vols, &tables(false), Rows::Records(&records), workers)?;
+            let t = std::time::Instant::now();
             let appended = appended_pages_bound(vols, &src, lob_base, workers)?;
+            let appended_seconds = t.elapsed().as_secs_f64();
             e.indexes.extend(s.indexes);
             e.per_def.extend(s.per_def);
             e.per_def_figures.extend(s.per_def_figures);
             e.appended_pages = appended;
+            e.appended_seconds = appended_seconds;
             e
         }
     };
@@ -256,6 +261,7 @@ fn count(
             .collect(),
         source_groups: HashMap::new(),
         scan_seconds: 0.0,
+        appended_seconds: 0.0,
         workers,
         physical_memory: 0,
         regenerates: false,
@@ -342,8 +348,10 @@ impl ResourceEstimate {
             })
             .collect();
         format!(
-            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_mem_min_bytes\": {}, \"rss_expected_max_bytes\": {}, \"rss_expected_max_verify_bytes\": {}, \"indexes\": [{}]}}",
+            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"appended_pages\": {}, \"appended_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_mem_min_bytes\": {}, \"rss_expected_max_bytes\": {}, \"rss_expected_max_verify_bytes\": {}, \"indexes\": [{}]}}",
             self.scan_seconds,
+            self.appended_pages,
+            self.appended_seconds,
             self.workers,
             self.extra_seconds(b),
             self.mem_min(),
