@@ -109,8 +109,12 @@ _Avoid_: 이름 치환, 시스템 뷰 검사(옛 G1 거부·경고만 하던 검
 _Avoid_: 공백 버그, 데이터 손상, 정합성 오류
 
 **사후 정리 SQL (post-migration fixes)**:
-`<dest>/fastmig/post-migration-fixes.sql`. 비교 규칙 어긋남마다 도착에서 DBA가 검토 후 실행할 문장: HASH는 `REMOVE PARTITIONING` + `PARTITION BY HASH`, LIST·RANGE는 모든 파티션을 한 문장으로 `REORGANIZE PARTITION`(LIST는 행이 가진 값을 목록에 더한다), FK는 짝 없는 자식을 찾는 조회문. 어긋남이 없으면 빈 파일이다.
+`<dest>/fastmig/post-migration-fixes.sql`. 비교 규칙 어긋남마다 도착에서 DBA가 검토 후 실행할 문장: HASH는 `REMOVE PARTITIONING` + `PARTITION BY HASH`, LIST·RANGE는 모든 파티션을 한 문장으로 `REORGANIZE PARTITION`(LIST는 행이 가진 값을 목록에 더한다), FK는 짝 없는 자식을 찾는 조회문. 그리고 다른 owner SP 호출마다 필요한 `GRANT EXECUTE ON PROCEDURE [owner.sp] TO [caller];`(같은 SP·호출자 쌍은 한 문장). 둘 다 없으면 빈 파일이다.
 _Avoid_: 수정 스크립트, 패치 SQL(페이지 처리 등급 patch와 섞인다)
+
+**다른 owner SP 호출 (other-owner procedure call)**:
+11.4 미만 출발에서 뷰 query spec이나 trigger condition·action이 다른 owner의 저장 프로시저를 부르는 것. 텍스트 owner가 DBA 그룹이면 해당하지 않는다. 11.4 미만에는 `GRANT EXECUTE`가 없어 누구나 모든 SP를 불렀다. develop은 owner가 아닌 호출자에게 EXECUTE를 요구한다. 그래서 그대로 옮기면 그 뷰·trigger가 "EXECUTE authorization failure"로 실패한다. 공식 경로처럼 도구는 권한을 만들지 않는다. plan이 경고하고, 사후 정리 SQL에 GRANT 문을 낸다(G11 [workspace#545](https://github.com/xmilex-git/workspace/issues/545)).
+_Avoid_: 권한 누락, EXECUTE 결함
 
 ## 검증과 원본 삭제
 

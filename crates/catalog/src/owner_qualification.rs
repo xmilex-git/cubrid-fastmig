@@ -9,8 +9,10 @@
 //! class object's `name`, its view query specs and partition expressions, `unique_name` of every `db_serial`,
 //! `db_trigger` and `_db_stored_procedure` row and the trigger texts (11.2, 11.3: procedure `unique_name` and the
 //! procedure calls in view and trigger texts only); `name`, `db_serial.class_name` and `attr_name` stay without owner. Returns
-//! one warning per view or trigger that calls a stored procedure of another owner (develop requires EXECUTE on it,
-//! which a source before 11.4 never granted; G11 workspace#545 decides what the tool grants).
+//! every other-owner procedure call (GLOSSARY) of a view or trigger whose owner is not in the DBA group: develop runs
+//! the procedure only with EXECUTE, which a source before 11.4 cannot grant (no `GRANT EXECUTE` before 11.4's
+//! grammar); the tool grants nothing and the plan writes the GRANT statements (G11 workspace#545, user decision
+//! 2026-10-30).
 //! Names the plan pre-check refuses (`owner_qualified_names` P1-P6) never reach here.
 //! Source: R10 workspace#511 § 5 (`lower(owner).name`); T6 workspace#516 engine dumps
 //! (basedb/owner-qualified-names-102 expected/*-develop-engine-load.txt: `_db_class.unique_name` `u1.t1` and
@@ -28,6 +30,7 @@ use crate::class_rows::Row;
 use crate::identifier_lower::IdentifierCasing;
 use crate::owner_qualified_texts::{Owned, OwnerNames, qualify_text};
 use crate::source_classes::SourceClass;
+use crate::stored_texts::dba_group;
 use crate::system_rows::{object, serial, stored_procedure, text, trigger, user};
 use crate::system_table::SystemTable;
 
@@ -39,13 +42,24 @@ fn show(s: &[u8]) -> String {
     String::from_utf8_lossy(s).into_owned()
 }
 
+/// One other-owner procedure call (GLOSSARY): a view or trigger text calling a stored procedure of another owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OtherOwnerProcedureCall {
+    /// `view u1.v1` or `trigger u1.trg1`.
+    pub object: String,
+    /// The text's owner as the source names it (`U1`): the user that needs EXECUTE.
+    pub caller: String,
+    /// The procedure's develop `unique_name`, `lower(owner).sp`.
+    pub procedure: String,
+}
+
 /// Qualifies the names and texts (see the module header).
 pub fn qualify_names(
     version: SourceVersion,
     classes: &mut [SourceClass],
     rows: &mut HashMap<SystemTable, Vec<Row>>,
     charset: u8,
-) -> DecodeResult<Vec<String>> {
+) -> DecodeResult<Vec<OtherOwnerProcedureCall>> {
     let before_user_schema = match version {
         SourceVersion::V10_2 | SourceVersion::V11_0 => true,
         SourceVersion::V11_2 | SourceVersion::V11_3 => false,
@@ -106,16 +120,23 @@ pub fn qualify_names(
         names.procedures.insert(n.to_ascii_lowercase(), o);
     }
 
-    let mut warnings = Vec::new();
-    let mut warn = |object: String, owner: Oid, calls: Vec<String>| {
-        for p in calls {
-            let (sp_owner, sp) = p.split_once('.').unwrap_or(("", &p));
-            warnings.push(format!(
-                "{object} calls stored procedure {p} of another owner; develop runs it only with EXECUTE, which the \
-                 source never granted; fix: GRANT EXECUTE ON PROCEDURE [{sp_owner}].[{sp}] TO [{}]; (workspace#545)",
-                show(user_name.get(&owner).map(Vec::as_slice).unwrap_or_default())
-            ));
+    // the DBA group runs every procedure without a grant
+    let dba = dba_group(table(rows, SystemTable::DbUser));
+    let mut calls = Vec::new();
+    let mut record = |object: String, owner: Oid, procedures: Vec<String>| {
+        if dba.contains(&owner) {
+            return;
         }
+        let caller = show(user_name.get(&owner).map(Vec::as_slice).unwrap_or_default());
+        calls.extend(
+            procedures
+                .into_iter()
+                .map(|procedure| OtherOwnerProcedureCall {
+                    object: object.clone(),
+                    caller: caller.clone(),
+                    procedure,
+                }),
+        );
     };
     for c in classes.iter_mut().filter(|c| !c.class.is_system_class()) {
         let k = &mut c.class;
@@ -130,7 +151,7 @@ pub fn qualify_names(
             if let Some(r) = t.rewritten {
                 *q = r;
             }
-            warn(object.clone(), k.owner, t.other_owner_procedures);
+            record(object.clone(), k.owner, t.other_owner_procedures);
         }
         for p in &mut k.partitions {
             if let Some(e) = &mut p.pexpr
@@ -186,12 +207,12 @@ pub fn qualify_names(
                 if let Some(x) = q.rewritten {
                     *t = x;
                 }
-                warn(object.clone(), o.owner, q.other_owner_procedures);
+                record(object.clone(), o.owner, q.other_owner_procedures);
             }
         }
         if before_user_schema {
             r.values.insert("unique_name".into(), Value::Varchar(un));
         }
     }
-    Ok(warnings)
+    Ok(calls)
 }

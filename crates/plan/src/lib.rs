@@ -6,6 +6,7 @@
 pub mod compare_rule_mismatch;
 pub mod copy_method;
 pub mod cubrid_conf;
+pub mod execute_grants;
 pub mod free_space;
 pub mod keyinfo_heap_room;
 pub mod lob_scan;

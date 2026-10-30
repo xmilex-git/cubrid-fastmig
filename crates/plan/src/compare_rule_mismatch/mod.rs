@@ -44,12 +44,12 @@ pub struct OldRules {
 #[derive(Default)]
 pub struct CompareRuleMismatch {
     pub warnings: Vec<String>,
-    /// `<dest>/fastmig/post-migration-fixes.sql`; empty when nothing mismatches.
+    /// Its section of `<dest>/fastmig/post-migration-fixes.sql`; empty when nothing mismatches.
     pub post_migration_fixes_sql: String,
 }
 
-const SQL_HEAD: &str = "-- cubrid-fastmig post-migration fixes (workspace#541): rows the source placed or matched under its \
-older string rules.\n-- Run on the target as DBA after reviewing each statement.\n";
+const SQL_HEAD: &str =
+    "-- Rows the source placed or matched under its older string rules (workspace#541).\n";
 
 fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)

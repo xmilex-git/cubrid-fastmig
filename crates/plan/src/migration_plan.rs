@@ -43,6 +43,7 @@ use fastmig_ondisk::{Hfid, Oid, SourceVersion, VersionLine, Vfid, Vpid, Vsid, fi
 
 use crate::compare_rule_mismatch::{self, OldRules, OwnerNames};
 use crate::copy_method::{self, CopyMethod};
+use crate::execute_grants::{ExecuteGrants, execute_grants};
 use crate::free_space;
 use crate::keyinfo_heap_room::Volume0Room;
 use crate::lob_scan::{self, LobScan};
@@ -132,7 +133,8 @@ pub struct Plan {
     pub deferred_indexes: Vec<String>,
     /// `<dest>/fastmig/deferred-indexes.sql`.
     pub deferred_indexes_sql: String,
-    /// `<dest>/fastmig/post-migration-fixes.sql`: the target-side fixes of the compare rule mismatches (workspace#541).
+    /// `<dest>/fastmig/post-migration-fixes.sql`: the target-side fixes of the compare rule mismatches (workspace#541)
+    /// and the EXECUTE grants other-owner procedure calls need (workspace#545); empty when there is none.
     pub post_migration_fixes_sql: String,
     /// `<dest>/fastmig/recompile-plcsql.sql`.
     pub recompile_plcsql_sql: String,
@@ -175,6 +177,22 @@ impl Plan {
             .filter(|c| c.re_encoded)
             .map(|c| c.name.as_str())
     }
+}
+
+/// `post-migration-fixes.sql` from its non-empty sections, under one head.
+fn post_migration_fixes_sql(sections: &[&str]) -> String {
+    let sections: Vec<&str> = sections.iter().copied().filter(|s| !s.is_empty()).collect();
+    if sections.is_empty() {
+        return String::new();
+    }
+    let mut sql = String::from(
+        "-- cubrid-fastmig post-migration fixes. Run on the target as DBA after reviewing each statement.\n",
+    );
+    for s in sections {
+        sql.push('\n');
+        sql.push_str(s);
+    }
+    sql
 }
 
 fn invalid(msg: String) -> io::Error {
@@ -551,6 +569,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     }
 
     let mut new_heaps_bound = 0usize;
+    let mut grants = ExecuteGrants::default();
     // catalog regeneration inputs that refuse: collations, default values (regenerates-line only)
     if regenerates {
         let charset = i.vols.volume(0)?.header.db_charset as u8;
@@ -643,10 +662,11 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         owned.insert(SystemTable::DbUser, users);
         owned.insert(SystemTable::DbTrigger, triggers);
         let charset = i.vols.volume(0)?.header.db_charset as u8;
-        warnings.extend(
-            qualify_names(version, &mut mapped, &mut owned, charset)
+        grants = execute_grants(
+            &qualify_names(version, &mut mapped, &mut owned, charset)
                 .map_err(|e| invalid(format!("owner-qualified names: {}", e.what)))?,
         );
+        warnings.extend(grants.warning.clone());
         // PL/CSQL keeps its compiled code, which develop cannot recompile from a rewritten source (workspace#542)
         for r in rows_of(i.vols, line, &classes, SystemTable::DbStoredProcedureCode)? {
             let name = stored_procedure_code::name(&r.values)
@@ -857,7 +877,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         treated_pages,
         deferred_indexes: deferred_names,
         deferred_indexes_sql,
-        post_migration_fixes_sql: mismatch.post_migration_fixes_sql,
+        post_migration_fixes_sql: post_migration_fixes_sql(&[
+            &mismatch.post_migration_fixes_sql,
+            &grants.fix_sql,
+        ]),
         recompile_plcsql_sql: recompile_plcsql_sql(&routines),
         plcsql_routines: routines.len(),
         lob,

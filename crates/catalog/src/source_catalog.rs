@@ -81,7 +81,7 @@ impl SourceCatalog {
         map_stored_texts(version, &mut classes, users, &mut triggers);
         same_slot.insert(SystemTable::DbTrigger, triggers);
         // a source before user schema gets owner-qualified names and texts (workspace#544); the plan reports the
-        // warnings
+        // other-owner procedure calls and writes their GRANT statements (workspace#545)
         let charset = vs.volume(0)?.header.db_charset as u8;
         qualify_names(version, &mut classes, &mut same_slot, charset)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.what))?;
