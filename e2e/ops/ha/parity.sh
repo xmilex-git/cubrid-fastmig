@@ -11,7 +11,7 @@ grep -q '^side=migrated ' "$M/meta.txt" && grep -q '^side=official ' "$O/meta.tx
   { echo "expected a migrated and an official run" >&2; exit 2; }
 mkdir -p "$O/parity"
 rc=0
-for f in $( (cd "$M/check" && ls; cd "$O/check" && ls) | sort -u); do
+for f in $( (ls "$M/check"; ls "$O/check") | sort -u); do
   if diff "$M/check/$f" "$O/check/$f" >"$O/parity/$f.diff" 2>&1; then
     echo "${f%.*} same"
   else

@@ -13,8 +13,18 @@ ha_conf() {
     'ha_copy_sync_mode=sync:sync' 'ha_apply_max_mem_size=500' >"$inst/conf/cubrid_ha.conf"
 }
 
-# ha_hosts <databases.txt> <host a> <host b>: sets db-host (column 3) of every line to "a:b", as the manual's HA setup;
-# the other columns stay as safe_copy.sh or migrate wrote them, so each node keeps its own LOB base copy
+# ha_hosts <databases.txt> <host a> <host b>: sets db-host (column 3) of every database line (createdb writes a
+# "#" header line, left alone) to "a:b", as the manual's HA setup;
+# the other columns stay as safe_copy.sh, migrate or createdb wrote them
 ha_hosts() {
-  awk -v h="$2:$3" 'BEGIN { OFS = "\t" } { $3 = h; print }' "$1" >"$1.ha" && mv "$1.ha" "$1"
+  awk -v h="$2:$3" 'BEGIN { OFS = "\t" } !/^#/ { $3 = h } { print }' "$1" >"$1.ha" && mv "$1.ha" "$1"
+}
+
+# ha_lob_base <databases.txt> <lob-base-path>: sets lob-base-path (column 5) of every database line. CUBRID HA
+# replicates LOB locators, not LOB files, and refuses LOB work on a slave or after failover when the storage is
+# local (cubrid-manual ha.rst "LOB 칼럼 메타 데이터(Locator)는 복제되고"; run-08: a slave's checks.sql read hit
+# "External file ... was not found"), so the target pair shares one LOB storage: the slave takes the master's
+# lob-base-path. The source pair keeps one per node: it writes no LOB.
+ha_lob_base() {
+  awk -v b="$2" 'BEGIN { OFS = "\t" } !/^#/ { $5 = b } { print }' "$1" >"$1.lob" && mv "$1.lob" "$1"
 }

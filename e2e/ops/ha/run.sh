@@ -226,6 +226,7 @@ target_conf() {
     d=$(nd "$i")
     ha_hosts "$d/tgt-dbs/databases.txt" "${H[0]}" "${H[1]}"
     ha_conf "$d/tgt-install" "$DB" "${H[0]}" "${H[1]}"
+    [ "$i" = 0 ] || ha_lob_base "$d/tgt-dbs/databases.txt" "$(awk -v db="$DB" '$1 == db { print $5 }' "$(nd 0)/tgt-dbs/databases.txt")"
     [ "$SIDE" = migrated ] && [ "${FASTMIG_HA_SAME_COPY_LOG_PATH:-0}" = 1 ] || continue
     # an operator who keeps CUBRID_DATABASES: the target copies the peer's log to the path the source pair used, so the
     # db_ha_apply_info row migrate carried over matches (db_name, copied_log_path). The source pair's copied logs are

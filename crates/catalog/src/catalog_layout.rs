@@ -655,13 +655,14 @@ pub fn plan_catalog(
         writer(&mut writers, t, line)?.place(r.oid, &encode(&g2.targets, t, r)?, mvcc_table(*t))?;
         *written.entry(table_name(*t, line)?).or_default() += 1;
     }
-    if !ha_rows.is_empty() {
+    // recorded when 0 too, as on the same-version path
+    let reset = if ha_rows.is_empty() {
+        0
+    } else {
         let w = writer(&mut writers, &SystemTable::DbHaApplyInfo, line)?;
-        written.insert(
-            ha_apply_info::RESET_ROWS,
-            ha_apply_info::reset(w, &ha_rows)?,
-        );
-    }
+        ha_apply_info::reset(w, &ha_rows)?
+    };
+    written.insert(ha_apply_info::RESET_ROWS, reset);
     for (_, w) in writers {
         let hfid = w.hfid();
         let stats = w.finish()?;

@@ -33,7 +33,8 @@ official_pair() {
   node_sh 0 $(tgt_env 0) "cubrid createdb --db-volume-size=${vol0}M --log-volume-size=${logsz}M \
     --file-path='$m/tgt' --log-path='$m/tgt' $DB en_US.utf8" || return 1
   if [ -f "$PRISTINE/java/FmHello.class" ]; then
-    node_sh 0 $(tgt_env 0) "loadjava $DB '$PRISTINE/java/FmHello.class'" || return 1
+    cp "$PRISTINE/java/FmHello.class" "$OUT/unload/" || return 1   # the pristine is not mounted in the nodes
+    node_sh 0 $(tgt_env 0) "loadjava $DB '$OUT/unload/FmHello.class'" || return 1
   fi
   node_sh 0 $(tgt_env 0) "cd '$OUT/unload' && cubrid loaddb $opts $DB" || return 1
   # loaddb reports a failed row or statement in its log and still exits 0

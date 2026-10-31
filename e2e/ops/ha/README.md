@@ -60,8 +60,15 @@ of the baseline size).
 5. **Evidence.** Heartbeat status, assert hits and ERROR counts in the log files this run wrote, cores newer than the
    run. Expected ERROR lines: HA mode changes (-970), the disconnects of a heartbeat stop (-989, -4).
 
-`check/<phase>.diff` is master against slave. Tables without a primary key are not replicated by CUBRID HA, so the
-diff need not be empty; the pass rule is parity: the same diffs and the same checks as the official pair.
+`check/<phase>.diff` is master against slave. CUBRID HA synchronizes only tables with a primary key (cubrid-manual
+`ko/ha.rst` "테이블 기본키(primary key)"), so the diff need not be empty: on T1 it lists `session_hash`,
+`region_list` and the `part_*` tables of basedb on both sides. The pass rule is parity: the same diffs and the same
+checks as the official pair.
+
+The target pair shares one LOB storage: the slave's `databases.txt` takes the master's lob-base-path (`ha_lob_base`).
+CUBRID HA replicates LOB locators, not LOB files, and allows no LOB work on a slave or after failover when the storage
+is local (cubrid-manual `ko/ha.rst` "LOB 칼럼 메타 데이터(Locator)는 복제되고, LOB 데이터는 복제되지 않는다");
+with a local storage the slave's `checks.sql` read "External file ... was not found" (run-08).
 
 `FASTMIG_HA_SAME_COPY_LOG_PATH=1` puts the target pair's copied logs where the source pair's were (`ha_copy_log_base`
 = the source `CUBRID_DATABASES`; the old copied logs are moved aside): the operator who keeps `CUBRID_DATABASES`.
