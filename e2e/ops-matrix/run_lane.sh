@@ -28,6 +28,8 @@ INST=$(realpath "${FASTMIG_OPS_INSTALL:?FASTMIG_OPS_INSTALL required}")
 : "${FASTMIG_OPS_PORT:?FASTMIG_OPS_PORT required}" "${FASTMIG_OPS_SERVER_CTL:?FASTMIG_OPS_SERVER_CTL required}"
 SMALL=${FASTMIG_OPS_MATRIX_BASEDB_ROOT:-$HOME/fastmig-basedb}
 DRY=${FASTMIG_OPS_MATRIX_DRY_RUN:-0}
+# the runner overwrites the install's conf/cubrid.conf: never a shared install other sessions use (a dry run only reads it)
+[ "$DRY" = 1 ] || case "$INST" in "$HOME"/optdebug/* | "$HOME"/release/*) echo "use the lane's own reflink copy, not $INST" >&2; exit 2 ;; esac
 
 case "$LANE" in
   develop | 11.4) want_target=$LANE want_size=small ;;

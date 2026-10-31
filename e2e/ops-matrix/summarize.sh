@@ -42,6 +42,7 @@ runs one round). Server statistics and error-log wording are not compared (G11 d
 
 Columns: *Steps* = failed / all step and check rows of both sides; *Parity* = differing / all checked steps;
 *Err/Assert/Core/PL* = migrated, official (PL = "Networking with PL server failed" lines, a known flake counted apart, e2e/ops/README.md § Known flakes); *Archives* = log archives created on the migrated side (official) / minimum.
+*Verdict* = the runner's exit code of the shown run (the highest `run-NN`); *Earlier runs* = every run before it, with its exit code and PL server drops (rerun rule: e2e/ops-matrix/README.md § Lanes).
 
 EOF
 
@@ -56,8 +57,23 @@ done
 echo
 echo '## Table'
 echo
-echo '| Row | Source → target | Variant | Rounds | Steps | Parity | Err/Assert/Core/PL | Archives | Verdict | Defect |'
-echo '|---|---|---|---|---|---|---|---|---|---|'
+echo '| Row | Source → target | Variant | Rounds | Steps | Parity | Err/Assert/Core/PL | Archives | Verdict | Earlier runs | Defect |'
+echo '|---|---|---|---|---|---|---|---|---|---|---|'
+
+# awk prologue: h[<header name>] = column number, from the header line every runner TSV carries
+HDR='NR == 1 { for (i = 1; i <= NF; i++) h[$i] = i; next }'
+
+# earlier_runs <row dir> <shown run>: "run-NN rc R, PL P" for every run of the row before the shown one, so a pass
+# after a rerun stays visible (rerun rule: README § Lanes)
+earlier_runs() {
+  local d out="" pl
+  for d in $(ls -d "$1"/run-[0-9][0-9] 2>/dev/null | sort); do
+    [ "$d" = "$2" ] && continue
+    pl=$(awk -F'\t' "$HDR"' { p += $h["pl_drops"] } END { print p + 0 }' "$d/server-log-summary.tsv" 2>/dev/null)
+    out="$out${out:+; }$(basename "$d") rc $(cat "$d.rc" 2>/dev/null || echo '?'), PL ${pl:-?}"
+  done
+  echo "$out"
+}
 
 while IFS=$'\t' read -r id label variant target size lob rounds min; do
   case "$id" in '' | '#'*) continue ;; esac
@@ -65,26 +81,28 @@ while IFS=$'\t' read -r id label variant target size lob rounds min; do
   [ "$size" = big ] && variant="$variant (4.2 GB)"
   run=$(ls -d "$ROOT/$id"/run-[0-9][0-9] 2>/dev/null | sort | tail -1)
   if [ -z "$run" ]; then
-    printf '| `%s` | %s → %s | %s | | | | | | not run | %s |\n' "$id" "$label" "$target" "$variant" "$defect"
+    printf '| `%s` | %s → %s | %s | | | | | | not run | | %s |\n' "$id" "$label" "$target" "$variant" "$defect"
     continue
   fi
   rc=$(cat "$run.rc" 2>/dev/null || echo '?')
-  steps=$(awk -F'\t' 'NR > 1 && $1 != "parity" { n++; if ($4 != 0) f++ } END { printf "%d / %d", f, n }' "$run/steps.tsv" 2>/dev/null)
-  failed=$(awk -F'\t' 'NR > 1 && $1 != "parity" && $4 != 0 { printf "%s%s:%s", s, $1, $2; s = ", " }' "$run/steps.tsv" 2>/dev/null)
-  parity=$(awk -F'\t' '$1 == "parity" { n++; if ($4 != 0) f++ } END { printf "%d / %d", f, n }' "$run/steps.tsv" 2>/dev/null)
-  differ=$(awk -F'\t' '$1 == "parity" && $4 != 0 { printf "%s%s", s, $2; s = ", " }' "$run/steps.tsv" 2>/dev/null)
+  st=$run/steps.tsv
+  steps=$(awk -F'\t' "$HDR"' $h["side"] != "parity" { n++; if ($h["rc"] != 0) f++ } END { printf "%d / %d", f, n }' "$st" 2>/dev/null)
+  failed=$(awk -F'\t' "$HDR"' $h["side"] != "parity" && $h["rc"] != 0 { printf "%s%s:%s", s, $h["side"], $h["step"]; s = ", " }' "$st" 2>/dev/null)
+  parity=$(awk -F'\t' "$HDR"' $h["side"] == "parity" { n++; if ($h["rc"] != 0) f++ } END { printf "%d / %d", f, n }' "$st" 2>/dev/null)
+  differ=$(awk -F'\t' "$HDR"' $h["side"] == "parity" && $h["rc"] != 0 { printf "%s%s", s, $h["step"]; s = ", " }' "$st" 2>/dev/null)
   sl=$run/server-log-summary.tsv
   logs="$(side_logs "$sl" migrated), $(side_logs "$sl" official)"
-  ar=$run/archives.tsv
-  am=$(awk -F'\t' '$1 == "migrated" { print $3 - $2 }' "$ar" 2>/dev/null)
-  ao=$(awk -F'\t' '$1 == "official" { print $3 - $2 }' "$ar" 2>/dev/null)
+  created='{ print $h["last_archive_after"] - $h["last_archive_before"] }'
+  am=$(awk -F'\t' "$HDR"' $h["side"] == "migrated" '"$created" "$run/archives.tsv" 2>/dev/null)
+  ao=$(awk -F'\t' "$HDR"' $h["side"] == "official" '"$created" "$run/archives.tsv" 2>/dev/null)
   amin=$(sed -n 's/^archives created on migrated: .* (min \([0-9]*\))$/\1/p' "$run/meta.txt" 2>/dev/null)
   r=$(sed -n 's/.* rounds=\([0-9]*\) .*/\1/p' "$run/meta.txt" 2>/dev/null | head -1)
   if [ "$rc" = 0 ]; then verdict=pass; else verdict="**FAIL** (rc $rc)"; fi
   [ -z "$failed" ] || steps="$steps ($failed)"
   [ -z "$differ" ] || parity="$parity ($differ)"
-  printf '| `%s` | %s → %s | %s | %s | %s | %s | %s | %s (%s) / %s | %s | %s |\n' "$id" "$label" "$target" "$variant" \
-    "$r" "$steps" "$parity" "$logs" "${am:-?}" "${ao:-?}" "${amin:-?}" "$verdict" "$defect"
+  printf '| `%s` | %s → %s | %s | %s | %s | %s | %s | %s (%s) / %s | %s | %s | %s |\n' "$id" "$label" "$target" "$variant" \
+    "$r" "$steps" "$parity" "$logs" "${am:-?}" "${ao:-?}" "${amin:-?}" "$verdict (\`$(basename "$run")\`)" \
+    "$(earlier_runs "$ROOT/$id" "$run")" "$defect"
 done <"$MATRIX/paths.tsv"
 
 echo

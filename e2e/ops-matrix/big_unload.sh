@@ -16,6 +16,7 @@ set -euo pipefail
 PRISTINE=$(realpath "${1:?big pristine}")
 WORK=${2:?work dir}
 INST=$(realpath "${3:?11.4 install}")
+case "$INST" in "$HOME"/optdebug/* | "$HOME"/release/*) echo "use your own reflink copy, not $INST" >&2; exit 2 ;; esac
 BASEDB=$(dirname "$(realpath "$0")")/../../basedb
 
 [ ! -e "$WORK" ] || { echo "$WORK exists" >&2; exit 2; }
@@ -23,6 +24,8 @@ CUBRID=$INST LD_LIBRARY_PATH=$INST/lib "$INST/bin/cubrid_rel" | grep -q 'CUBRID 
   { echo "$INST is not an 11.4 install" >&2; exit 2; }
 mkdir -p "$WORK/unload"
 WORK=$(realpath "$WORK")
+# on every exit, failed ones too: the copy is 12 GB of reflink blocks, and the blocks the engine wrote are new
+trap 'echo "remove the copy by its literal path: rm -rf $WORK/copy"' EXIT
 
 # safe_copy rewrites _vinf to the copy and prints it: every line must name the copy before the engine opens it
 bash "$BASEDB/safe_copy.sh" "$PRISTINE" "$WORK/copy" | tee "$WORK/safe_copy.log"
@@ -36,4 +39,3 @@ cubrid unloaddb -S -u dba "$db" >"$WORK/unload.log" 2>&1
 (cd "$WORK/unload" && sha256sum "$db"_*) >"$WORK/unload.sha256"
 du -sm "$WORK/unload" >>"$WORK/unload.log"
 echo "FASTMIG_OPS_MATRIX_BIG_UNLOAD=$WORK/unload/$db"
-echo "remove the copy by its literal path: rm -rf $WORK/copy"

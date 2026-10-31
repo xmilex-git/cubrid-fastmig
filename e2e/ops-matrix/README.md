@@ -35,8 +35,13 @@ own install copy (the runner overwrites `conf/cubrid.conf` and reads the install
 | `11.4` | the 8 small rows → 11.4 | optdebug 11.4.6 (`~/optdebug/CUBRID-fastmig-11.4.6`) |
 | `big` | `114-dev-big` | optdebug develop |
 
-The lane refuses a release-build install and an install of the wrong line (G11 decision 6: the target engine has
-its asserts on).
+The lane refuses a release-build install, an install of the wrong line (G11 decision 6: the target engine has its
+asserts on) and a shared install under `~/optdebug` or `~/release` (the runner overwrites its conf). Lanes in parallel
+do not share a PL server socket: the runner keeps `CUBRID_TMP` per port.
+
+Rerun rule: a failed row is rerun once, and only when its `server-log-summary.tsv` shows `pl_drops` > 0 (the PL
+server drop, e2e/ops/README.md § Known flakes); the rerun takes the next `run-NN`, and the table shows the earlier
+run with its exit code and PL drops next to the verdict. Any other failure is a finding, never rerun away.
 
 ```sh
 # the big lane only: its official side's unload, once
