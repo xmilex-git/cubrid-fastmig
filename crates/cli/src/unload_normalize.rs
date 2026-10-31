@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::unload_rules_10_2::{self as v10_2, ClassOwners};
 use crate::unload_rules_before_11_4 as before_11_4;
+use crate::unload_rules_official as official;
 use fastmig_ondisk::{SourceVersion, VersionLine};
 
 /// Which side's entries a rule rewrites.
@@ -47,6 +48,8 @@ pub enum Rewrite {
     PasswordHash,
     /// Unwrap every ` cast(<expr> as <type>)` of a view query to `<expr>`.
     ViewColumnCast,
+    /// The official-path comparison only, one function of [`crate::unload_rules_official`].
+    SerialCachePosition,
     /// The 10.2 print forms, one per function of [`crate::unload_rules_10_2`].
     OwnerQualifiedNames,
     ViewQueryOnePass,
@@ -282,6 +285,85 @@ const V11_4_TO_DEVELOP: &[Rule] = &[
     },
 ];
 
+/// The OFFICIAL rules of one migrated pair: the official path's target (source side) and the migrated target (target
+/// side), both unloaded by one target install. Only what the two keep differently on purpose is masked, one rule per
+/// row of docs/intended-differences.md the pair shows; anything else the target engine derives itself on the official
+/// path and the migration copied from the source is a difference (workspace#600). View casts are never masked here.
+pub fn official_rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
+    let mut r: Vec<&'static Rule> = OFFICIAL.iter().collect();
+    match source {
+        SourceVersion::V10_2 => r.extend(OFFICIAL_10_2_SOURCE),
+        SourceVersion::V11_2 => r.extend(OFFICIAL_11_2_SOURCE),
+        _ => {}
+    }
+    if target == VersionLine::V11_4 {
+        r.extend(OFFICIAL_11_4_TARGET);
+    }
+    r
+}
+
+// row "REUSE_OID flag of a user table of a 10.2 source": the official side's loaddb applies create_table_reuseoid=yes,
+// the migrated table keeps the source's flag
+const OFFICIAL_10_2_SOURCE: &[Rule] = &[Rule {
+    name: "official-reuse-oid",
+    files: &["schema"],
+    side: Side::Target,
+    rewrite: Rewrite::Replace(b" DONT_REUSE_OID,", b" REUSE_OID,"),
+}];
+
+// the 11.2 serial current_val/started pair (intended-differences intro, rule serial-11-2): 11.2 unloaddb prints an
+// AUTO_INCREMENT serial as its next value, so the official side holds `START WITH <next>` not started, the migrated side
+// the source's `START WITH <current>` and a NEXT_VALUE; both sides are rewritten to the next value
+const OFFICIAL_11_2_SOURCE: &[Rule] = &[Rule {
+    name: "official-auto-increment-11-2",
+    files: &["schema"],
+    side: Side::Both,
+    rewrite: Rewrite::AutoIncrement11_2,
+}];
+
+// row "position of a started serial with a cache": 11.4 loaddb's NEXT_VALUE reserves a cache block (a develop target
+// shows no difference, workspace#600)
+const OFFICIAL_11_4_TARGET: &[Rule] = &[Rule {
+    name: "official-serial-cache-position",
+    files: &["schema"],
+    side: Side::Source,
+    rewrite: Rewrite::SerialCachePosition,
+}];
+
+const OFFICIAL: &[Rule] = &[
+    // user class ids follow creation order: the migration keeps the source's classes, loaddb creates them in unload
+    // order
+    Rule {
+        name: "class-id-names",
+        files: &["objects"],
+        side: Side::Both,
+        rewrite: Rewrite::ClassIdNames,
+    },
+    // CBRD-27432: develop salts an unsalted hash anew on every unload (workspace#582)
+    Rule {
+        name: "password-hash",
+        files: &["schema", "schema_user"],
+        side: Side::Both,
+        rewrite: Rewrite::PasswordHash,
+    },
+    // LOB locators: the official side's point by an absolute path at the copy of the source's files the runner loads
+    // (e2e/ops § Engine facts), the migrated side's are relative under the class directory (CBRD-23700, workspace#507);
+    // only the path in front of `ces_NNN/<file>` is dropped, and the files' bytes are the ops checks' (intended difference
+    // "LOB locator", docs/intended-differences.md)
+    Rule {
+        name: "lob-absolute-locator",
+        files: &["objects"],
+        side: Side::Source,
+        rewrite: Rewrite::LobAbsoluteLocator,
+    },
+    Rule {
+        name: "lob-class-dir",
+        files: &["objects"],
+        side: Side::Target,
+        rewrite: Rewrite::LobClassDir,
+    },
+];
+
 /// Applies `rules` to one file's entries of one side; returns how many entries each rule changed. `owners` are the
 /// source schema's class owners (empty unless the source is 10.2).
 pub fn normalize(
@@ -324,6 +406,7 @@ pub fn normalize(
                     .count(),
                 Rewrite::PasswordHash => entries.iter_mut().filter_map(mask_password_hash).count(),
                 Rewrite::ViewColumnCast => entries.iter_mut().filter_map(unwrap_view_casts).count(),
+                Rewrite::SerialCachePosition => official::serial_cache_position(entries),
                 Rewrite::OwnerQualifiedNames => {
                     v10_2::owner_qualified_names(suffix, entries, owners)
                 }

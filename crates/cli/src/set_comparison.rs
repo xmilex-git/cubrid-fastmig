@@ -18,7 +18,7 @@ use crate::args::{CliError, parse};
 use fastmig_ondisk::{SourceVersion, VersionLine};
 
 use crate::unload_files::{entries, unload_set};
-use crate::unload_normalize::{normalize, rules};
+use crate::unload_normalize::{normalize, official_rules, rules};
 use crate::unload_rules_10_2::ClassOwners;
 
 const HELP: &str = "\
@@ -28,6 +28,9 @@ cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix> [--d
   --source-version <10.2|11.2|11.3|11.4|develop> --target-version <11.4|develop>
                    the engine lines that wrote each side; both or neither (default: one line, no normalization);
                    a 10.2 source is compared with its own unload, as the other sources
+  --rules official the two unloads were written by one install: the official path's target (first) and the
+                   migrated target (second); with --source-version/--target-version naming the migrated pair,
+                   only that pair's intended differences are masked (workspace#600)
   exit 0 = same entries, 1 = differ, 2 = usage or I/O error";
 
 /// Differing entries printed per file on stdout; `--diff` has all of them.
@@ -40,13 +43,28 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
     }
     let p = parse(
         args,
-        &["--diff", "--source-version", "--target-version"],
+        &["--diff", "--source-version", "--target-version", "--rules"],
         &[],
     )?;
     let mut source_10_2 = false;
-    let pair = match (p.value("--source-version"), p.value("--target-version")) {
-        (None, None) => Vec::new(),
-        (Some(s), Some(t)) => {
+    let pair = match (
+        p.value("--rules"),
+        p.value("--source-version"),
+        p.value("--target-version"),
+    ) {
+        (Some("official"), Some(s), Some(t)) => {
+            official_rules(source_version(s)?, version_line(t)?)
+        }
+        (Some("official"), _, _) => {
+            return Err(CliError::Usage(
+                "--rules official needs --source-version and --target-version".into(),
+            ));
+        }
+        (Some(r), _, _) => {
+            return Err(CliError::Usage(format!("unknown rules {r} (official)")));
+        }
+        (None, None, None) => Vec::new(),
+        (None, Some(s), Some(t)) => {
             let s = source_version(s)?;
             source_10_2 = s == SourceVersion::V10_2;
             rules(s, version_line(t)?)

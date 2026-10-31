@@ -146,8 +146,12 @@ _Avoid_: checkdb, 체커
 출발 DB와 도착 DB의 엔진 unloaddb 결과가 순서와 무관하게 같은 행·스키마를 담는지 보는, 옮긴 직후의 합격 판정. 검증기와 독립된 값 정확성의 오라클이다. 옮긴 DB를 운영한 뒤의 합격은 parity가 따로 본다(G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587), [ADR 0007](docs/adr/0007-rust-verifier-instead-of-checkdb.md)).
 _Avoid_: diff 비교, 정합성 체크
 
+**공식 경로 unload 비교 (official unload comparison)**:
+옮긴 DB와 공식 경로 DB를 각각 prepare 직후, 같은 도착 install로 unloaddb해 집합 비교하는 운영 검증 단계(`set-comparison --rules official`, ops 러너의 `official-unload-comparison`). 집합 비교는 출발 unload와 비교하므로 도착 엔진이 공식 경로에서 스스로 다시 도출하는 것(뷰 칼럼 cast 등)을 못 잡는데, 이 단계가 그것을 잡는다. 그 쌍이 보이는 의도된 차이 행만 행마다 규칙 하나로 가리고, 뷰 cast는 가리지 않는다(T41 [workspace#600](https://github.com/xmilex-git/workspace/issues/600)).
+_Avoid_: 공식 비교, official diff
+
 **의도된 차이 (intended difference)**:
-엔진 공식 상향 경로(출발 unloaddb → 도착 loaddb)와 결과가 다르지만 지도에서 결정해 남기는 도착 DB의 상태. 엔진이 스스로 만들 수 있는 상태이고 정보를 잃지 않는 쪽을 고른 것이다. 목록과 결정 티켓은 [docs/intended-differences.md](docs/intended-differences.md)에 있다. 집합 비교에 보이면 정규화 규칙으로 지우지 않고 이 목록으로 보고한다.
+엔진 공식 상향 경로(출발 unloaddb → 도착 loaddb)와 결과가 다르지만 지도에서 결정해 남기는 도착 DB의 상태. 엔진이 스스로 만들 수 있는 상태이고 정보를 잃지 않는 쪽을 고른 것이다. 목록과 결정 티켓은 [docs/intended-differences.md](docs/intended-differences.md)에 있다. 집합 비교에 보이면 정규화 규칙으로 지우지 않고 이 목록으로 보고한다. 공식 경로 unload 비교만은 그 쌍이 보이는 행을 행마다 규칙 하나로 가린다(두 쪽이 일부러 다르게 갖는 상태라서).
 _Avoid_: 허용 오차, 알려진 차이
 
 **live row map**:

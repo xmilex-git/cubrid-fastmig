@@ -26,6 +26,8 @@ round_files
 run_side() {
   side_begin "$1"
   step prepare 0 "prepare_$SIDE" || return 1
+  # this side as prepared, before any write, for the official-unload-comparison (workspace#600)
+  step unload-prepared 0 unload_prepared || return 1
   step server-start 0 start || return 1
   if [ "$SIDE" = official ] && [ "${FASTMIG_OPS_BREAK:-}" = official-extra-row ]; then
     step break-official-extra-row 0 csql -C -u dba -c "INSERT INTO app_owner.region_list (id, code, label) VALUES (100001, 'N', 'break')" "$DB"
@@ -63,6 +65,19 @@ for s in migrated official; do
     [ "$UP" = 0 ] || stop >/dev/null 2>&1; cubrid deletedb -d "$DB" >/dev/null 2>&1; }
   stop_master >"$OUT/$s/log/master-stop.log" 2>&1
 done
+
+# official-unload-comparison: the two sides as prepared, both unloaded by the target install, compared with the OFFICIAL
+# rules (only the intended differences masked): what the target engine derives itself on the official path and the
+# migration copied from the source shows here and nowhere else (workspace#600; #599 view casts)
+if [ -d "$OUT/migrated/unload" ] && [ -d "$OUT/official/unload" ]; then
+  "$BIN" set-comparison "$OUT/official/unload/$DB" "$OUT/migrated/unload/$DB" --rules official \
+    --source-version "$LABEL" --target-version "$TV" --diff "$OUT/parity/official-unload.diff" >"$OUT/parity/official-unload.out" 2>&1
+  rc=$?
+else
+  rc=2; echo "a side has no unload after prepare" >"$OUT/parity/official-unload.out"
+fi
+printf "parity\tofficial-unload-comparison\t0\t%s\n" "$rc" >>"$OUT/steps.tsv"
+[ "$rc" = 0 ] || { FAIL=1; echo "official-unload-comparison: differs, see parity/official-unload.out" >&2; }
 
 # parity: the checks of every step, migrated against official
 for f in "$OUT"/migrated/check/*.out; do

@@ -233,6 +233,11 @@ prepare_official() {
 }
 
 
+# unload_prepared: unloaddb -S of this side's DB by the target install into <side>/unload (the server is down after prepare)
+unload_prepared() {
+  mkdir -p "$OUT/$SIDE/unload" && (cd "$OUT/$SIDE/unload" && cubrid unloaddb -S -O "$OUT/$SIDE/unload" "$DB")
+}
+
 # side_begin <side>: this side's directories, databases.txt and the marks side_end reads
 side_begin() {
   SIDE=$1; UP=0

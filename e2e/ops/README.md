@@ -1,4 +1,5 @@
 # e2e/ops — operations scenario runner
+| `unload-prepared` | down | `unloaddb -S` of the side as prepared, by the target install, into `<side>/unload` (§ Official-unload-comparison) |
 
 Takes one baseline DB (basedb/README.md) to the target version two ways — through cubrid-fastmig (the **migrated** side)
 and through the engine's official path, source `unloaddb` → target `loaddb` (the **official** side) — then runs the
@@ -9,7 +10,7 @@ T36 [workspace#588](https://github.com/xmilex-git/workspace/issues/588). Users o
 [workspace#590](https://github.com/xmilex-git/workspace/issues/590). This is a runtime check, not a unit test
 (AGENTS.md § Build and check).
 
-Pass: every step exits as expected, every parity diff is empty, the server error logs of both sides hold no assert
+Pass: every step exits as expected, the official-unload-comparison finds the same entries, every parity diff is empty, the server error logs of both sides hold no assert
 and no new core appeared, and the migrated side created at least `FASTMIG_OPS_MIN_ARCHIVES` log archives. Server
 statistics and the wording of error logs are not compared (G12 1).
 
@@ -87,7 +88,7 @@ through that index (`USING INDEX <i>(+)`) against the count of the same predicat
 
 Values a serial or an AUTO_INCREMENT column generates are compared as counts and order only (the order of
 `audit_log.id` and `invoice.inv_no` follows the rows behind them), never as values: the official path starts a cached
-serial ahead by `CACHE` × `INCREMENT`, develop's `cached_num` of an AUTO_INCREMENT serial differs
+serial ahead by (`CACHE` − 1) × `INCREMENT` (11.4 target), develop's `cached_num` of an AUTO_INCREMENT serial differs
 (docs/intended-differences.md, rows "position of a started serial with a cache" and "`_db_serial.cached_num`"), and a
 `kill -9` loses each side's cache block. Decision approved by the map supervisor 2026-10-31 (workspace#588).
 Left out of the CRC32 sums for that reason, and only these:
@@ -99,11 +100,41 @@ Left out of the CRC32 sums for that reason, and only these:
 | `app_owner.invoice.inv_no` | serial `s_invoice` | the row count, `invoice_order` (numbers rise with `order_id`) |
 | `db_serial` current value, `cached_num` | the serials themselves | the serial names only |
 
-Why no unloaddb and set comparison of the two sides: what migrate wrote is compared with the source right after the
-migration by the end-to-end run (e2e/README.md: verify, set comparison of unloads). After the scenario both unloads
-hold the generated values above in every row that carries them, so they could match only through normalization rules
-that hide intended differences (docs/intended-differences.md forbids them). The runner therefore judges the state after
-the DML by `checks.sql` only.
+Why no unloaddb and set comparison of the two sides after the scenario: both unloads then hold the generated values
+above in every row that carries them, so they could match only through rules that hide those values. The runner judges
+the state after the DML by `checks.sql` only, and compares the two unloads once, before any write (next section).
+
+## Official-unload-comparison
+
+The set comparison of the end-to-end run (e2e/README.md) compares the migrated target with the **source**'s unload,
+so what the target engine derives itself on the official path, and the migration copied from the source, passes there:
+the view column casts of [workspace#599](https://github.com/xmilex-git/workspace/issues/599) were byte-equal to the
+source and differed from what develop's loaddb stores. This step closes that hole (T41
+[workspace#600](https://github.com/xmilex-git/workspace/issues/600)): each side is unloaded right after `prepare`
+(`unload-prepared`; the migrated side after its required SQL), both by the target install, and after both sides
+
+```sh
+cubrid-fastmig set-comparison <out>/official/unload/<db> <out>/migrated/unload/<db> --rules official \
+  --source-version <label> --target-version <target> --diff <out>/parity/official-unload.diff
+```
+
+writes `parity/official-unload.out` and the row `parity official-unload-comparison 0 <rc>` (rc 0 same, 1 differ, 2 a
+side has no unload or a usage error); any rc but 0 fails the run. The OFFICIAL rules mask only the rows of
+[docs/intended-differences.md](../../docs/intended-differences.md) the pair shows, one rule each, and print how many
+entries each changed:
+
+| Rule | Pairs | Row it masks |
+|---|---|---|
+| `class-id-names` | all | not a state: the migration keeps the source's class ids, loaddb numbers classes in unload order |
+| `password-hash` | all | not a state: develop re-salts an unsalted hash on every unload (CBRD-27432, workspace#582) |
+| `lob-absolute-locator`, `lob-class-dir` | all | LOB locator: absolute on the official side (§ Engine facts), relative on the migrated side; `ces_NNN/<file>` still compared |
+| `official-reuse-oid` | 10.2 source | "REUSE_OID flag of a user table of a 10.2 source" |
+| `official-auto-increment-11-2` | 11.2 source | the 11.2 AUTO_INCREMENT serial `current_val`/`started` pair, rewritten to its next value on both sides |
+| `official-serial-cache-position` | 11.4 target | "position of a started serial with a cache": the official `START WITH` moved back by (CACHE − 1) × INCREMENT |
+
+Never masked: view query casts (the target must store the casts loaddb stores), deferred indexes and recompiled views
+(the migrated side is unloaded after its required SQL ran), and everything else. On the 18 small rows of the T37
+matrix the step finds the same entries (workspace#600 resolution).
 
 ## Output
 
@@ -113,7 +144,9 @@ the DML by `checks.sql` only.
 <out>/<side>/log/<step>.log     the step's own output
 <out>/<side>/check/<step>.out   checks.sql after the step
 <out>/<side>/server-log/        the install's log files written while the side ran
+<out>/<side>/unload/            unloaddb of the side right after prepare
 <out>/parity/<step>.diff        diff of the two sides' check/<step>.out; empty = same
+<out>/parity/official-unload.{out,diff}  set-comparison --rules official of the two unloads
 <out>/server-log-summary.tsv    side  error_lines ("ERROR ***")  assert_lines  cores (any process of the side)  pl_drops
                                 session_expired (the -1066 lines, not in error_lines: § Engine facts)
 <out>/archives.tsv              side  last_archive_before  last_archive_after   (numbers of <db>_lgarNNN, -1 = none;
