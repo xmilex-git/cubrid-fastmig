@@ -4,6 +4,57 @@ What runs on migrated databases besides `verify` and the set comparison: the ope
 parity with the official path. Decision: G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587).
 The version matrix (T37 [workspace#589](https://github.com/xmilex-git/workspace/issues/589)) adds its section here.
 
+## Version matrix
+
+Each row takes one baseline DB to the target version two ways — cubrid-fastmig (*migrated*) and the official path,
+source `unloaddb` → target `loaddb` (*official*) — and runs the same operations scenario on both
+([e2e/ops/README.md](../e2e/ops/README.md)): DML rounds over every object kind, UPDATE STATISTICS, checkpoint,
+`kill -9` and restart recovery, vacuumdb, addvoldb, compactdb, backupdb, one more DML round, restoredb. After each
+step both sides run the same checks; the two outputs must be equal (*parity*). Matrix and pass rule: G11
+[workspace#587](https://github.com/xmilex-git/workspace/issues/587), T37
+[workspace#589](https://github.com/xmilex-git/workspace/issues/589); rows: [e2e/ops-matrix/paths.tsv](../e2e/ops-matrix/paths.tsv).
+
+A row passes when the runner exited 0: every step and check exited 0, every parity diff is empty, the server error
+logs of both sides hold no `ERROR ***` line and no assert, no core of either side's servers appeared, and the
+migrated side created at least the minimum number of log archives (2 for the small DBs; 0 for the 4.2 GB DB, which
+runs one round). Server statistics and error-log wording are not compared (G11 decision 1).
+
+Columns: *Steps* = failed / all step and check rows of both sides; *Parity* = differing / all checked steps;
+*Err/Assert/Core/PL/Exp* = migrated, official (PL = "Networking with PL server failed" lines, a known flake counted apart, e2e/ops/README.md § Known flakes; Exp = engine "-1066 Session expired" lines, not errors, § Engine facts); *Archives* = log archives created on the migrated side (official) / minimum.
+*Verdict* = the runner's exit code of the shown run (the highest `run-NN`); *Earlier runs* = every run before it, with its exit code and PL server drops (rerun rule: e2e/ops-matrix/README.md § Lanes). *Defect or note* = defects.tsv: a defect ticket, or why an earlier run failed and what changed before the shown run.
+
+### Engines and binary
+
+- `lane-11.4`: install-11.4; CUBRID 11.4.6 (11.4.6.1963-0e7d3c1) (64bit debug build for Linux) (Oct 30 2026 10:13:28); libcubrid sha256 `9519686635e111dc…`; cubrid-fastmig sha256 `e462cb6a367fb33a…`
+- `lane-big`: install-big; CUBRID 11.5.0 (11.5.0.2781-682b080) (64bit optdebug build for Linux) (Oct 29 2026 22:34:56); libcubrid sha256 `c82ce9d485ebc645…`; cubrid-fastmig sha256 `e462cb6a367fb33a…`
+- `lane-develop`: install-develop; CUBRID 11.5.0 (11.5.0.2781-682b080) (64bit optdebug build for Linux) (Oct 29 2026 22:34:56); libcubrid sha256 `c82ce9d485ebc645…`; cubrid-fastmig sha256 `e462cb6a367fb33a…`
+
+### Table
+
+| Row | Source → target | Variant | Rounds | Steps | Parity | Err/Assert/Core/PL/Exp | Archives | Verdict | Earlier runs | Defect or note |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `102-dev-clean` | 10.2 → develop | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 1, PL 0 | run-01: official prepare failed, 10.2 loaddb `Unknown class "dba.event_log"` (engine defect [workspace#516](https://github.com/xmilex-git/workspace/issues/516)); run-02 with the 10.2 official schema workaround (b37616e) |
+| `102-dev-dirty` | 10.2 → develop | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 2 (3) / 2 | pass (`run-02`) | run-01 rc 1, PL 0 | run-01: official prepare failed, 10.2 loaddb `Unknown class "dba.event_log"` (engine defect [workspace#516](https://github.com/xmilex-git/workspace/issues/516)); run-02 with the 10.2 official schema workaround (b37616e) |
+| `112-dev-clean` | 11.2 → develop | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/1, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `112-dev-dirty` | 11.2 → develop | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 2 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `113-dev-clean` | 11.3 → develop | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `113-dev-dirty` | 11.3 → develop | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `114-dev-clean` | 11.4 → develop | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-04`) | run-01 rc 1, PL 0; run-02 rc 0, PL 0; run-03 rc 0, PL 0 | run-01 invalid: checks.sql was edited in the running worktree between the two sides' dml checks (the sides used two digest forms); run-02..04 pass |
+| `114-dev-dirty` | 11.4 → develop | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `dev-dev-clean` | develop → develop | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `dev-dev-dirty` | develop → develop | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 2 (3) / 2 | pass (`run-04`) | run-01 rc 1, PL 0; run-02 rc 0, PL 0; run-03 rc 0, PL 0 | run-01: customer digest differed once after the DML rounds (migrated side); not reproduced in run-02..04 (two lanes and the T39 long run at the same time) nor in 3 solo runs (probe ×2, runner ×1) |
+| `102-114-clean` | 10.2 → 11.4 | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (4) / 2 | pass (`run-02`) | run-01 rc 1, PL 0 | run-01: official prepare failed (workspace#516 as above) and checks.sql was not valid on 11.4 (`db_trigger.trigger_name`, NCHAR in CONCAT_WS); run-02 on b37616e + e347f48 |
+| `102-114-dirty` | 10.2 → 11.4 | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 1, PL 0 | run-01: official prepare failed (workspace#516 as above) and checks.sql was not valid on 11.4; run-02 on b37616e + e347f48 |
+| `112-114-clean` | 11.2 → 11.4 | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (4) / 2 | pass (`run-02`) | run-01 rc 1, PL 0 | run-01: checks.sql was not valid on 11.4, both sides (`db_trigger.trigger_name`, NCHAR in CONCAT_WS); run-02 on e347f48 |
+| `112-114-dirty` | 11.2 → 11.4 | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `113-114-clean` | 11.3 → 11.4 | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (4) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `113-114-dirty` | 11.3 → 11.4 | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
+| `114-114-clean` | 11.4 → 11.4 | clean | 6 | 0 / 54 | 0 / 11 | 0/0/0/0/0, 0/0/0/0/0 | 3 (4) / 2 | pass (`run-01`) |  | run-01 only (binary cb5eae54…, before T41 and #600; #600 does not apply to 11.4 → 11.4) |
+| `114-114-dirty` | 11.4 → 11.4 | dirty | 6 | 0 / 54 | 0 / 11 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-01`) |  | run-01 only (binary cb5eae54…, before T41 and #600; #600 does not apply to 11.4 → 11.4) |
+| `114-dev-big` | 11.4 → develop | clean (4.2 GB) | 1 | 0 / 56 | 0 / 12 | 0/0/0/0/2, 0/0/0/0/1 | 65 (82) / 0 | pass (`run-01`) |  |  |
+
+Runs: `runs`, the highest `run-NN` per row; generated 2026-11-01T02:37:39+09:00 by e2e/ops-matrix/summarize.sh.
+
 ## HA
 
 T38 [workspace#590](https://github.com/xmilex-git/workspace/issues/590), G12 (4): the tool does not move an HA pair as

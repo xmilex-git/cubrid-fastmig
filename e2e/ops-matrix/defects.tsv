@@ -1,1 +1,10 @@
-# row id	defect ticket (workspace#N or CBRD-N, linked), one line per ticket
+# row id	defect ticket (workspace#N or CBRD-N, linked) or a note on an earlier run; one line each, shown in the table
+102-dev-clean	run-01: official prepare failed, 10.2 loaddb `Unknown class "dba.event_log"` (engine defect [workspace#516](https://github.com/xmilex-git/workspace/issues/516)); run-02 with the 10.2 official schema workaround (b37616e)
+102-dev-dirty	run-01: official prepare failed, 10.2 loaddb `Unknown class "dba.event_log"` (engine defect [workspace#516](https://github.com/xmilex-git/workspace/issues/516)); run-02 with the 10.2 official schema workaround (b37616e)
+102-114-clean	run-01: official prepare failed (workspace#516 as above) and checks.sql was not valid on 11.4 (`db_trigger.trigger_name`, NCHAR in CONCAT_WS); run-02 on b37616e + e347f48
+102-114-dirty	run-01: official prepare failed (workspace#516 as above) and checks.sql was not valid on 11.4; run-02 on b37616e + e347f48
+112-114-clean	run-01: checks.sql was not valid on 11.4, both sides (`db_trigger.trigger_name`, NCHAR in CONCAT_WS); run-02 on e347f48
+114-dev-clean	run-01 invalid: checks.sql was edited in the running worktree between the two sides' dml checks (the sides used two digest forms); run-02..04 pass
+dev-dev-dirty	run-01: customer digest differed once after the DML rounds (migrated side); not reproduced in run-02..04 (two lanes and the T39 long run at the same time) nor in 3 solo runs (probe ×2, runner ×1)
+114-114-clean	run-01 only (binary cb5eae54…, before T41 and #600; #600 does not apply to 11.4 → 11.4)
+114-114-dirty	run-01 only (binary cb5eae54…, before T41 and #600; #600 does not apply to 11.4 → 11.4)

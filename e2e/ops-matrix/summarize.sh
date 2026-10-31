@@ -49,7 +49,7 @@ runs one round). Server statistics and error-log wording are not compared (G11 d
 
 Columns: *Steps* = failed / all step and check rows of both sides; *Parity* = differing / all checked steps;
 *Err/Assert/Core/PL/Exp* = migrated, official (PL = "Networking with PL server failed" lines, a known flake counted apart, e2e/ops/README.md § Known flakes; Exp = engine "-1066 Session expired" lines, not errors, § Engine facts); *Archives* = log archives created on the migrated side (official) / minimum.
-*Verdict* = the runner's exit code of the shown run (the highest `run-NN`); *Earlier runs* = every run before it, with its exit code and PL server drops (rerun rule: e2e/ops-matrix/README.md § Lanes).
+*Verdict* = the runner's exit code of the shown run (the highest `run-NN`); *Earlier runs* = every run before it, with its exit code and PL server drops (rerun rule: e2e/ops-matrix/README.md § Lanes). *Defect or note* = defects.tsv: a defect ticket, or why an earlier run failed and what changed before the shown run.
 
 EOF
 
@@ -64,7 +64,7 @@ done
 echo
 echo '### Table'
 echo
-echo '| Row | Source → target | Variant | Rounds | Steps | Parity | Err/Assert/Core/PL/Exp | Archives | Verdict | Earlier runs | Defect |'
+echo '| Row | Source → target | Variant | Rounds | Steps | Parity | Err/Assert/Core/PL/Exp | Archives | Verdict | Earlier runs | Defect or note |'
 echo '|---|---|---|---|---|---|---|---|---|---|---|'
 
 # awk prologue: h[<header name>] = column number, from the header line every runner TSV carries
