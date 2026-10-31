@@ -379,3 +379,88 @@ counters, `TEMP_DISK`).
 
 `report.json` records `temp_disk.limit_bytes`, whether it batched, and `peak_bytes`, the most spill bytes on disk
 at any moment of the run (the build and, with `--verify`, the verifier).
+
+## Storage kinds (workspace#561)
+
+`plan` and `migrate` judge three places on their own: the source volumes, the target directory and `--spill-dir`
+(the temp side), and show them as `storage: source <kind> (<disks>), target …, temp …` (plan.json `"storage"`).
+The kind comes from sysfs (`crates/cli/src/storage_kind_detect.rs`, GLOSSARY "저장 장치 종류"):
+
+| kind | rule |
+|---|---|
+| hdd | `queue/rotational` = 1 |
+| nvme | not rotational, device name `nvme*` |
+| sata-ssd | not rotational, any other block device with a `queue/` |
+| unknown | no block device behind the path (`st_dev` major 0: btrfs, ZFS, overlay, tmpfs, NFS) or sysfs unreadable; shown as a failed detection |
+
+A partition counts as its disk; device-mapper and md as their slaves. Several devices resolve to one kind in the
+order hdd > unknown > sata-ssd > nvme (one device known to be slow is enough). btrfs and ZFS device lists are not
+followed; a loop device counts as sata-ssd (not rotational, no `nvme` name). unknown takes the hdd device throughput.
+The kind chooses the device throughput of the bottleneck classification below (an HDD's read with the worker count:
+231 MB/s for one worker down to 57 MB/s, the fio streams' total, at 4 and more) and the default rates of the byte
+phases (table below); unknown takes the hdd values. There is no I/O concurrency limit per kind: on the HDD 16 workers
+beat 1 on every path (round 1 below), and the HDD precheck is slow at any worker count (workspace#596) (workspace#561).
+
+Each phase reads and writes on the devices below; its device throughput (`DeviceThroughput`, `bottleneck.rs`) is the
+slowest of the listed kinds, read and write apart (`DeviceThroughput::of`: the one-stream sequential rows of the table
+below for SATA SSD and HDD; NVMe keeps the fsync rate of workspace#560). Page treatment and the index build work on the target volumes
+(`VolumeSet::open` of the target in `migrate`), not on the source.
+
+| phase | read | write |
+|---|---|---|
+| precheck, open-sources, volume-copy | source | target |
+| volume-paths, page-treatment, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, register | target | target |
+| index-build | target, temp | target, temp |
+| verifier | source, target, temp | temp |
+| pair count (the start estimate's first measure, `Progress::observe`) | source | source |
+
+### Device table (fio)
+
+`docs/storage_kinds.fio` on each device of the dev host, one after the other with nothing else of the run on it
+(2026-10-31, CPUs 16-31, 1-minute load ≤ 4 at each start; a 4 GiB file, O_DIRECT, iodepth 1 per thread):
+
+| job | NVMe (990 PRO) | SATA SSD (MZ7L33T8) | HDD (ST12000NM000J) |
+|---|---|---|---|
+| sequential write 1 MiB, MB/s | 2416 | 464 | 229 |
+| sequential read 1 MiB, MB/s | 2714 | 546 | 231 |
+| 4 sequential read streams 256 KiB, MB/s | 3141 | 561 | 53 |
+| 16 sequential read streams 256 KiB, MB/s | 3141 | 563 | 57 |
+| random read 16 KiB, 1 / 4 / 16 threads, IOPS | 19432 / 72020 / 180307 | 6880 / 20267 / 31586 | 184 / 382 / 585 |
+| random read 16 KiB, 16 threads, p99 µs | 136 | 970 | 108527 |
+| buffered write + fdatasync 4 KiB / 16 KiB, IOPS | 196 / 195 | 15880 / 11176 | 65 / 63 |
+
+On the HDD concurrent sequential streams lose three quarters of one stream's rate (seeks between the streams), while
+random reads still gain from a queue (NCQ). The SATA SSD's fdatasync is 80 times the NVMe's: its write cache is
+power-loss protected, the 990 PRO flushes.
+### Migrate on each kind (round 1)
+
+The ~2 GB DBs (rows multiplier 80: 11.4 clean 1984 MB and develop clean 2048 MB of volumes, about 10 M rows), source
+and target on the same device unless said, cold source (page cache dropped file by file, 0 B left), CPUs 16-31,
+1-minute load ≤ 4 at each start, cubrid-fastmig p561 da726b4; seconds, two runs. A = 11.4 → develop, B = develop →
+develop; est/act = the start estimate over the run's wall.
+
+| run | NVMe | SATA SSD | HDD |
+|---|---|---|---|
+| A, `--workers 1` | 62.6 / 62.9 | 72.2 / 70.4 | 106.0 / 102.0 |
+| A, `--workers 16` | 8.3 / 8.4 | 18.5 / 16.8 | 73.0 / 73.9 |
+| A, `--workers 16 --no-clone` | 7.9 / 7.9 | 18.1 / 17.2 | 68.2 / 67.6 |
+| B, `--workers 1` | 45.1 / 45.7 | 49.9 / 53.6 | 80.2 / 81.9 |
+| B, `--workers 16` | 6.4 / 6.4 | 12.2 / 12.8 | 70.5 / 70.2 |
+| B, `--workers 16 --no-clone` | 6.6 / 6.8 | 15.9 / 15.3 | 64.1 / 64.3 |
+| B, `cp -a` + sync | 2.1 / 1.9 | 10.7 / 10.3 | 23.4 / 24.3 |
+| B, `cp --reflink=always` | 0.03 | 0.02 | 0.05 |
+| precheck of A / B at 16 workers | 1.7 / 1.2 | 3.8 / 3.7 | 50 / 47 |
+| est/act at 16 workers (A, B) | 1.04-1.17 | 0.66-1.09 | 0.73-0.85 |
+
+NVMe source, HDD target (A, 16 workers): 22.3 / 18.6 s, est/act 0.40 / 0.47 (the fsync at the NVMe rate).
+
+On the HDD the precheck's counting scan reads the whole source (1.9 GB) at about 40 MB/s with 1 worker or 16:
+two thirds of the run, and why a migration takes three times `cp -a` there (workspace#596). Every other phase
+gains from the workers. On the SATA SSD and the HDD the start estimate missed the write phases, taken at NVMe rates;
+the byte phases' defaults per kind (from these runs' report.json units per second, the lower end; `default_rates`):
+
+| default rate | NVMe | SATA SSD | HDD (and unknown) | storage it follows |
+|---|---|---|---|---|
+| `CLONED_RANGE_BYTES*` | 1.7 GB/s | 250 MB/s | 125 MB/s | target |
+| `COPY_BYTES*` | 3.07 GB/s | 3.07 GB/s | 0.7 GB/s | source (the copy writes into the page cache) |
+| `FSYNC_BYTES*` | 3.0 GB/s | 450 MB/s | 200 MB/s | target |

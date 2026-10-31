@@ -47,9 +47,7 @@ use fastmig_ondisk::{Oid, SourceVersion, Vsid};
 use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
-use fastmig_progress::{
-    Bottleneck, DeviceThroughput, Meter, PhaseSpec, ProcSample, Progress, Unit, default_rates,
-};
+use fastmig_progress::{Bottleneck, Meter, PhaseSpec, ProcSample, Progress, Unit, default_rates};
 use fastmig_verify::Role;
 
 use crate::args::{CliError, parse};
@@ -59,6 +57,7 @@ use crate::limits::{self, Limits};
 use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
 use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
+use crate::storage_kind_detect::RunStorage;
 use crate::target_space::{self, Reservation, TargetSpace};
 use crate::verify::{self, DbArg, run_verifier};
 use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
@@ -289,6 +288,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         }
     }
     let target = target_space::bound(&plan, &est, &src.vols, new_log::file_bytes(&src.log))?;
+    let storage = RunStorage::detect(&src.volume_paths(), &o.plan.target_dir, &o.limits.spill_dir);
     let asked = Instant::now();
     let temp_limit = temp_disk_choice::choose(
         temp_disk,
@@ -305,10 +305,12 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     if plan.version_pair.source != plan.version_pair.target {
         phases[VERIFIER] = VERIFIER_OLDER_LINE;
     }
+    // the byte phases at their storage kind's rates (workspace#561)
+    let phases = storage.phase_specs(&phases);
     let progress = Progress::new(
         "migrate",
         &phases,
-        &[],
+        &storage.phase_devices(&phases, o.worker_limit),
         o.worker_limit,
         started + asked.elapsed(),
     );
@@ -327,6 +329,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             est,
             temp_limit,
             target,
+            storage,
             pre,
             pair_count_used,
         },
@@ -369,6 +372,8 @@ struct Begun {
     est: ResourceEstimate,
     temp_limit: u64,
     target: TargetSpace,
+    /// The storage kinds of the source, target and temp side (workspace#561).
+    storage: RunStorage,
     /// Timed parts of the precheck, reported before it.
     pre: Vec<(&'static str, f64)>,
     /// What the precheck's pair count used (CPU seconds, device bytes): the resource it was bound by.
@@ -411,7 +416,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         b.est.scan_seconds - b.est.appended_seconds,
         b_pairs as f64 / count_rate,
         b.pair_count_used,
-        DeviceThroughput::NVME,
+        b.storage.source_device(o.worker_limit),
     );
     for w in &plan.warnings {
         rep.progress.warn(format!("warning: {w}"));
@@ -524,7 +529,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &src,
         po,
         src_lob_base.as_deref(),
-        &plan_report::json(&plan, Ok((&target, resources.as_str()))),
+        &plan_report::json(&plan, Ok((&target, resources.as_str())), &b.storage.json()),
     )?;
     rep.lap("open_sources");
 

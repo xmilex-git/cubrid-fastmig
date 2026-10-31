@@ -27,8 +27,9 @@ fn strings<'a>(v: impl IntoIterator<Item = &'a str>) -> String {
 }
 
 /// `estimate`: the target space and the resource table as JSON (`resource_estimate`), or why they were not estimated;
-/// then `target_space` and `resources` are `null` and `estimate_error` holds the reason.
-pub fn json(p: &Plan, estimate: Result<(&TargetSpace, &str), &str>) -> String {
+/// then `target_space` and `resources` are `null` and `estimate_error` holds the reason. `storage`: the storage kinds
+/// of the source, target and temp side (`storage_kind_detect`, workspace#561).
+pub fn json(p: &Plan, estimate: Result<(&TargetSpace, &str), &str>, storage: &str) -> String {
     let (space, resources, error) = match estimate {
         Ok((t, r)) => (
             format!(
@@ -91,7 +92,7 @@ pub fn json(p: &Plan, estimate: Result<(&TargetSpace, &str), &str>) -> String {
         })
         .collect();
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {space},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"estimate_error\": {error},\n  \"classes\": [\n    {}\n  ]\n}}\n",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {space},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"estimate_error\": {error},\n  \"storage\": {storage},\n  \"classes\": [\n    {}\n  ]\n}}\n",
         p.source_version.name(),
         line_name(p.version_pair.target),
         strings(p.refusals.iter().map(String::as_str)),

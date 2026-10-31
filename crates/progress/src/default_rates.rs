@@ -56,6 +56,29 @@ pub const CLONED_RANGE_BYTES: DefaultRate = DefaultRate {
     points: &[(1, 1.7e9)],
 };
 
+/// The byte phases on a SATA SSD or an HDD (dev host sdb, sdc), the ~2 GB DBs cold, 2 runs each (workspace#561
+/// round 1, report.json units per second): taking the clone ranges 233-264 / 123-129 MB/s; the byte copy, which
+/// writes into the page cache and so follows the source, 3.8-4.3 / 0.63-0.84 GB/s; the fsync 264-1127 / 208-476 MB/s
+/// (byte copy at the low end, 162 MB/s with an NVMe source). The lower end is taken, so the estimate errs long, but
+/// for the SATA SSD's fsync: its clone runs 585-811 MB/s and its byte copy 264-315 MB/s, so the middle (the step-5
+/// confirm runs put the clone path at 1.51x with 300 MB/s; workspace#561). A SATA
+/// SSD copies as fast as [`COPY_BYTES`]; which phase takes which: `storage_kind_detect::RunStorage::phase_specs`.
+pub const CLONED_RANGE_BYTES_SATA_SSD: DefaultRate = DefaultRate {
+    points: &[(1, 250e6)],
+};
+pub const CLONED_RANGE_BYTES_HDD: DefaultRate = DefaultRate {
+    points: &[(1, 125e6)],
+};
+pub const COPY_BYTES_HDD: DefaultRate = DefaultRate {
+    points: &[(1, 0.7e9)],
+};
+pub const FSYNC_BYTES_SATA_SSD: DefaultRate = DefaultRate {
+    points: &[(1, 450e6)],
+};
+pub const FSYNC_BYTES_HDD: DefaultRate = DefaultRate {
+    points: &[(1, 200e6)],
+};
+
 /// Heap pages the index build's scan reads (its first part): the large 11.4 DB (111.4 k pages) in about 43.5 / 10.1 /
 /// 2.2 s and the large develop DB (105.0 k pages) in 44.9 / 10.9 / 2.9 s at 1 / 4 / 16 workers, read from the 2 s
 /// progress lines of workspace#560 pass 2 (CPUs 16-31); the rate is the mean of the two. Pages, not keys: a page
