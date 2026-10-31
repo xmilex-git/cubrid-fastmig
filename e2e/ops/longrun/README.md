@@ -126,7 +126,8 @@ the engine refusing a time before that backup ("must be after the time … of th
 `logpb_check_stop_at_time`); any DB refuses so, it is not a property of the migration. The range also ends where the archives end: even
 `chain0-bktime` (`-d backuptime`) needs the archive written during its online backup, so once MAX_ARCHIVES newer
 archives exist the first chain no longer restores at all; `chain0-next` replays cycle 1's archives as well. Their rc
-records where the range starts at the end of the run. The measured rc of both is the documented range (docs/ops-verification.md "Long run").
+records where the range starts at the end of the run. An operator who needs PITR back to a given time keeps the archives from the
+backup before it to that time: a `log_max_archives` that covers that span, or the archives copied off with the backups. The measured rc of both is the documented range (docs/ops-verification.md "Long run").
 
 ## Fail-before probe
 
