@@ -12,6 +12,7 @@
 set -uo pipefail
 
 QDIR=$(dirname "$(realpath "$0")")
+OPS=$(dirname "$QDIR")   # sides.sh reads the e2e/ops directory from OPS, as run.sh sets it
 . "$QDIR/../sides.sh"
 SET=${4:?query set: tpch or basedb}
 [ -d "$QDIR/$SET" ] || { echo "no query set $QDIR/$SET" >&2; exit 2; }

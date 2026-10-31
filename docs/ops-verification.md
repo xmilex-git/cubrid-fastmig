@@ -61,20 +61,19 @@ reflink copy). Pass: every query the same bytes on both sides, no error line, as
 | 11.2 → 11.4 | basedb clean | 29 | 29 | 0/0/0, 0/0/0 | 5, 1 | 77525c0 | pass |
 | 11.3 → 11.4 | basedb clean | 29 | 29 | 0/0/0, 0/0/0 | 1, 1 | 77525c0 | pass |
 | 11.4 → 11.4 | basedb clean | 30 | 30 | 0/0/0, 0/0/0 | 1, 5 | 77525c0 | pass |
-| 10.2 → develop | basedb clean | 28 | 25 | 0/0/0, 0/0/0 | 1, 0 | e347f48 | official path limit (below) |
-| 10.2 → 11.4 | basedb clean | 28 | 25 | 0/0/0, 0/0/0 | 1, 0 | 77525c0 | official path limit (below) |
+| 10.2 → develop | basedb clean | 28 | 28 | 0/0/0, 0/0/0 | 1, 1 | b37616e | pass |
+| 10.2 → 11.4 | basedb clean | 28 | 28 | 0/0/0, 0/0/0 | 1, 1 | b37616e | pass |
 
 Queries per source: 28 for 10.2 (no synonyms, no PL/CSQL), 29 for 11.2 and 11.3 (no PL/CSQL), 30 for 11.4 and develop.
 The 11.4-target rows ran before #599's fix, which touches develop targets only. Plans are recorded per query
 (`<side>/plan/`), not compared.
 
-- **10.2 sources: official path limit.** The 10.2 official path needs the workaround of
-  [#516](https://github.com/xmilex-git/workspace/issues/516) in `sides.sh` (`change_owner` calls moved to the end of the
-  schema, main 8708e0f): without it loaddb stops at the first partitioned table. With it, the two views' queries are
-  resolved while their tables still belong to dba and are stored as `[dba.customer]`, `[dba.product]`. The official side
-  then fails queries 10, 11 and 27 ("Unknown class dba.customer"), while the migrated side returns the source's rows.
-  Judged by the source: the migrated side is right. The 25 other queries are the same bytes. The two rows are rerun when
-  the workaround is narrowed (partitioned tables only).
+- **10.2 sources: the official path.** It needs the workaround of [#516](https://github.com/xmilex-git/workspace/issues/516)
+  (without it loaddb stops at the first partitioned table). Its first form (main 8708e0f: every `change_owner` moved
+  to the end) resolved the views' queries while their tables still belonged to dba (`[dba.customer]`), and the official
+  side failed queries 10, 11 and 27 (25/28 the same; judged by the source, the migrated side was right). The narrowed
+  form (main b37616e, `e2e/ops/official_102_schema.awk`: only the partitioned tables' `change_owner` moves) gives the
+  rows above.
 - **Migration defect found: [#599](https://github.com/xmilex-git/workspace/issues/599).** On the first runs (cubrid-fastmig
   8bbcd53), every 10.2, 11.2, 11.3 and 11.4 → develop row asserted on the migrated side at query 10
   (`qdata_check_output_column`, cores `core.transaction.{3635142,3641792,3653875}`): a migrated view kept the source's
