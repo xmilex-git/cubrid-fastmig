@@ -17,16 +17,17 @@ label=${1:?label: 11.4 or develop}
 inst=$(realpath "${2:?install}")
 port=${3:?port}
 ctl=${4:?server ctl}
-root=${5:?root}
+root=$(realpath -m "${5:?root}")
 load=${TPCH_SF10_LOAD:-/home/cubrid/dev/TPC-H/scale10/load_data}
 here=$(dirname "$(realpath "$0")")
 case "$label" in 11.4) tag=114 ;; develop) tag=dev ;; *) echo "label must be 11.4 or develop" >&2; exit 2 ;; esac
 
 # The sample (README.md § TPC-H DB): SF10 has 2,000,000 parts and 15,000,000 orders over keys 1..60,000,000.
-# PARTKEY_MAX keeps 20 % of part/partsupp, ORDERKEY_MAX 1/6 of orders; lineitem keeps the rows inside both, so every
-# lineitem has its order and its partsupp row (supplier, customer, nation, region are kept whole).
-PARTKEY_MAX=400000
-ORDERKEY_MAX=10000000
+# PARTKEY_MAX keeps 15 % of part/partsupp, ORDERKEY_MAX 1/10 of orders (SF1's 1.5 M); lineitem keeps the rows inside
+# both, so every lineitem has its order and its partsupp row (supplier, customer, nation, region are kept whole).
+# Sized by the first build: 1.17 GB of load files made 2688 MB of volumes (2.29 x, keys included), workspace#595.
+PARTKEY_MAX=300000
+ORDERKEY_MAX=6000000
 CAP_MB=2048   # T40: volumes of the TPC-H DB <= 2 GB
 
 db=tpch${tag}_sf1
@@ -39,6 +40,7 @@ mkdir -p "$dbdir" "$ev" "$base/pristine" "$unload"
 touch "$base/databases.txt"
 export CUBRID=$inst CUBRID_DATABASES=$base PATH=$inst/bin:$PATH LD_LIBRARY_PATH=$inst/lib
 [ "$(command -v cubrid)" = "$inst/bin/cubrid" ] || { echo "cubrid resolves to $(command -v cubrid)" >&2; exit 1; }
+cd "$ev" || exit 1   # csql and loaddb leave their .err files in the working directory
 
 t0=$(date +%s)
 phase() { echo "$1 rc=$2 at $(( $(date +%s) - t0 ))s" | tee -a "$ev/timings.txt"; [ "$2" = 0 ] || exit 1; }

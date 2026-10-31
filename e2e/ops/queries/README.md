@@ -68,6 +68,8 @@ Rules every file keeps, so equal results print equal bytes:
   both sides read the state the move left.
 - **No intended difference** (docs/intended-differences.md): no current serial value, no `cached_num` of an
   AUTO_INCREMENT serial, no grantor, no view or trigger text.
+- **Functions both target lines accept**: 11.4.6 rejects an NCHAR argument of `CONCAT_WS` ("Cannot coerce ... to type
+  varchar") where develop takes it, so NCHAR columns appear only in functions both accept (`TRIM`, `CHAR_LENGTH`).
 
 ### tpch/ (22)
 
@@ -122,15 +124,16 @@ map supervisor 2026-10-31, workspace#595):
 
 | Table | Rows kept | Why |
 |---|---|---|
-| `part`, `partsupp` | `partkey ≤ 400,000` (20 %) | `partsupp` follows its part |
-| `orders` | `orderkey ≤ 10,000,000` (1/6 of SF10's keys 1..60,000,000) | `o_orderdate` does not follow the key, so every date range keeps rows |
-| `lineitem` | `orderkey ≤ 10,000,000` and `partkey ≤ 400,000` | every line keeps its order and its `partsupp` row (its supplier is one of its part's four) |
+| `part`, `partsupp` | `partkey ≤ 300,000` (15 %) | `partsupp` follows its part |
+| `orders` | `orderkey ≤ 6,000,000` (1/10 of SF10's keys 1..60,000,000: SF1's 1.5 M orders) | `o_orderdate` does not follow the key, so every date range keeps rows |
+| `lineitem` | `orderkey ≤ 6,000,000` and `partkey ≤ 300,000` | every line keeps its order and its `partsupp` row (its supplier is one of its part's four) |
 | `supplier`, `customer`, `nation`, `region` | all | every order and `partsupp` row keeps its parent |
 
 The eight FOREIGN KEYs of `tpch-db/indexes.sql` are created after the data, so a row that breaks the sample's key
-consistency fails the build. Estimated size: load files 572 MB fixed (customer 260, partsupp 244, part 53, supplier 15)
-+ orders 316 MB (2.5 M rows) + lineitem 291 MB (about 2.0 M rows) = 1.18 GB; the SF10 DB's volumes are 1.57 × its
-load files (19.5 GB / 12.4 GB, keys included), so about 1.85 GB of volumes. The build fails above 2048 MB.
+consistency fails the build. Size: the first build (`partkey ≤ 400,000`, `orderkey ≤ 10,000,000`: 1.17 GB of load
+files) made 2688 MB of volumes on 11.4.6, 2.29 × its load files with the keys, and failed the cap; the rule above
+keeps about 0.82 GB of load files (customer 260 MB, partsupp 182, orders 189, lineitem about 131, part 40, supplier
+15), about 1.87 GB of volumes. The build fails above 2048 MB.
 
 Build, once per source label (11.4.6 for the 11.4 → develop path, develop for develop → develop), each with its own
 reflink copy of the release install and a claimed port:
