@@ -5,7 +5,8 @@
 //!
 //! Input: the finished [`Progress`]. Output: a JSON object as text.
 //! The trail points are the monitor's estimates from the start estimate on (none with `--progress none`): each is the
-//! last one made at or before its time, `null` when the run was shorter, the precheck still ran, or no monitor ran.
+//! last one made at or before its time, the first one when the precheck still ran then (its `at_s` says when), `null`
+//! when the run was shorter or no monitor ran.
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
@@ -71,6 +72,7 @@ pub fn json(p: &Progress) -> String {
             .iter()
             .take_while(|(el, _)| *el <= t)
             .last()
+            .or(trail.first())
             .filter(|_| t <= actual)
             .map_or("null".into(), |(el, total)| {
                 format!("{{\"at_s\": {el:.1}, \"estimated_total_s\": {total:.3}}}")

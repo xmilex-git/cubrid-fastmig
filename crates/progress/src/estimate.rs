@@ -11,7 +11,8 @@
 //!   than the defaults makes the remaining CPU-bound phases 1.5x longer, and leaves the I/O-bound ones alone;
 //!   a bottleneck nothing has been bound by yet keeps its default (factor 1); work whose use shows no bottleneck
 //!   ([`crate::bottleneck`]) moves no factor;
-//! - the running phase uses its own moving average once it has run [`MIN_SAMPLE_S`] and the rate is not ~0,
+//! - the running phase uses its own moving average once it has run [`MIN_SAMPLE_S`] and the rate is not ~0, never
+//!   below its scaled default counted down by its time so far (a counter may cover only part of the phase),
 //!   otherwise its scaled default counted down by its time so far; a phase shorter than [`MIN_SAMPLE_S`] does not
 //!   move a speed factor (a clone "copies" gigabytes in a millisecond);
 //! - the run's ETA is always given, marked approximate by the caller.
@@ -88,15 +89,20 @@ impl Estimator {
         let factors = speed_factors(p, now, sample);
         let el = elapsed(ph, now);
         let trusted = ph.spec.unit != Unit::Step && el >= MIN_SAMPLE_S && self.ema > 1e-9;
+        // the whole phase's scaled default minus its time so far: counts down while the phase adds nothing yet (the
+        // verifier's heap pass) instead of standing still
+        let left_by_default = || {
+            let r = classified(ph, now, sample, p.worker_limit).unwrap_or(ph.spec.prior);
+            (scaled_default(p, ph, factors.of(r)) - el).max(0.0)
+        };
         let phase_eta = if trusted {
-            remaining(ph) as f64 / self.ema
+            // never below the default: a counter may cover only part of the phase (the index build counts keys in
+            // its heap scan, not in the tree build after it), so its rate alone ends the phase too early
+            (remaining(ph) as f64 / self.ema).max(left_by_default())
         } else if ph.spec.unit == Unit::Step {
             (STEP.as_secs_f64() - el).max(0.0)
         } else {
-            // the whole phase's scaled default minus its time so far: counts down while the phase adds nothing yet
-            // (the verifier's heap pass) instead of standing still
-            let r = classified(ph, now, sample, p.worker_limit).unwrap_or(ph.spec.prior);
-            (scaled_default(p, ph, factors.of(r)) - el).max(0.0)
+            left_by_default()
         };
         let pending: f64 = p.phases[cur + 1..]
             .iter()

@@ -65,7 +65,7 @@ pub const INDEX_KEYS: DefaultRate = DefaultRate {
 /// Heap pages walked by the page treatment (patch or re-encode), large 11.4 DB (75.9 k pages): 22.8 / 6.1 / 1.9 s at
 /// 1 / 4 / 16 workers (workspace#560 calibration pass 1, CPUs 16-31).
 pub const HEAP_PAGES: DefaultRate = DefaultRate {
-    points: &[(1, 3.3e3), (4, 12.5e3), (16, 39.0e3)],
+    points: &[(1, 3.3e3), (4, 12.5e3), (16, 39.9e3)],
 };
 
 /// Index pairs the verifier merges, target and source together: 146.0 M pairs at 1 / 4 / 16 workers in 209 / 49.5 /
@@ -83,10 +83,10 @@ pub const PAIR_COUNT: DefaultRate = DefaultRate {
     points: &[(1, 2.75e6), (4, 11.1e6), (16, 41.1e6)],
 };
 
-/// The same counting scan on an older source, each row of a re-encoded class re-encoded first: 73.0 M in 43.1 / 10.9
-/// / 2.97 s at 1 / 4 / 16 workers on the large 11.4 DB (workspace#560 calibration pass 1, pair count less the
-/// appended-pages bound). Chosen when the plan has a re-encoded class; whether the gap to [`PAIR_COUNT`] comes from
-/// the re-encoding or from reading an older line's rows is not measured apart (that DB has both).
+/// The same counting scan on a source of an older line, each row of a re-encoded class re-encoded first: 73.0 M in
+/// 43.1 / 10.9 / 2.97 s at 1 / 4 / 16 workers on the large 11.4 DB (workspace#560 calibration pass 1, pair count less
+/// the appended-pages bound). Chosen when the source line is not the target's; whether the gap to [`PAIR_COUNT`]
+/// comes from the re-encoding or from reading an older line's rows is not measured apart (that DB has both).
 pub const PAIR_COUNT_RE_ENCODED: DefaultRate = DefaultRate {
     points: &[(1, 1.70e6), (4, 6.73e6), (16, 24.6e6)],
 };

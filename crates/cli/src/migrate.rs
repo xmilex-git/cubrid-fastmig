@@ -365,8 +365,9 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let b_appended = b.est.appended_pages;
     let b_pairs: u64 = b.est.indexes.iter().map(|i| i.stats.pairs).sum();
     // the pair count reads the heaps and extracts the keys as the index build and the verifier will: the run's first
-    // measure of this host's speed at that work (workspace#560)
-    let count_rate = if plan.re_encoded().next().is_some() {
+    // measure of this host's speed at that work (workspace#560). Chosen by the source line, as measured; shortcut: the
+    // share of re-encoded classes is not weighed, until a DB mixing both is measured
+    let count_rate = if plan.version_pair.source != plan.version_pair.target {
         default_rates::PAIR_COUNT_RE_ENCODED
     } else {
         default_rates::PAIR_COUNT
