@@ -804,6 +804,13 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             java.bytes + java_static.bytes
         ));
     }
+    // the target empties the table: carried applier positions name the source log chain (workspace#590)
+    let ha_rows = fastmig_catalog::ha_apply_info::rows(i.vols, line, &classes)?.len();
+    if ha_rows > 0 {
+        warnings.push(format!(
+            "HA apply info: {ha_rows} rows reset on the target (an HA slave's applier starts at the end of the master's copied log, as after restoreslave)"
+        ));
+    }
 
     // page-treatment progress total: the heaps whose chains rewrite_heap walks (11.4 path: user heaps only, the
     // system ones belong to the catalog regeneration; same-version path: every class heap and the root heap)

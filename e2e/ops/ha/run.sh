@@ -9,11 +9,10 @@
 #   <out dir>       a new directory under the workspace scratch; both nodes' installs and DBs live here (see README)
 # env: FASTMIG_HA_SOURCE_INSTALL (the source-line install, 11.4.6 or develop), FASTMIG_HA_TARGET_INSTALL (develop
 #   optdebug, G11 (6)); both are reflink-copied per node, the originals are not touched.
-#   FASTMIG_HA_DML (SQL file of one DML round, run on the current master; T36 e2e/ops dml/round.sql), FASTMIG_HA_CHECKS
-#   (read-only SQL file run on both nodes after each phase; T36 checks.sql), FASTMIG_HA_ROUNDS (default 1),
-#   FASTMIG_HA_WORKERS (migrate worker limit, default 4), FASTMIG_HA_RESET_APPLY_INFO=1 (delete the slave's
-#   db_ha_apply_info rows before the target pair starts; default off: the first runs show what the engine does with
-#   the rows migrate carried over, README "Open questions").
+#   FASTMIG_HA_DML (space-separated SQL files of one DML round, run on the current master of the target pair; T36
+#   e2e/ops dml/*.sql), FASTMIG_HA_CHECKS (read-only SQL file run on both target nodes after each phase; T36
+#   checks.sql), FASTMIG_HA_ROUNDS (default 1), FASTMIG_HA_WORKERS (migrate worker limit, default 4),
+#   FASTMIG_HA_SAME_COPY_LOG_PATH=1 (the target pair copies logs where the source pair did, README).
 # Output: <out>/steps.tsv ("step seconds rc"), <out>/log/<step>.log, <out>/check/<phase>-<host>.out and
 #   <out>/check/<phase>.diff (master against slave), <out>/meta.txt. Exit 0 when every step exited as expected.
 # The caller wraps the run in `taskset -c 0-15` (map #472 CPU rule) and removes <out> by its literal path afterwards:
@@ -207,8 +206,6 @@ target_conf() {
     echo "ha_copy_log_base=$d/src" >>"$d/tgt-install/conf/cubrid_ha.conf"
     mv "$d/src/${DB}_${H[1 - i]}" "$d/src/${DB}_${H[1 - i]}.source-pair" || return 1
   done
-  [ "${FASTMIG_HA_RESET_APPLY_INFO:-0}" = 1 ] || return 0
-  node_sh 1 $(tgt_env 1) "csql -S -u dba -c 'DELETE FROM db_ha_apply_info' $DB"
 }
 step tgt-conf 0 target_conf
 # the master stays to_be_active until the slave joins (run-02), so both start before the modes are read

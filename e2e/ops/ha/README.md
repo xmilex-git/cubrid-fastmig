@@ -38,10 +38,12 @@ of the baseline size).
 ## Procedure (run.sh)
 
 1. **Source pair.** Both nodes start from the same pristine (`basedb/safe_copy.sh`: the same `db_creation`, as a slave
-   restored from the master's backup has). HA conf per the manual's quick setup; heartbeat on the master, then the
-   slave; `cubrid changemode` reports `active` / `standby`. A replicated marker table `fm590_sync` (primary key) gives
-   the sync point: a token inserted on the master is visible on the slave. DML rounds on the master, sync, checks on
-   both nodes, the slave's `db_ha_apply_info` rows. Heartbeat stop: slave, then master (normal shutdown on both).
+   restored from the master's backup has). HA conf per the manual's quick setup; heartbeat on the master, then on the
+   slave, and only then the modes (`cubrid changemode`: `active` / `standby`): a master stays `to-be-active` until the
+   slave joins (run-02). A replicated marker table `fm590_sync` (primary key) gives the sync point: a token inserted on
+   the master is visible on the slave. The source pair writes only the marker: T36's `round.sql` and `checks.sql`
+   are written for the target line (run-03). Then the slave's `db_ha_apply_info` rows, and heartbeat stop: slave,
+   then master (normal shutdown on both).
 2. **Migrate.** On the host, one node at a time: `plan`, `migrate --verify --volumes-in-first-dir`, the deferred SQL
    in the node (SA), `finalize`. Then the two targets' `db_creation` (from `fastmig/source-fingerprint`) must be equal
    (G4 keeps it from the source).
@@ -49,25 +51,40 @@ of the baseline size).
    modes, the slave's `db_ha_apply_info` at start, sync, DML rounds, sync, checks.
 4. **Failover.** Heartbeat stop on the master; the slave turns `active`; DML there; heartbeat start on the old master,
    which comes back `standby`; sync from the new master; checks.
-5. **Evidence.** Heartbeat status, assert hits and ERROR counts in both nodes' logs, cores newer than the run.
+5. **Evidence.** Heartbeat status, assert hits and ERROR counts in the log files this run wrote, cores newer than the
+   run. Expected ERROR lines: HA mode changes (-970), the disconnects of a heartbeat stop (-989, -4).
 
 `check/<phase>.diff` is master against slave. Tables without a primary key are not replicated by CUBRID HA, so the
 diff need not be empty; the pass rule is parity: the same diffs and the same checks as the official pair.
 
-## Constraints found so far
+`FASTMIG_HA_SAME_COPY_LOG_PATH=1` puts the target pair's copied logs where the source pair's were (`ha_copy_log_base`
+= the source `CUBRID_DATABASES`; the old copied logs are moved aside): the operator who keeps `CUBRID_DATABASES`.
 
-- `db_ha_apply_info` is one of the catalog rows migrate rewrites in place (ADR 0002), so the slave target keeps the
-  source pair's applier position (`required_lsa`, `committed_lsa`) and the master's `db_creation`. The applier
-  (`log_applier.c la_get_last_ha_applied_info`) trusts such a row when its `db_creation_time` equals the copied log
-  header's, which G4 makes true; the master's new log starts at a fresh page (`copy::new_log_start`), not at those LSAs.
-- The slave's copied logs of the source pair (`<CUBRID_DATABASES>/<db>_<host>`) stay in the source `CUBRID_DATABASES`;
-  the target pair copies into a new, empty directory.
+## HA apply info is not carried
 
-## Open questions (answered by the first runs)
+`db_ha_apply_info` (`_db_ha_apply_info` in develop) holds each applier's position in its master's log, found by
+(`db_name`, `copied_log_path`) and trusted when its `db_creation_time` equals the copied log header's
+(`log_applier.c la_get_last_ha_applied_info`). G4 keeps `db_creation`, and the target log starts at a later page
+(`copy::new_log_start`), so a carried row sends the applier into a log chain the target lacks. Runs on 11.4.6 →
+develop (T1 clean), 2026-10-31:
 
-- What the develop applier does with the carried `db_ha_apply_info` row (resume, error, or wait on an LSA the new log
-  does not have). `FASTMIG_HA_RESET_APPLY_INFO=1` deletes the rows before the target pair starts, the way a slave
-  rebuilt from a backup begins; whichever the runs require becomes the documented procedure.
+| Run | Tool | Copied-log path | Result |
+|---|---|---|---|
+| run-04 | carried the row | new | row not matched; applier starts at the copied log's end; replication, failover, fail-back pass |
+| run-05 | carried the row | the source pair's | applier starts at required LSA 9205\|15704; "cannot find archive log for 9205 page", -81; slave heartbeat start fails |
+| run-06 | empties the table | the source pair's | plan "1 rows reset" on both nodes; applier starts in the new log (9265\|16240, 9266\|368); replication, failover, fail-back pass; no assert, no core |
+
+So migrate empties the table on both paths (`catalog::ha_apply_info`, ADR 0002 amendment), the start `restoreslave`
+gives a rebuilt slave. Both nodes have rows: the master's applier of the slave's log writes one too.
+
+## Other facts of the pair
+
+- `CUBRID_TMP` is `/var/tmp/cubrid` inside the node: the default `$CUBRID/tmp` under the run dir is 88 characters, the
+  PL server socket under it exceeds `sun_path` (108; the engine caps `CUBRID_TMP` at 96), and the PL server, so
+  `cub_server`, fails to start ("PL server can not be started", -113; run-01). With the short path it starts (run-02).
+- The source pair's copied logs (`<CUBRID_DATABASES>/<db>_<host>`) stay in the source `CUBRID_DATABASES`.
+
+## Not yet in run.sh
+
 - The official pair for parity (G11 (1)): the manual's HA upgrade (cubrid-manual `upgrade.rst` "HA 환경에서 DB
-  마이그레이션"): unloaddb/loaddb on the master, backupdb there, restoredb on the slave, HA conf, start. Not in run.sh
-  yet: it reuses T36's official `prepare` once that exists.
+  마이그레이션"): unloaddb/loaddb on the master, backupdb there, restoredb on the slave, HA conf, start.

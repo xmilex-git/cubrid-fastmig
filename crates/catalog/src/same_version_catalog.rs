@@ -29,6 +29,7 @@ use fastmig_progress::Meter;
 
 use crate::catalog_layout::{CatalogLayout, CatalogRecords, class_catalog_items};
 use crate::class_rows::{Row, read_rows};
+use crate::ha_apply_info;
 use crate::row_encode::encode_row;
 use crate::same_version_class_rewrite::rewrite_same_version_class;
 use crate::source_classes::{SourceClass, read_classes};
@@ -217,6 +218,21 @@ pub fn remove_deferred_rows(space: &SpaceManager, cat: &SameVersionCatalog) -> i
     }
     w.finish()?;
     Ok(deleted)
+}
+
+/// Empties the HA apply-info table of the target ([`crate::ha_apply_info`], workspace#590). Returns the rows deleted.
+pub fn reset_ha_apply_info(space: &SpaceManager, cat: &SameVersionCatalog) -> io::Result<usize> {
+    let Some(c) = ha_apply_info::class(&cat.classes, cat.line) else {
+        return Ok(0);
+    };
+    let oids = ha_apply_info::rows(space.volumes(), cat.line, &cat.classes)?;
+    if oids.is_empty() {
+        return Ok(0);
+    }
+    let mut w = HeapWriter::open(space, c.class.heap)?;
+    let n = ha_apply_info::reset(&mut w, &oids)?;
+    w.finish()?;
+    Ok(n)
 }
 
 /// Writes every class object with the rebuilt BTIDs and without the deferred indexes, in a new catalog file whose

@@ -14,9 +14,10 @@
 use fastmig_catalog::catalog_layout::{CatalogLayout, plan_catalog};
 use fastmig_catalog::catalog_write::{index_build_classes, write_bt_stats, write_catalog};
 use fastmig_catalog::free_old_files::free_old_files;
+use fastmig_catalog::ha_apply_info;
 use fastmig_catalog::page_treatment::treat_user_heaps;
 use fastmig_catalog::same_version_catalog::{
-    SameVersionCatalog, free_catalog_file, patch_heaps, remove_deferred_rows,
+    SameVersionCatalog, free_catalog_file, patch_heaps, remove_deferred_rows, reset_ha_apply_info,
     write_classes_and_catalog,
 };
 use fastmig_catalog::source_catalog::SourceCatalog;
@@ -295,6 +296,7 @@ pub struct SameVersionPrepared {
     freed_files: usize,
     reports: Vec<HeapReport>,
     deleted_rows: usize,
+    ha_apply_info_rows: usize,
 }
 
 impl SameVersionPrepared {
@@ -308,7 +310,7 @@ impl SameVersionPrepared {
 }
 
 /// The same-version (develop → develop, 11.4 → 11.4; `line` is both) first half: the catalog file and every B-tree freed, heaps patched
-/// (page-treatment phase), the deferred indexes' catalog rows removed.
+/// (page-treatment phase), the deferred indexes' catalog rows and the HA apply-info rows removed.
 pub fn same_version_prepare(
     space: &SpaceManager,
     line: VersionLine,
@@ -325,11 +327,13 @@ pub fn same_version_prepare(
     let freed_files = free_catalog_file(space)? + free_btree_files(space)?;
     let reports = patch_heaps(space, &cat, &horizon, treatment_meter)?;
     let deleted_rows = remove_deferred_rows(space, &cat)?;
+    let ha_apply_info_rows = reset_ha_apply_info(space, &cat)?;
     Ok(SameVersionPrepared {
         cat,
         freed_files,
         reports,
         deleted_rows,
+        ha_apply_info_rows,
     })
 }
 
@@ -374,6 +378,7 @@ pub fn same_version_finish(
     write_bt_stats(space, &mut layout, &|b| stats.get(&b).cloned())?;
     let mut rows_written = BTreeMap::new();
     rows_written.insert("deleted deferred-index rows", p.deleted_rows);
+    rows_written.insert(ha_apply_info::RESET_ROWS, p.ha_apply_info_rows);
     Ok(CatalogOutcome {
         freed_files: p.freed_files,
         user_heaps: p.reports.len(),

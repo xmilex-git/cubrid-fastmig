@@ -128,6 +128,10 @@ _Avoid_: 권한 누락, EXECUTE 결함
 11.2~11.4 출발의 DBLink 서버 비밀번호(`_db_server.password`)를 develop이 읽는 형식으로 바꾸는 일. 11.2~11.4는 비밀번호를 그 DB의 TDE log data key로 암호화해 두고 문자열 안의 개인 키를 비워 둔다. develop은 개인 키가 문자열에 든 형식만 읽고, 빈 키에서는 assert한다. 도구는 출발 `<db>_keys`와 keyinfo 레코드로 log key를 풀고(없으면 엔진처럼 0 키) AES 층만 벗겨 develop 형식으로 다시 감싼다. 안의 비밀번호 바이트(엔진이 섞어 둔 것)는 그대로 두고 평문을 만들지 않는다. 어느 키로도 열리지 않으면 빈 값으로 두고, plan이 경고하며 사후 정리 SQL에 값 없는 `ALTER SERVER` 주석을 낸다. 도착이 11.4이거나 develop → develop이면 형식이 같아 손대지 않는다. TDE 지원이 아니다: 암호화된 출발은 여전히 거부하고, 이 키는 서버 비밀번호에만 쓴다([workspace#556](https://github.com/xmilex-git/workspace/issues/556)).
 _Avoid_: 비밀번호 복호화, 비밀번호 이관
 
+**HA apply info 초기화 (HA apply info reset)**:
+도착 DB의 `_db_ha_apply_info`(develop 전 `db_ha_apply_info`) 행을 모두 지우는 일. 행은 HA slave의 applier가 master 로그 어디까지 적용했는지(`required_lsa` 등)를 적은 출발 로그 체인의 좌표다. 도착은 `db_creation`을 보존하고 새 로그를 뒤 페이지에서 시작하므로, 행을 옮기면 applier가 없는 로그 페이지를 찾다 멈춘다. 행이 없으면 applier는 복사된 로그 끝에서 시작한다(`restoreslave`와 같은 시작점). 버전 넘김과 같은 버전 두 경로 모두 하고, plan이 지울 행 수를 경고로 보인다. HA 쌍을 옮기는 기능이 아니다: master·slave를 각각 옮긴 뒤 운영자가 HA를 다시 구성한다([workspace#590](https://github.com/xmilex-git/workspace/issues/590), ADR 0002 보완).
+_Avoid_: HA 이관, 복제 상태 이전
+
 ## 검증과 원본 삭제
 
 **검증기 (verifier)**:

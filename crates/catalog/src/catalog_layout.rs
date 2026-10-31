@@ -7,7 +7,8 @@
 //! Input: the target's [`SpaceManager`] after [`crate::free_old_files`] and the user heaps' page treatment, the
 //! [`SourceCatalog`], the catalog template, the source's vacuum horizon, the migrate start time and the user heap
 //! statistics. Output: [`CatalogLayout`]; the root heap, the same-slot heaps and the new heaps in develop format with
-//! their rows; the catalog file allocated (its pages are written by `catalog_write`).
+//! their rows; the catalog file allocated (its pages are written by `catalog_write`); the HA apply-info rows deleted
+//! ([`crate::ha_apply_info`]).
 //! Source: workspace#482 decisions 1 (roles), 6 (heap placement), 10 (order); workspace#504 (two passes: rows name
 //! each other by OID and their lengths do not depend on OID values, so a first pass with placeholder OIDs sizes every
 //! record, its slots are reserved, and a second pass writes the real records into them; class objects are reserved
@@ -34,6 +35,7 @@ use crate::class_rows::Row;
 use crate::classify::ClassKind;
 use crate::ct_rows::ct_rows;
 use crate::disk_repr_build;
+use crate::ha_apply_info;
 use crate::record_map::{RecordMap, Unmapped};
 use crate::row_encode::encode_row;
 use crate::same_slot_rows::{
@@ -643,9 +645,22 @@ pub fn plan_catalog(
     };
     let g2 = generate(source, template, now, &mut p2).map_err(decode_err("catalog second pass"))?;
     let mut written: BTreeMap<&'static str, usize> = BTreeMap::new();
+    // the HA apply-info rows are not carried: deleted from their slots (crate::ha_apply_info, workspace#590)
+    let mut ha_rows = Vec::new();
     for (t, r) in &g2.rows {
+        if *t == SystemTable::DbHaApplyInfo {
+            ha_rows.push(r.oid);
+            continue;
+        }
         writer(&mut writers, t, line)?.place(r.oid, &encode(&g2.targets, t, r)?, mvcc_table(*t))?;
         *written.entry(table_name(*t, line)?).or_default() += 1;
+    }
+    if !ha_rows.is_empty() {
+        let w = writer(&mut writers, &SystemTable::DbHaApplyInfo, line)?;
+        written.insert(
+            ha_apply_info::RESET_ROWS,
+            ha_apply_info::reset(w, &ha_rows)?,
+        );
     }
     for (_, w) in writers {
         let hfid = w.hfid();

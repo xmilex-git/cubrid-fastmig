@@ -17,6 +17,7 @@ pub mod deferred_indexes;
 pub mod disk_repr_build;
 pub mod dry_run;
 pub mod free_old_files;
+pub mod ha_apply_info;
 pub mod identifier_lower;
 pub mod lob_dir_heap;
 pub mod output_sql;
