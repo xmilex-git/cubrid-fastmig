@@ -38,14 +38,14 @@ mapfile -t ROWS < <(awk -F'\t' -v want="${FASTMIG_LONGRUN_PATHS:-}" 'NR > 1 && (
 # and two spare, every chain at twice the grown DB, and the one restored DB at a time of the end; all sides together under the
 # cap, and twice that free on /home
 cycles=${FASTMIG_LONGRUN_CYCLES:-8} rounds=${FASTMIG_LONGRUN_ROUNDS:-30} every=${FASTMIG_LONGRUN_KILL_EVERY:-4}
-kept=${FASTMIG_LONGRUN_MAX_ARCHIVES:-40}
+kept=${FASTMIG_LONGRUN_MAX_ARCHIVES:-40} pre=${FASTMIG_LONGRUN_PREALLOC_MB:-1536}
 est=0
 for r in "${ROWS[@]}"; do
   IFS=$'\t' read -r id pr tv <<<"$r"
   p=$(du -smL "$ROOT/$pr" | cut -f1)
   lg=$(( $(stat -c %s "$(ls "$ROOT/$pr"/*_lgat | head -1)") / 1048576 ))
   grown=$(( p + cycles * rounds * GROWTH_MB ))
-  est=$(( est + 2 * (grown + (kept + 3) * lg + (cycles / every + 1) * 2 * grown + grown) ))
+  est=$(( est + 2 * (grown + pre + (kept + 3) * lg + (cycles / every + 1) * 2 * grown + grown) ))
 done
 avail=$(df -m --output=avail /home | tail -1 | tr -d ' ')
 echo "size estimate ${est} MB for ${#ROWS[@]} paths x 2 sides; cap $(( CAP_GB * 1024 )) MB; /home avail ${avail} MB"

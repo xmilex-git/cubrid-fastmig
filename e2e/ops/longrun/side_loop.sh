@@ -9,7 +9,8 @@
 #   FASTMIG_LONGRUN_CYCLES (8), FASTMIG_LONGRUN_ROUNDS (30 per cycle), FASTMIG_LONGRUN_CYCLE_SECONDS (3600),
 #   FASTMIG_LONGRUN_KILL_EVERY (4), FASTMIG_LONGRUN_PITR_CYCLE (CYCLES - 2, at least 1), FASTMIG_LONGRUN_MIN_ARCHIVES
 #   (50), FASTMIG_LONGRUN_MIN_CHECKPOINTS (100), FASTMIG_LONGRUN_STAT_SECONDS (60, the statdump window),
-#   FASTMIG_LONGRUN_MAX_ARCHIVES (40, log_max_archives),
+#   FASTMIG_LONGRUN_MAX_ARCHIVES (40, log_max_archives), FASTMIG_LONGRUN_PREALLOC_MB (1536, the volume added before the
+#   first backup),
 #   FASTMIG_LONGRUN_BREAK (pitr-extra-row), FASTMIG_OPS_WORKERS (4).
 # Output: <side out>/steps.tsv, <side out>/<side>/{hours.tsv,times.tsv,length.tsv,recovery.tsv,faults.tsv,rc,check/,
 #   log/,stat/,recovery/,server-log/,cores.txt}. Exit 0 pass, 1 fail, 2 bad arguments.
@@ -27,6 +28,7 @@ MIN_CHECKPOINTS=${FASTMIG_LONGRUN_MIN_CHECKPOINTS:-100}
 BREAK=${FASTMIG_LONGRUN_BREAK:-}
 STAT_SECONDS=${FASTMIG_LONGRUN_STAT_SECONDS:-60}
 MAX_ARCHIVES=${FASTMIG_LONGRUN_MAX_ARCHIVES:-40}
+PREALLOC_MB=${FASTMIG_LONGRUN_PREALLOC_MB:-1536}   # 1536: night run 1 grew a side by up to 237 MB in 3 cycles (~700 MB in 8)
 HERE=$(dirname "$(realpath "$0")")
 OPS=$(realpath "$HERE/..")
 . "$OPS/sides.sh"
@@ -35,7 +37,7 @@ OPS=$(realpath "$HERE/..")
 
 case "$S" in migrated | official) ;; *) echo "side must be migrated or official" >&2; exit 2 ;; esac
 case "$BREAK" in "" | pitr-extra-row) ;; *) echo "unknown FASTMIG_LONGRUN_BREAK" >&2; exit 2 ;; esac
-for v in "$CYCLES" "$ROUNDS" "$CYCLE_SECONDS" "$KILL_EVERY" "$PITR_CYCLE" "$STAT_SECONDS" "$MAX_ARCHIVES"; do
+for v in "$CYCLES" "$ROUNDS" "$CYCLE_SECONDS" "$KILL_EVERY" "$PITR_CYCLE" "$STAT_SECONDS" "$MAX_ARCHIVES" "$PREALLOC_MB"; do
   [[ "$v" =~ ^[1-9][0-9]*$ ]] || { echo "cycles, rounds, seconds, kill period and PITR cycle are positive integers" >&2; exit 2; }
 done
 (( PITR_CYCLE <= CYCLES )) || { echo "PITR cycle $PITR_CYCLE beyond $CYCLES cycles" >&2; exit 2; }
@@ -67,6 +69,11 @@ finish() {   # finish <rc>: the side's DB deleted (volumes, log, the backups the
 
 step prepare 0 "prepare_$SIDE" || finish 1
 printf 'moved\t%s\t0\t-\t-\n' "$(date +%s)" >>"$OUT/$SIDE/times.tsv"
+# room for the whole run before the first backup: a volume that grows or is added after a chain's level 0 breaks the
+# restore of that chain's level 1 and 2 (engine defect workspace#601: an incremental backup leaves out pages with a
+# NULL LSA, and the restore fills them only from level 0). One generic volume of PREALLOC_MB, the same on both sides,
+# keeps every volume as the level 0s saw it
+step prealloc 0 cubrid addvoldb -S --db-volume-size="${PREALLOC_MB}M" "$DB" || finish 1
 step server-start 0 start || finish 1
 step check-baseline 0 check baseline
 step c00-backup 0 backup_cycle 0 || finish 1

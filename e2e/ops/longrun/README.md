@@ -43,6 +43,7 @@ migrated, row 1 official, row 2 migrated, row 2 official.
 | `FASTMIG_LONGRUN_MIN_CHECKPOINTS` | `100` | checkpoints a side must complete, over all its server lifetimes |
 | `FASTMIG_LONGRUN_STAT_SECONDS` | `60` | window of the statdump in each snapshot (§ One side, Counters) |
 | `FASTMIG_LONGRUN_MAX_ARCHIVES` | `40` | `log_max_archives` of every side (§ One side, Archives) |
+| `FASTMIG_LONGRUN_PREALLOC_MB` | `1536` | size of the volume each side adds before its first backup (§ One side, Volumes) |
 | `FASTMIG_LONGRUN_CAP_GB` | `50` | disk cap of the size estimate (§ Disk) |
 | `FASTMIG_LONGRUN_GROWTH_MB` | `2` | MB one DML round adds to a side, for the estimate (§ Disk) |
 | `FASTMIG_LONGRUN_BREAK` | none | `pitr-extra-row`: § Fail-before probe |
@@ -78,6 +79,15 @@ current chain. Volume names are `<db>_bk<level>v<unit>` (file_io.c), so a later 
 chain stays whole; one directory per chain because a level 0 would overwrite the level-0 volume an earlier PITR needs.
 restoredb reads only the level 0 unless `-l` is given (util_admin.c, logpb_restore), so the `latest` and `pitr` probes
 pass the level of the chain's last backup before their time.
+
+**Volumes.** Right after the move each side adds one generic volume of `PREALLOC_MB` (`addvoldb -S`, step `prealloc`),
+before its first backup, so no volume grows or is added during the run. A volume that grows or is added after a
+chain's level 0 breaks the restore of that chain's levels 1 and 2: an incremental backup leaves out pages whose LSA is
+still NULL, and restoredb fills them only from level 0 (engine defect
+[workspace#601](https://github.com/xmilex-git/workspace/issues/601), develop and 11.4.6; optdebug asserts in
+`pgbuf_set_bcb_page_vpid`, release skips the pages). An operator who takes incremental backups pre-sizes volumes the
+same way. Night run 1 grew a side by up to 237 MB in three cycles (64 and 128 MB steps), so 1536 MB covers 8 cycles
+with margin. Night runs 1 and 2 (stopped at cycles 3 and 1) ran without this step.
 
 **Archives.** The engine deletes archives beyond `log_max_archives` without regard to backups
 (`logpb_remove_archive_logs_exceed_limit`), and a restore stops at a missing one (restoredb asks for it, reads EOF from
@@ -169,10 +179,10 @@ and start restored DBs on ports already released.
 
 ## Disk
 
-Per side: `grown = pristine + cycles × rounds × GROWTH_MB`, plus `(MAX_ARCHIVES + 3) × active log` (the kept
+Per side: `grown = pristine + cycles × rounds × GROWTH_MB`, plus `PREALLOC_MB`, plus `(MAX_ARCHIVES + 3) × active log` (the kept
 archives, the active log and two spare), plus `(cycles / KILL_EVERY + 1) × 2 × grown` for the chains, plus `1 × grown` for the one restored DB of § End that exists at a time. Every side added up must stay under
 `FASTMIG_LONGRUN_CAP_GB`, and `/home` must have twice that free, or `run.sh` exits 2. T1 baseline (465 MB, 64 MB log),
-defaults: about 10.3 GB per side, 41 GB in all (cap 50 GB, map supervisor 2026-10-31). `GROWTH_MB` 2 is an upper estimate of a round's net rows (orders
+defaults: about 11.8 GB per side, 47 GB in all (cap 50 GB, map supervisor 2026-10-31). `GROWTH_MB` 2 is an upper estimate of a round's net rows (orders
 +1800, items +5400, audit +2000, event_log +1000 × 400 B, with indexes); `hours.tsv` `volume_mb` measures it.
 `deletedb -d` at a side's end removes its volumes, log and the backups its log lists; the older chains and the
 install copies stay in `<out>` for the caller to remove by literal
