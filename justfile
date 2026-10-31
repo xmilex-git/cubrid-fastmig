@@ -49,3 +49,11 @@ e2e PRISTINE TARGET_VERSION OUT: release
 # Operations scenario on both sides with parity (e2e/ops/README.md); needs FASTMIG_OPS_INSTALL, FASTMIG_OPS_PORT, FASTMIG_OPS_SERVER_CTL.
 ops PRISTINE TARGET_VERSION OUT *ROUNDS: release
     bash e2e/ops/run.sh target/release/cubrid-fastmig {{PRISTINE}} {{TARGET_VERSION}} {{OUT}} {{ROUNDS}}
+
+# One lane of the T37 version matrix (e2e/ops-matrix/README.md); needs FASTMIG_OPS_INSTALL, FASTMIG_OPS_PORT, FASTMIG_OPS_SERVER_CTL.
+ops-matrix LANE OUT_ROOT *IDS: release
+    bash e2e/ops-matrix/run_lane.sh target/release/cubrid-fastmig {{LANE}} {{OUT_ROOT}} {{IDS}}
+
+# The pass table of the version matrix from its runs, on stdout (docs/ops-verification.md).
+ops-matrix-summary OUT_ROOT:
+    bash e2e/ops-matrix/summarize.sh {{OUT_ROOT}}

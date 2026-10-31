@@ -1,0 +1,24 @@
+# The T37 version matrix (workspace#589, G11 workspace#587 decision 2): one row per run of e2e/ops/run.sh.
+# size: small = <FASTMIG_OPS_MATRIX_BASEDB_ROOT>, big = <FASTMIG_OPS_MATRIX_BIG_ROOT>; the pristine is <root>/<label>/pristine/<variant>.
+# lob_base: FASTMIG_OPS_LOB_BASE under that root, required for a 10.2..11.3 source (its locators are absolute under
+#   the base it was built in, e2e/README.md); "-" = none. rounds, min_archives: "-" = the runner's default.
+# id	label	variant	target	size	lob_base	rounds	min_archives
+102-dev-clean	10.2	clean	develop	small	10.2/clean/lob	-	-
+102-dev-dirty	10.2	dirty	develop	small	10.2/dirty/lob	-	-
+112-dev-clean	11.2	clean	develop	small	11.2/clean/lob	-	-
+112-dev-dirty	11.2	dirty	develop	small	11.2/dirty/lob	-	-
+113-dev-clean	11.3	clean	develop	small	11.3/clean/lob	-	-
+113-dev-dirty	11.3	dirty	develop	small	11.3/dirty/lob	-	-
+114-dev-clean	11.4	clean	develop	small	-	-	-
+114-dev-dirty	11.4	dirty	develop	small	-	-	-
+dev-dev-clean	develop	clean	develop	small	-	-	-
+dev-dev-dirty	develop	dirty	develop	small	-	-	-
+102-114-clean	10.2	clean	11.4	small	10.2/clean/lob	-	-
+102-114-dirty	10.2	dirty	11.4	small	10.2/dirty/lob	-	-
+112-114-clean	11.2	clean	11.4	small	11.2/clean/lob	-	-
+112-114-dirty	11.2	dirty	11.4	small	11.2/dirty/lob	-	-
+113-114-clean	11.3	clean	11.4	small	11.3/clean/lob	-	-
+113-114-dirty	11.3	dirty	11.4	small	11.3/dirty/lob	-	-
+114-114-clean	11.4	clean	11.4	small	-	-	-
+114-114-dirty	11.4	dirty	11.4	small	-	-	-
+114-dev-big	11.4	clean	develop	big	-	1	0
