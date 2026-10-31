@@ -112,7 +112,11 @@ checks() {
   local i
   [ -n "${FASTMIG_HA_CHECKS:-}" ] || { echo "FASTMIG_HA_CHECKS unset: no checks"; return 0; }
   # -N: no column headers, as T36 runs checks.sql (217b108)
-  for i in 0 1; do sql "$i" "$2" "$FASTMIG_HA_CHECKS" -N >"$OUT/check/$1-${H[i]}.out" || return 1; done
+  # an index whose count differs from its heap fails the phase, as T36 `check` does
+  for i in 0 1; do
+    sql "$i" "$2" "$FASTMIG_HA_CHECKS" -N >"$OUT/check/$1-${H[i]}.out" || return 1
+    ! grep -q 'INDEX!=HEAP' "$OUT/check/$1-${H[i]}.out" || return 1
+  done
   diff "$OUT/check/$1-${H[0]}.out" "$OUT/check/$1-${H[1]}.out" >"$OUT/check/$1.diff"
   return 0
 }
@@ -252,7 +256,7 @@ step tgt-dml 0 dml 0 tgt
 step tgt-sync 0 sync_mark 0 1 tgt tgt-dml
 step tgt-checks 0 checks target tgt
 
-# ---- 4. failover to the slave, DML there, fail back -----------------------------------------------------------------
+# ---- 4. failover to the slave, DML there, the old master rejoins as the slave ------------------------------------
 step fo-hb-stop-master 0 hb 0 tgt stop
 step fo-mode-new-master 0 wait_mode 1 tgt active
 step fo-dml 0 dml 1 tgt
@@ -262,19 +266,39 @@ step fo-pl-old-master 0 wait_pl 0
 step fo-sync 0 sync_mark 1 0 tgt failover
 step fo-checks 0 checks failover tgt
 
-# ---- 5. evidence: server and HA logs, asserts, cores of this run ----------------------------------------------------
+# ---- 5. failback (cubrid-manual ko/ha.rst "서버 failback"): stop the new master, the old master turns active, the new
+#      master starts again as the slave ----------------------------------------------------------
+step fb-hb-stop-new-master 0 hb 1 tgt stop
+step fb-mode-master 0 wait_mode 0 tgt active
+step fb-hb-start-slave 0 hb 1 tgt start
+step fb-mode-slave 0 wait_mode 1 tgt standby
+step fb-pl-slave 0 wait_pl 1
+step fb-sync 0 sync_mark 0 1 tgt failback
+step fb-checks 0 checks failback tgt
+
+# ---- 6. evidence: server and HA logs, asserts, cores of this run ----------------------------------------------------
 evidence() {
-  local i d
+  local i d asserts cores
   for i in 0 1; do
     d=$(nd "$i")
     hb "$i" tgt status
-    # only log files this run wrote: the install copies carry older runs' logs
-    find "$d/src-install/log" "$d/tgt-install/log" -type f -newermt "@$START_EPOCH" -exec grep -il assert {} + | sed "s|^|assert-in: |"
+  done
+  # assert hits: the log files this run wrote (the install copies carry older runs' logs; the official side has no
+  # src-install) and the step outputs, where a server that asserts while starting prints it
+  asserts=$( (for i in 0 1; do d=$(nd "$i")
+    find "$d/src-install/log" "$d/tgt-install/log" -type f -newermt "@$START_EPOCH" 2>/dev/null; done
+    ls "$OUT"/log/*.log) | xargs -r grep -il assert | grep -v '/log/evidence\.log$')
+  [ -z "$asserts" ] || printf 'assert-in: %s\n' $asserts
+  for i in 0 1; do
+    d=$(nd "$i")
     find "$d/tgt-install/log/server" -type f -name '*.err' -newermt "@$START_EPOCH" -exec cat {} + | grep -c 'ERROR' \
       | sed "s|^|${H[i]} error lines |"
   done
-  # cores are matched to this run's processes by the reader (pid in the name, cubrid-diagnose P13)
-  find /data/core/ -maxdepth 1 -name 'core.cub*' -newermt "@$START_EPOCH" -printf 'core: %p\n'
+  # core_pattern core.%e.%p.%h.%t: %h is the node's host name, so other sessions' cores on this host do not count
+  cores=$(find /data/core/ -maxdepth 1 \( -name "core.*.${H[0]}.*" -o -name "core.*.${H[1]}.*" \) -newermt "@$START_EPOCH")
+  [ -z "$cores" ] || printf 'core: %s\n' $cores
+  # G11: no assert and no core
+  [ -z "$asserts" ] && [ -z "$cores" ]
 }
 step evidence 0 evidence
 step tgt-hb-stop-slave 0 hb 1 tgt stop

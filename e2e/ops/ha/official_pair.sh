@@ -46,5 +46,9 @@ official_pair() {
   local s; s=$(nd 1)
   printf '%s\t%s\tlocalhost\t%s\tfile:%s/lob\n' "$DB" "$s/tgt" "$s/tgt" "$s/tgt" >"$s/tgt-dbs/databases.txt"
   [ ! -d "$m/tgt/java" ] || cp -a "$m/tgt/java" "$s/tgt/" || return 1
-  node_sh 1 $(tgt_env 1) "cubrid restoredb -u -B '$m/backup' $DB"
+  node_sh 1 $(tgt_env 1) "cubrid restoredb -u -B '$m/backup' $DB" || return 1
+  # every volume and log the slave's _vinf names is under the slave's directory: two servers on one file would agree
+  # in every check (common.md _vinf rule; restoredb -u moves volumes to the databases.txt paths)
+  cat "$s/tgt/${DB}_vinf"
+  ! grep -v " $s/tgt/" "$s/tgt/${DB}_vinf"
 }

@@ -57,8 +57,15 @@ of the baseline size).
    modes, the slave's `db_ha_apply_info` at start, sync, DML rounds, sync, checks.
 4. **Failover.** Heartbeat stop on the master; the slave turns `active`; DML there; heartbeat start on the old master,
    which comes back `standby`; sync from the new master; checks.
-5. **Evidence.** Heartbeat status, assert hits and ERROR counts in the log files this run wrote, cores newer than the
-   run. Expected ERROR lines: HA mode changes (-970), the disconnects of a heartbeat stop (-989, -4).
+5. **Failback** (cubrid-manual `ko/ha.rst` "서버 failback"). Heartbeat stop on the new master; the old master turns
+   `active`; heartbeat start on the other node, which comes back `standby`; sync; checks. The pair ends in its first
+   roles.
+6. **Evidence.** Heartbeat status; assert hits in the log files this run wrote and in the step outputs; cores of the two
+   nodes (core_pattern `%h` = node host name); the step fails on any assert or core. ERROR counts are listed only:
+   expected ones are HA mode changes (-970) and the disconnects of a heartbeat stop (-989, -4).
+
+A phase whose `checks.sql` output holds `INDEX!=HEAP` fails, as in T36. The official slave's `_vinf` is printed and
+must name only the slave's directory.
 
 `check/<phase>.diff` is master against slave. CUBRID HA synchronizes only tables with a primary key (cubrid-manual
 `ko/ha.rst` "테이블 기본키(primary key)"), so the diff need not be empty: on T1 it lists `session_hash`,
