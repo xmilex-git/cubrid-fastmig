@@ -49,11 +49,11 @@ Columns: *Steps* = failed / all step and check rows of both sides; *Parity* = di
 | `112-114-dirty` | 11.2 → 11.4 | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
 | `113-114-clean` | 11.3 → 11.4 | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (4) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
 | `113-114-dirty` | 11.3 → 11.4 | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 |  |
-| `114-114-clean` | 11.4 → 11.4 | clean | 6 | 0 / 54 | 0 / 11 | 0/0/0/0/0, 0/0/0/0/0 | 3 (4) / 2 | pass (`run-01`) |  | run-01 only (binary cb5eae54…, before T41 and #600; #600 does not apply to 11.4 → 11.4) |
-| `114-114-dirty` | 11.4 → 11.4 | dirty | 6 | 0 / 54 | 0 / 11 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-01`) |  | run-01 only (binary cb5eae54…, before T41 and #600; #600 does not apply to 11.4 → 11.4) |
+| `114-114-clean` | 11.4 → 11.4 | clean | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (4) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 | run-02 on main 02f7429 (same binary e462cb6a… as run-02) adds the official-unload-comparison step run-01 did not have |
+| `114-114-dirty` | 11.4 → 11.4 | dirty | 6 | 0 / 56 | 0 / 12 | 0/0/0/0/0, 0/0/0/0/0 | 3 (3) / 2 | pass (`run-02`) | run-01 rc 0, PL 0 | run-02 on main 02f7429 (same binary e462cb6a… as run-02) adds the official-unload-comparison step run-01 did not have |
 | `114-dev-big` | 11.4 → develop | clean (4.2 GB) | 1 | 0 / 56 | 0 / 12 | 0/0/0/0/2, 0/0/0/0/1 | 65 (82) / 0 | pass (`run-01`) |  |  |
 
-Runs: `runs`, the highest `run-NN` per row; generated 2026-11-01T02:37:39+09:00 by e2e/ops-matrix/summarize.sh.
+Runs: `runs`, the highest `run-NN` per row; generated 2026-11-01T03:06:27+09:00 by e2e/ops-matrix/summarize.sh.
 
 ## HA
 
