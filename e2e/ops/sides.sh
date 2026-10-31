@@ -1,11 +1,14 @@
-# The two sides of a parity run, shared by the operations scenario runner (run.sh) and the application query driver
-# (queries/run.sh): argument and environment setup, timed steps, the server of a side, and the preparation of each side
-# (side "migrated": cubrid-fastmig; side "official": source unloaddb -> target loaddb). Sourced; defines functions only.
+# The two sides of a parity run, shared by the operations scenario runner (run.sh), the application query driver
+# (queries/run.sh) and the long run (longrun/side_loop.sh): argument and environment setup, timed steps, the server of a
+# side, the preparation of each side (side "migrated": cubrid-fastmig; side "official": source unloaddb -> target
+# loaddb), the scenario pieces (checks, DML rounds, kill -9, archives) and the fault counts. Sourced; defines functions only.
 #
 # ops_setup <bin> <pristine dir> <target version> <out dir> sets the globals every function here reads: BIN PRISTINE TV
 # OUT INST PORT CTL W DB LABEL REF and the install's environment, writes the install's cubrid.conf and changes into <out>.
-# side_begin/side_end bracket the steps of one side. Interface and env: e2e/ops/README.md.
-# Source: G12 workspace#587, T36 workspace#588 (runner), T40 workspace#595 (split out for the query driver).
+# side_begin/side_end bracket the steps of one side; side_faults counts its faults so far. Interface and env:
+# e2e/ops/README.md.
+# Source: G12 workspace#587, T36 workspace#588 (runner), T40 workspace#595 (split out for the query driver), T39
+# workspace#594 (scenario pieces and side_faults for the long run).
 
 # ops_setup <bin> <pristine> <target version> <out>: exits 2 on bad arguments or an existing <out>
 ops_setup() {
@@ -82,6 +85,12 @@ start() {
   UP=1
   [ -f "$PRISTINE/java/FmHello.class" ] || return 0
   local i
+  # first the PL server's socket in LISTEN (pl_comm.c: $CUBRID_TMP/sp_<db>.sock; the file alone may be one a kill -9
+  # left behind), then the SP call itself
+  for ((i = 0; i < 30; i++)); do
+    ss -xl | grep -qF "$CUBRID_TMP/sp_$DB.sock" && break
+    sleep 2
+  done
   for ((i = 0; i < 30; i++)); do
     csql -C -u dba -t -c "SELECT dba.fm_hello('ready') FROM db_root" "$DB" 2>&1 | grep -q 'hello ready' && return 0
     sleep 2
@@ -97,6 +106,55 @@ stop_master() {
     tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -qx "CUBRID=$INST" && { echo "SIGTERM $p $(cat /proc/$p/comm)"; kill -TERM "$p"; }
   done
   timeout 30 bash -c "while [ -n \"\$(ss -ltn 'sport = :$PORT' | tail -n +2)\" ]; do sleep 1; done" || echo "port $PORT still listening"
+}
+
+# round_files: ROUND_FILES, the DML round of this source: synonyms from 11.2, PL/CSQL from 11.4 (basedb per-label
+# overrides). The scenario functions below read OPS (e2e/ops) from the caller.
+round_files() {
+  ROUND_FILES=("$OPS/dml/round.sql")
+  case "$LABEL" in 11.2 | 11.3 | 11.4 | develop) ROUND_FILES+=("$OPS/dml/round_synonym.sql") ;; esac
+  case "$LABEL" in 11.4 | develop) ROUND_FILES+=("$OPS/dml/round_plcsql.sql") ;; esac
+}
+
+# checks.sql after a scenario step into <side>/check/<step>.out; fails on an error or an index that differs from its heap.
+# Always in CS mode (the Java SP of checks.sql runs in the server's PL process): a stopped server is started around it.
+check() {
+  local name=$1 f=$OUT/$SIDE/check/$1.out was=$UP rc
+  [ "$was" = 1 ] || start || return 1
+  sql_file -C "$OPS/checks.sql" -N >"$f" && ! grep -q "INDEX!=HEAP" "$f"
+  rc=$?
+  [ "$was" = 1 ] || stop || return 1
+  return $rc
+}
+scenario_step() {   # scenario_step <name> <cmd...>: the step, then its checks as step check-<name>
+  local name=$1; shift
+  step "$name" 0 "$@"
+  step "check-$name" 0 check "$name"
+}
+
+kill9_server() {   # kill -9 of this side's server and of the cub_pl it leaves; the next boot runs crash recovery
+  local p; p=$(server_pid)
+  [ -n "$p" ] || { echo "no cub_server of $DB"; return 1; }
+  echo "kill -9 $p"; kill -9 "$p"
+  timeout 60 bash -c "while kill -0 $p 2>/dev/null; do sleep 1; done" || return 1
+  # what else of this side still runs (the server's cub_pl outlives it): listed, then killed as a crash would leave it
+  local q
+  for q in $(pgrep -x cub_pl); do
+    tr '\0' '\n' <"/proc/$q/environ" 2>/dev/null | grep -qx "CUBRID_DATABASES=$CUBRID_DATABASES" || continue
+    echo "left after the kill: $q $(cat /proc/$q/comm), kill -9"; kill -9 "$q"
+    timeout 60 bash -c "while kill -0 $q 2>/dev/null; do sleep 1; done" || return 1
+  done
+  UP=0
+}
+kill9_restart() { kill9_server && start; }   # the restart runs crash recovery in the server
+dml_rounds() {   # dml_rounds <n>: n DML rounds, every file of this source
+  local i f
+  for ((i = 1; i <= $1; i++)); do
+    for f in "${ROUND_FILES[@]}"; do echo "round $i $(basename "$f")"; sql_file -C "$f" || return 1; done
+  done
+}
+last_archive() {   # number of the newest log archive of this side, -1 when none
+  ls "$SIDE_DB" 2>/dev/null | sed -n "s/^${DB}_lgar\([0-9][0-9]*\)\$/\1/p" | sort -n | tail -1 | awk '{ n = $1 + 0 } END { print NR ? n : -1 }'
 }
 
 # prepare_migrated: reflink copy -> migrate --verify -> the SQL migrate leaves for the user (as e2e/run.sh)
@@ -170,26 +228,41 @@ side_begin() {
   find "$INST/log" -type f -printf '%s\t%p\n' >"$OUT/$SIDE/log-sizes"
 }
 
-# side_end: the side's server log lines into <side>/server-log/ and one row of <out>/server-log-summary.tsv.
-# Server error log lines; asserts in those logs and in the steps' own output (a server that asserts while it starts
-# prints it to the start output); cores of any process of this side: a core under core_pattern written while the
-# side ran whose memory holds this side's CUBRID_DATABASES (servers and SA utilities alike, whatever their pid)
-side_end() {
-  local errs asserts pl_drops cores=0 c cdir f old
+# side_faults: what this side added to the install's logs since side_begin, copied to <side>/server-log/ (refreshed on
+# every call), and prints "error_lines assert_lines cores pl_drops session_expired". Server error log lines; asserts in
+# those logs and in the steps' own output (a server that asserts while it starts prints it to the start output); cores
+# of any process of this side: a core under core_pattern written while the side ran whose memory holds this side's
+# CUBRID_DATABASES (servers and SA utilities alike, whatever their pid), listed in <side>/cores.txt. The long run calls
+# it every cycle. session_expired: the server's "-1066 Session expired" error lines (session.c), not counted as error
+# lines: an engine defect of develop and 11.4.6 alike, one line per csql session that ran a join with a GROUP BY sort,
+# on both sides and on a source never migrated (workspace#594 smoke, T40 workspace#595).
+side_faults() {
+  local errs asserts pl_drops expired cores=0 c cdir f old
   mkdir -p "$OUT/$SIDE/server-log"
   for f in $(find "$INST/log" -type f -newer "$OUT/$SIDE/start-marker" 2>/dev/null); do
     old=$(awk -F'\t' -v p="$f" '$2 == p { print $1 }' "$OUT/$SIDE/log-sizes")
     tail -c +$(( ${old:-0} + 1 )) "$f" >"$OUT/$SIDE/server-log/$(basename "$f")"
   done
-  errs=$(cat /dev/null "$OUT/$SIDE"/server-log/* | grep -c 'ERROR \*\*\*')
+  expired=$(cat /dev/null "$OUT/$SIDE"/server-log/* | grep -c "ERROR \*\*\* file .*/session\.c, line [0-9]* ERROR CODE = -1066,")
+  errs=$(( $(cat /dev/null "$OUT/$SIDE"/server-log/* | grep -c "ERROR \*\*\*") - expired ))
   asserts=$(cat /dev/null "$OUT/$SIDE"/server-log/* "$OUT/$SIDE"/log/*.log | grep -c 'Assertion .* failed')
   # a PL server that drops mid-run (README § Known flakes) fails the run through its error lines; counted apart
   pl_drops=$(cat /dev/null "$OUT/$SIDE"/server-log/*.err | grep -c "^Networking with PL server failed")
   cdir=$(dirname "$(cat /proc/sys/kernel/core_pattern)")
-  for c in $(find "$cdir" -maxdepth 1 -name 'core.*' -newer "$OUT/$SIDE/start-marker" 2>/dev/null); do
-    grep -aqF "CUBRID_DATABASES=$CUBRID_DATABASES" "$c" && { cores=$((cores + 1)); echo "$SIDE $c" >>"$OUT/cores.txt"; }
+  : >"$OUT/$SIDE/cores.txt"
+  # -H: core_pattern's directory may be a symlink (/data/core -> /bench/ssd/core on the dev host)
+  for c in $(find -H "$cdir" -maxdepth 1 -name 'core.*' -newer "$OUT/$SIDE/start-marker" 2>/dev/null); do
+    grep -aqF "CUBRID_DATABASES=$CUBRID_DATABASES" "$c" && { cores=$((cores + 1)); echo "$SIDE $c" >>"$OUT/$SIDE/cores.txt"; }
   done
-  [ -s "$OUT/server-log-summary.tsv" ] || printf 'side\terror_lines\tassert_lines\tcores\tpl_drops\n' >"$OUT/server-log-summary.tsv"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$SIDE" "$errs" "$asserts" "$cores" "$pl_drops" >>"$OUT/server-log-summary.tsv"
+  echo "$errs $asserts $cores $pl_drops $expired"
+}
+
+# side_end: side_faults once more, its cores appended to <out>/cores.txt and one row of <out>/server-log-summary.tsv
+side_end() {
+  local errs asserts cores pl_drops expired
+  read -r errs asserts cores pl_drops expired < <(side_faults)
+  cat "$OUT/$SIDE/cores.txt" >>"$OUT/cores.txt"
+  [ -s "$OUT/server-log-summary.tsv" ] || printf 'side\terror_lines\tassert_lines\tcores\tpl_drops\tsession_expired\n' >"$OUT/server-log-summary.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$SIDE" "$errs" "$asserts" "$cores" "$pl_drops" "$expired" >>"$OUT/server-log-summary.tsv"
   [ "$errs$asserts$cores" = 000 ] || { FAIL=1; echo "$SIDE: server error lines $errs (PL server drops $pl_drops), asserts $asserts, cores $cores" >&2; }
 }

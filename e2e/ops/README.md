@@ -115,6 +115,7 @@ the DML by `checks.sql` only.
 <out>/<side>/server-log/        the install's log files written while the side ran
 <out>/parity/<step>.diff        diff of the two sides' check/<step>.out; empty = same
 <out>/server-log-summary.tsv    side  error_lines ("ERROR ***")  assert_lines  cores (any process of the side)  pl_drops
+                                session_expired (the -1066 lines, not in error_lines: § Engine facts)
 <out>/archives.tsv              side  last_archive_before  last_archive_after   (numbers of <db>_lgarNNN, -1 = none;
                                 before = at baseline, after = after dml-after-backup)
 ```
@@ -125,8 +126,10 @@ from `steps.tsv`, `archives.tsv` and `server-log-summary.tsv`.
 ## Reuse
 
 The side functions (argument setup, timed steps, server start and stop, `prepare_migrated`, `prepare_official`, the
-server log summary) live in [sides.sh](sides.sh), which the application query driver [queries/](queries/README.md)
-(T40 [workspace#595](https://github.com/xmilex-git/workspace/issues/595)) sources too.
+server log summary, and the scenario pieces: checks, DML rounds, kill -9, archive numbers, fault counts) live in
+[sides.sh](sides.sh), which the application query driver [queries/](queries/README.md) (T40
+[workspace#595](https://github.com/xmilex-git/workspace/issues/595)) and the long run [longrun/](longrun/README.md) (T39
+[workspace#594](https://github.com/xmilex-git/workspace/issues/594)) source too.
 
 ### HA (T38)
 
@@ -167,7 +170,13 @@ DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G12 5).
 - **`auto_restart_server=no`**: otherwise the master revives the server `kill9-recovery` kills, and the runner's own
   start then finds the DB in use.
 - **PL server start**: the server reports started before its PL server accepts calls, so `start` waits up to 60 s
-  for `dba.fm_hello`.
+  for its socket to listen and then for `dba.fm_hello`.
+- **"-1066 Session expired"** error lines (session.c) come from the engine, on both sides and on a source never
+  migrated: one per csql session that ran a join with a GROUP BY sort (develop 682b080b2 and 11.4.6; T40
+  [workspace#595](https://github.com/xmilex-git/workspace/issues/595)). `server-log-summary.tsv` counts them as
+  `session_expired` and leaves them out of `error_lines`.
+- **core_pattern's directory may be a symlink** (`/data/core` on the dev host): cores are found with `find -H`; before
+  2026-10-31 the runner found none there (workspace#594), so the core counts of earlier runs are not evidence.
 
 ## Known flakes
 

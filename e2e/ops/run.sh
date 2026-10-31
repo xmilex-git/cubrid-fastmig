@@ -20,52 +20,7 @@ MIN_ARCHIVES=${FASTMIG_OPS_MIN_ARCHIVES:-2}
 case "${FASTMIG_OPS_BREAK:-}" in "" | official-extra-row) ;; *) echo "unknown FASTMIG_OPS_BREAK" >&2; exit 2 ;; esac
 ops_setup "$@"
 
-# the DML round of this source: synonyms from 11.2, PL/CSQL from 11.4 (basedb per-label overrides)
-ROUND_FILES=("$OPS/dml/round.sql")
-case "$LABEL" in 11.2 | 11.3 | 11.4 | develop) ROUND_FILES+=("$OPS/dml/round_synonym.sql") ;; esac
-case "$LABEL" in 11.4 | develop) ROUND_FILES+=("$OPS/dml/round_plcsql.sql") ;; esac
-
-# checks.sql after a scenario step into <side>/check/<step>.out; fails on an error or an index that differs from its heap.
-# Always in CS mode (the Java SP of checks.sql runs in the server's PL process): a stopped server is started around it.
-check() {
-  local name=$1 f=$OUT/$SIDE/check/$1.out was=$UP rc
-  [ "$was" = 1 ] || start || return 1
-  sql_file -C "$OPS/checks.sql" -N >"$f" && ! grep -q "INDEX!=HEAP" "$f"
-  rc=$?
-  [ "$was" = 1 ] || stop || return 1
-  return $rc
-}
-scenario_step() {   # scenario_step <name> <cmd...>: the step, then its checks as step check-<name>
-  local name=$1; shift
-  step "$name" 0 "$@"
-  step "check-$name" 0 check "$name"
-}
-
-
-kill9_restart() {   # kill -9 of this side's server, then a start: the restart runs crash recovery
-  local p; p=$(server_pid)
-  [ -n "$p" ] || { echo "no cub_server of $DB"; return 1; }
-  echo "kill -9 $p"; kill -9 "$p"
-  timeout 60 bash -c "while kill -0 $p 2>/dev/null; do sleep 1; done" || return 1
-  # what else of this side still runs (the server's cub_pl outlives it): listed, then killed as a crash would leave it
-  local q
-  for q in $(pgrep -x cub_pl); do
-    tr '\0' '\n' <"/proc/$q/environ" 2>/dev/null | grep -qx "CUBRID_DATABASES=$CUBRID_DATABASES" || continue
-    echo "left after the kill: $q $(cat /proc/$q/comm), kill -9"; kill -9 "$q"
-    timeout 60 bash -c "while kill -0 $q 2>/dev/null; do sleep 1; done" || return 1
-  done
-  UP=0; start
-}
-dml_rounds() {   # dml_rounds <n>: n DML rounds, every file of this source
-  local i f
-  for ((i = 1; i <= $1; i++)); do
-    for f in "${ROUND_FILES[@]}"; do echo "round $i $(basename "$f")"; sql_file -C "$f" || return 1; done
-  done
-}
-last_archive() {   # number of the newest log archive of this side, -1 when none
-  ls "$SIDE_DB" 2>/dev/null | sed -n "s/^${DB}_lgar\([0-9][0-9]*\)\$/\1/p" | sort -n | tail -1 | awk '{ n = $1 + 0 } END { print NR ? n : -1 }'
-}
-
+round_files
 
 # run_side <side>: prepare, then the scenario steps with their checks; leaves the side's DB deleted
 run_side() {
@@ -100,7 +55,7 @@ run_side() {
   echo "pre: $(date -Is) load=$(cut -d' ' -f1-3 /proc/loadavg) home=[$(df -h /home | awk 'NR == 2 { print $4 " avail" }')]"
 } >"$OUT/meta.txt"
 printf 'side\tstep\tseconds\trc\n' >"$OUT/steps.tsv"
-printf 'side\terror_lines\tassert_lines\tcores\tpl_drops\n' >"$OUT/server-log-summary.tsv"
+printf 'side\terror_lines\tassert_lines\tcores\tpl_drops\tsession_expired\n' >"$OUT/server-log-summary.tsv"
 printf 'side\tlast_archive_before\tlast_archive_after\n' >"$OUT/archives.tsv"
 
 for s in migrated official; do
