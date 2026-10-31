@@ -1,7 +1,7 @@
 # The two sides of a parity run, shared by the operations scenario runner (run.sh), the application query driver
 # (queries/run.sh) and the long run (longrun/side_loop.sh): argument and environment setup, timed steps, the server of a
 # side, the preparation of each side (side "migrated": cubrid-fastmig; side "official": source unloaddb -> target
-# loaddb), the scenario pieces (checks, DML rounds, kill -9, archives) and the fault counts. Sourced; defines functions only.
+# loaddb), the scenario pieces (checks, DML rounds, kill -9, archives) and the fault counts. Sourced; defines functions (and OPS when unset).
 #
 # ops_setup <bin> <pristine dir> <target version> <out dir> sets the globals every function here reads: BIN PRISTINE TV
 # OUT INST PORT CTL W DB LABEL REF and the install's environment, writes the install's cubrid.conf and changes into <out>.
@@ -9,6 +9,9 @@
 # e2e/ops/README.md.
 # Source: G12 workspace#587, T36 workspace#588 (runner), T40 workspace#595 (split out for the query driver), T39
 # workspace#594 (scenario pieces and side_faults for the long run).
+
+# OPS is the e2e/ops directory (checks.sql, dml/, official_102_schema.awk); a caller that does not set it gets this file's own
+OPS=${OPS:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")}
 
 # ops_setup <bin> <pristine> <target version> <out>: exits 2 on bad arguments or an existing <out>
 ops_setup() {
