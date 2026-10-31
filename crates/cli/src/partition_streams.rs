@@ -23,7 +23,7 @@ use fastmig_ondisk::partition_stream::container::stream_of_pvalues;
 use fastmig_ondisk::partition_stream::{parse, serialize_with_mask, transcode_partition_stream};
 use fastmig_ondisk::source_version::HeaderLayout;
 use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
-use fastmig_progress::{PhaseSpec, Progress, Unit, default_rates};
+use fastmig_progress::{Bottleneck, PhaseSpec, Progress, Unit, default_rates};
 
 use crate::args::{self, CliError};
 use crate::progress_args;
@@ -38,6 +38,7 @@ const PHASES: &[PhaseSpec] = &[
         default_rates::DefaultRate {
             points: &[(1, 1.0 / default_rates::STEP.as_secs_f64())],
         },
+        Bottleneck::Cpu,
     ),
 ];
 const TRANSCODE: usize = 2;
@@ -88,7 +89,13 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             .ok_or_else(|| CliError::Usage("partition-streams needs --out".into()))?,
     );
     std::fs::create_dir_all(out)?;
-    let progress = Progress::new("partition-streams", PHASES, 1, std::time::Instant::now());
+    let progress = Progress::new(
+        "partition-streams",
+        PHASES,
+        &[],
+        1,
+        std::time::Instant::now(),
+    );
     let monitor = progress_args::start(&p, progress.clone(), None, None)?;
     // 11.2 and 11.3 use the 11.4 codecs in the older header layout (R8)
     let (from, layout) = match p.value("--from").unwrap_or("11.4") {

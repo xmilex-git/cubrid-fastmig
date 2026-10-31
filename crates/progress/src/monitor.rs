@@ -15,11 +15,14 @@ use std::time::{Duration, Instant};
 
 use crate::estimate::Estimator;
 use crate::meter::Progress;
+use crate::proc_sample::ProcSample;
 use crate::render_line::{self, Heap};
 use crate::render_screen::Screen;
 
 /// Redraw period of the terminal display.
 const TTY_TICK: Duration = Duration::from_millis(200);
+/// Longest gap between two estimates in plain mode (workspace#560: the ETA trail at 10/30/60 s).
+const ESTIMATE_TICK: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -118,10 +121,20 @@ fn watch(
     // plain mode: phases already named in a line, and when the next line is due (the first at once)
     let mut ended_shown = vec![false; p.phases.len()];
     let mut next_line = Instant::now();
+    let mut next_trail: Option<Instant> = None;
     loop {
         let stopping = stop.load(Relaxed);
         let now = Instant::now();
-        let e = est.tick(p, now);
+        let e = est.tick(p, now, ProcSample::now());
+        // one trail point per [`ESTIMATE_TICK`] in every mode: the report reads four of them
+        if p.current() < p.phases.len() && next_trail.is_none_or(|t| now >= t) {
+            next_trail = Some(now + ESTIMATE_TICK);
+            let el = now.duration_since(p.run_started).as_secs_f64();
+            p.trail
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((el, el + e.total_eta));
+        }
         let heap = Heap {
             now_max: probe(),
             memory_limit,
@@ -168,9 +181,10 @@ fn watch(
             let _ = writeln!(std::io::stderr(), "{}", render_line::summary(p, &heap));
             break;
         }
-        // a boundary or a warning unparks early; plain lines still keep to the interval
+        // a boundary or a warning unparks early; plain lines still keep to the interval, the estimate (and its trail
+        // in report.json) is still updated every [`ESTIMATE_TICK`]
         let wake = if mode == Mode::Plain {
-            next_line
+            next_line.min(now + ESTIMATE_TICK)
         } else {
             now + tick
         };
