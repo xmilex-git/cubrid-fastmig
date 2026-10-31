@@ -122,7 +122,13 @@ the DML by `checks.sql` only.
 `steps.tsv` has one `parity <step> 0 <rc>` row per checked step (rc 1 = the diff is not empty). T37 builds its table
 from `steps.tsv`, `archives.tsv` and `server-log-summary.tsv`.
 
-## Reuse for HA (T38)
+## Reuse
+
+The side functions (argument setup, timed steps, server start and stop, `prepare_migrated`, `prepare_official`, the
+server log summary) live in [sides.sh](sides.sh), which the application query driver [queries/](queries/README.md)
+(T40 [workspace#595](https://github.com/xmilex-git/workspace/issues/595)) sources too.
+
+### HA (T38)
 
 `dml/round.sql` and `checks.sql` are plain csql files: T38 runs them against its master and slave without this runner.
 
