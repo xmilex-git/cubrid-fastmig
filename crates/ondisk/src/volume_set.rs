@@ -169,7 +169,7 @@ impl VolumeSet {
         Ok((v, vpid.pageid as u64 * self.io_pagesize as u64))
     }
 
-    /// Reads page `vpid` into `buf` (length [`Self::io_pagesize`]).
+    /// Reads page `vpid` into `buf` (length [`Self::io_pagesize`], or less for a prefix such as the header).
     pub fn read_page_into(&self, vpid: Vpid, buf: &mut [u8]) -> io::Result<()> {
         let (v, off) = self.offset(vpid)?;
         v.file.read_exact_at(buf, off)

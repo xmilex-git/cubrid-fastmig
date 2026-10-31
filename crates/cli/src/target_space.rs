@@ -71,11 +71,11 @@ pub struct TargetSpace {
     /// Cloned pages unshared at the start: the rewritten pages (`Plan::unshare_ranges`) and each cloned volume's
     /// header and sector table; merged.
     pub unshare_ranges: Vec<PageRange>,
-    /// Cloned pages given blocks of their own without a copy at the start (`preallocate::zero`): the listed sectors
-    /// on cloned volumes and the plan's `zero_ranges`; merged.
+    /// Cloned pages given blocks of their own without a copy at the start, as unallocated pages
+    /// (`preallocate::unallocated_pages`): the listed sectors on cloned volumes and the plan's `zero_ranges`; merged.
     pub zero_ranges: Vec<PageRange>,
-    /// Listed sectors on cloned volumes of files the run frees (and reads until then): zeroed when reserved again, the
-    /// space handed over from the reservation.
+    /// Listed sectors on cloned volumes of files the run frees (and reads until then): given their blocks as unallocated
+    /// pages when reserved again, the space handed over from the reservation.
     pub deferred: Vec<Vsid>,
     /// Their bytes, held in the reservation besides `extra_bytes` and taken once.
     pub transfer_bytes: u64,

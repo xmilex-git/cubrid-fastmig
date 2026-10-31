@@ -3,19 +3,22 @@
 //!
 //! Input: the database (its file tracker from `BOOT_DB_PARM.trk_vfid`, every tracked file's table, each volume's
 //! STAB). Output: check 4 defects — `sector-shared` (two files reserve it), `sector-leaked` (STAB bit set, no owner),
-//! `sector-unmarked` (owned, bit clear), `file-header` (a tracked file's header or tables inconsistent,
-//! `FileTable::check`), `file-unreadable`; and the tracked files for the catalog check.
-//! O(s log s) in the sector count.
+//! `sector-unmarked` (owned, bit clear), `unallocated-page-header` (an unallocated page of a file's sector names
+//! neither NULL nor itself, workspace#591), `page-unreadable`, `file-header` (a tracked file's header or tables
+//! inconsistent, `FileTable::check`), `file-unreadable`; and the tracked files for the catalog check.
+//! O(s log s) in the sector count, plus a 32 B read per unallocated page of an owned sector.
 //! Source: G3 workspace#483 Q8; engine `file_manager.c` (`file_header_sanity_check`, file tracker), `disk_manager.c`
 //! STAB (ondisk `sector_table`, workspace#490).
 
 use std::collections::BTreeMap;
 
 use fastmig_ondisk::file_header::FileType;
-use fastmig_ondisk::file_table::FileTable;
+use fastmig_ondisk::file_table::{FileSector, FileTable};
 use fastmig_ondisk::file_tracker::{self, TrackItem};
-use fastmig_ondisk::sector_table::{system_sectors, used_sectors};
-use fastmig_ondisk::{Vfid, Vsid};
+use fastmig_ondisk::ids::{NULL_ID, NULL_VOLID};
+use fastmig_ondisk::page::{self, IO_RESERVED_SIZE};
+use fastmig_ondisk::sector_table::{SECTOR_NPAGES, system_sectors, used_sectors};
+use fastmig_ondisk::{Vfid, Vpid, Vsid};
 
 use crate::database::Database;
 use crate::defect::{Check, Defect};
@@ -25,6 +28,40 @@ pub type Files = BTreeMap<Vfid, (TrackItem, FileTable)>;
 
 fn vfid_text(v: Vfid) -> String {
     format!("file {}|{}", v.volid, v.fileid)
+}
+
+/// The unallocated pages of a file's sector whose header names neither NULL (never written, `unwritten_page`) nor
+/// the page itself: the engine asserts on such a page when it first fixes it (`pgbuf_set_bcb_page_vpid`), e.g. after a
+/// crash, in recovery redo (workspace#591). Reads the 32 B header of each.
+/// shortcut: the pages of free sectors are not read (a read per free page, up to a volume's free space); the run
+/// writes only headers of the engine's format there (`preallocate::unallocated_pages`); read them if that changes.
+fn unallocated_headers(db: &Database, s: &FileSector) -> Vec<Defect> {
+    let base = s.first_page();
+    let null = Vpid::new(NULL_VOLID, NULL_ID);
+    let text = |v: Vpid| format!("{}|{}", v.volid, v.pageid);
+    let mut head = [0u8; IO_RESERVED_SIZE];
+    (0..SECTOR_NPAGES)
+        .filter(|i| s.page_bitmap >> i & 1 == 0)
+        .map(|i| Vpid::new(base.volid, base.pageid + i))
+        .filter_map(|p| {
+            let got = match db.vols.read_page_into(p, &mut head) {
+                Ok(()) => page::vpid(&head),
+                Err(e) => {
+                    return Some(
+                        Defect::new(Check::Sector, "page-unreadable")
+                            .object(text(p))
+                            .actual(e),
+                    );
+                }
+            };
+            (got != p && got != null).then(|| {
+                Defect::new(Check::Sector, "unallocated-page-header")
+                    .object(text(p))
+                    .expected(format!("{} or {}", text(p), text(null)))
+                    .actual(text(got))
+            })
+        })
+        .collect()
 }
 
 pub fn check_sectors(db: &Database) -> std::io::Result<(Files, Vec<Defect>)> {
@@ -60,6 +97,7 @@ pub fn check_sectors(db: &Database) -> std::io::Result<(Files, Vec<Defect>)> {
             );
         }
         for s in &ft.sectors {
+            out.extend(unallocated_headers(db, s));
             if let Some(prev) = owner.insert(s.vsid, it.vfid) {
                 out.push(
                     Defect::new(Check::Sector, "sector-shared")

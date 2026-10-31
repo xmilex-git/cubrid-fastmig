@@ -540,7 +540,8 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
                 );
             }
         }
-        let sector = SECTOR_NPAGES as u64 * vols.io_pagesize() as u64;
+        let io_page = vols.io_pagesize() as u64;
+        let sector = SECTOR_NPAGES as u64 * io_page;
         let count = off_list.clone();
         space = space.with_claim(Arc::new(move |s: Vsid| {
             let off_list = !listed.contains(&s);
@@ -549,7 +550,13 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             }
             if let Some((f, _)) = cloned.get(&s.volid).filter(|(_, total)| s.sectid < *total) {
                 res.give(sector)?;
-                preallocate::zero(f, s.sectid as u64 * sector, sector)?;
+                preallocate::unallocated_pages(
+                    f,
+                    s.volid,
+                    io_page,
+                    s.sectid as u64 * sector,
+                    sector,
+                )?;
                 if off_list {
                     count.fetch_add(1, Ordering::Relaxed);
                 }
@@ -875,8 +882,8 @@ fn report_json(
 
 /// Gives the ranges of the cloned volumes the run writes blocks of their own, before anything else is written: a
 /// rewritten range gets the source's bytes written over it, a range whose content the run does not need is zeroed
-/// (`preallocate::zero`). A whole-block write into a clone takes new blocks without reading the shared ones, from the
-/// source's page cache and on every worker; `FALLOC_FL_UNSHARE_RANGE` read them back from disk a page at a time,
+/// and formatted as unallocated pages (`preallocate::unallocated_pages`, workspace#591). A whole-block write into a
+/// clone takes new blocks without reading the shared ones, from the source's page cache and on every worker; `FALLOC_FL_UNSHARE_RANGE` read them back from disk a page at a time,
 /// one worker per volume, about 10 times slower (workspace#556). XFS reserves the blocks of a buffered write into a
 /// clone before the write returns, and the step ends with an fdatasync of every cloned volume, so a full disk fails
 /// here, before the first rewrite (workspace#526).
@@ -911,7 +918,7 @@ fn take_cloned_ranges(
     worker_pool::run(tasks.len(), worker_limit, |i| {
         let (j, start, end, zero) = tasks[i];
         let done = if zero {
-            preallocate::zero(&files[j], start, end - start)
+            preallocate::unallocated_pages(&files[j], jobs[j].volid, io, start, end - start)
         } else {
             let mut buf = vec![0u8; IO_BUF_BYTES];
             let range = CopyRange {

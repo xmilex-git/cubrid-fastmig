@@ -190,8 +190,10 @@ Right after the incomplete marker, before the first byte of the target, `migrate
   blocks of their own: the allocated pages with their content, by writing the source bytes over them in 8 MiB
   tasks on every worker (`Plan::unshare_ranges`, `migrate::take_cloned_ranges`; a whole-block write into a clone
   takes new blocks without reading the shared ones, and XFS reserves them before the write returns), the
-  unallocated ones without a copy (`Plan::zero_ranges`, `preallocate::zero`, `FALLOC_FL_ZERO_RANGE`: unwritten
-  blocks, no read of the clone.s); then an fdatasync of every cloned volume, so a full disk fails here, before the
+  unallocated ones without a copy (`Plan::zero_ranges`, `preallocate::unallocated_pages`: `FALLOC_FL_ZERO_RANGE`,
+  unwritten blocks, no read of the clones, then on every page the engine's header and watermark of an unallocated
+  page, NULL LSA and its own VPID, as the source holds them; a zero header fails the engine's VPID check when the page
+  is first fixed, workspace#591); then an fdatasync of every cloned volume, so a full disk fails here, before the
   first rewrite. Until workspace#556 this was `FALLOC_FL_UNSHARE_RANGE`, one worker per volume: it reads the shared
   blocks back from disk a page at a time and ran about 10 times slower than the write (see "Clone or copy" below).
   Taken once, not held twice in the reservation. Another filesystem keeps them in the
