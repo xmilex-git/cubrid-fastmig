@@ -153,7 +153,7 @@ prepare_migrated() {
   printf '%s\t%s\tlocalhost\t%s\tfile:%s\n' "$DB" "$src" "$src" "${FASTMIG_OPS_LOB_BASE:-$src/lob}" >"$OUT/migrated/src-dbs/databases.txt"
   "$BIN" migrate "$DB" --dest "$SIDE_DB" --target-version "$TV" --volumes-in-first-dir \
     --source-databases-txt "$OUT/migrated/src-dbs/databases.txt" --target-databases-txt "$CUBRID_DATABASES/databases.txt" \
-    --workers "$W" --verify --progress plain ${FASTMIG_OPS_MIGRATE_ARGS:-} || return 1
+    --workers "$W" --verify --progress plain || return 1
   grep -q "^$DB[[:space:]]" "$CUBRID_DATABASES/databases.txt" || { echo "target not registered"; return 1; }
   local f
   for f in deferred-indexes recompile-plcsql update-statistics; do
@@ -239,7 +239,7 @@ run_side() {
   # server error log lines; asserts in those logs and in the steps' own output (a server that asserts while it starts
   # prints it to the start output); cores of any process of this side: a core under core_pattern written while the
   # side ran whose memory holds this side's CUBRID_DATABASES (servers and SA utilities alike, whatever their pid)
-  local errs asserts cores=0 c cdir f old
+  local errs asserts pl_drops cores=0 c cdir f old
   mkdir -p "$OUT/$SIDE/server-log"
   for f in $(find "$INST/log" -type f -newer "$OUT/$SIDE/start-marker" 2>/dev/null); do
     old=$(awk -F'\t' -v p="$f" '$2 == p { print $1 }' "$OUT/$SIDE/log-sizes")
@@ -247,12 +247,14 @@ run_side() {
   done
   errs=$(cat /dev/null "$OUT/$SIDE"/server-log/* | grep -c 'ERROR \*\*\*')
   asserts=$(cat /dev/null "$OUT/$SIDE"/server-log/* "$OUT/$SIDE"/log/*.log | grep -c 'Assertion .* failed')
+  # a PL server that drops mid-run (README § Known flakes) fails the run through its error lines; counted apart
+  pl_drops=$(cat /dev/null "$OUT/$SIDE"/server-log/*.err | grep -c "^Networking with PL server failed")
   cdir=$(dirname "$(cat /proc/sys/kernel/core_pattern)")
   for c in $(find "$cdir" -maxdepth 1 -name 'core.*' -newer "$OUT/$SIDE/start-marker" 2>/dev/null); do
     grep -aqF "CUBRID_DATABASES=$CUBRID_DATABASES" "$c" && { cores=$((cores + 1)); echo "$SIDE $c" >>"$OUT/cores.txt"; }
   done
-  printf '%s\t%s\t%s\t%s\n' "$SIDE" "$errs" "$asserts" "$cores" >>"$OUT/server-log-summary.tsv"
-  [ "$errs$asserts$cores" = 000 ] || { FAIL=1; echo "$SIDE: server error lines $errs, asserts $asserts, cores $cores" >&2; }
+  printf '%s\t%s\t%s\t%s\t%s\n' "$SIDE" "$errs" "$asserts" "$cores" "$pl_drops" >>"$OUT/server-log-summary.tsv"
+  [ "$errs$asserts$cores" = 000 ] || { FAIL=1; echo "$SIDE: server error lines $errs (PL server drops $pl_drops), asserts $asserts, cores $cores" >&2; }
 }
 
 { echo "db=$DB label=$LABEL pristine=$PRISTINE target_version=$TV rounds=$ROUNDS workers=$W break=${FASTMIG_OPS_BREAK:-}"
@@ -260,7 +262,7 @@ run_side() {
   echo "pre: $(date -Is) load=$(cut -d' ' -f1-3 /proc/loadavg) home=[$(df -h /home | awk 'NR == 2 { print $4 " avail" }')]"
 } >"$OUT/meta.txt"
 printf 'side\tstep\tseconds\trc\n' >"$OUT/steps.tsv"
-printf 'side\terror_lines\tassert_lines\tcores\n' >"$OUT/server-log-summary.tsv"
+printf 'side\terror_lines\tassert_lines\tcores\tpl_drops\n' >"$OUT/server-log-summary.tsv"
 printf 'side\tlast_archive_before\tlast_archive_after\n' >"$OUT/archives.tsv"
 
 for s in migrated official; do

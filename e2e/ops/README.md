@@ -44,7 +44,6 @@ Environment:
 | `FASTMIG_OPS_SOURCE_UNLOAD` | `<BASEDB_ROOT>/<label>/unload/<variant>/<db>` | the unloaddb prefix the official side loads (a 10.2 source: see e2e/README.md) |
 | `FASTMIG_OPS_LOB_BASE` | none | required for a 10.2..11.3 source: the base its LOB locators name (as `FASTMIG_E2E_LOB_BASE`). The official side rewrites that prefix to its own copy of the files, since a LOB UPDATE deletes the old file |
 | `FASTMIG_OPS_BREAK` | none | fail-before probe: `official-extra-row` inserts one `region_list` row on the official side only, right after its server starts; the run must then exit 1 with a parity diff from `baseline` on |
-| `FASTMIG_OPS_MIGRATE_ARGS` | none | extra `migrate` options, e.g. `--no-clone` while [#591](https://github.com/xmilex-git/workspace/issues/591) is open |
 
 Exit: `0` pass, `1` a step, a parity diff, an assert/core or the archive count failed, `2` bad arguments or an
 existing `<out dir>`.
@@ -115,7 +114,7 @@ the DML by `checks.sql` only.
 <out>/<side>/check/<step>.out   checks.sql after the step
 <out>/<side>/server-log/        the install's log files written while the side ran
 <out>/parity/<step>.diff        diff of the two sides' check/<step>.out; empty = same
-<out>/server-log-summary.tsv    side  error_lines ("ERROR ***")  assert_lines  cores (pid-matched under core_pattern)
+<out>/server-log-summary.tsv    side  error_lines ("ERROR ***")  assert_lines  cores (any process of the side)  pl_drops
 <out>/archives.tsv              side  last_archive_before  last_archive_after   (numbers of <db>_lgarNNN, -1 = none;
                                 before = at baseline, after = after dml-after-backup)
 ```
@@ -156,7 +155,7 @@ DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G11 5).
   fresh DB as well (`create table t (id int primary key, price int, b blob); create trigger trg_bu before update on t
   if new.price < 0 execute reject; insert ...; update t set b = bit_to_blob(X'AA') where id = 1;`, then a second
   `csql -S`: "External file ces_551/... was not found"). `product` has such a trigger, so the DML round inserts and
-  deletes LOB rows instead.
+  deletes LOB rows instead. 11.4.6 keeps the value; filed as [#592](https://github.com/xmilex-git/workspace/issues/592).
 - **Views over a REUSE_OID table are not updatable** on develop ("Vclass ... is not updatable ... REUSE_OID"); the
   round updates `product` directly and `checks.sql` reads `v_active_product`.
 - **`auto_restart_server=no`**: otherwise the master revives the server `kill9-recovery` kills, and the runner's own
@@ -164,12 +163,18 @@ DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G11 5).
 - **PL server start**: the server reports started before its PL server accepts calls, so `start` waits up to 60 s
   for `dba.fm_hello`.
 
+## Known flakes
+
+- **PL server drop** (cause unknown; 1 of 2 runs of the same build and settings, 2026-10-31): mid-run, every SP call
+  failed with "Networking with PL server failed: -1" until the server restarted its PL server; no core, no OOM, no
+  error in the PL log. It fails the run (error lines, checks). `server-log-summary.tsv` counts those lines as
+  `pl_drops`, so a failure from it is told apart from a migration finding. Two more occurrences go to an issue.
+
 ## Migration defects it found
 
-- With the default clone path (XFS), the migrated side fails `kill9-recovery`: crash recovery asserts in
-  `pgbuf_set_bcb_page_vpid` on a page whose header the clone path zeroed
-  ([#591](https://github.com/xmilex-git/workspace/issues/591)). Until it is fixed, a passing run takes
-  `FASTMIG_OPS_MIGRATE_ARGS=--no-clone`; without it the run is the failing case of #591.
+- [#591](https://github.com/xmilex-git/workspace/issues/591): the clone path zeroed the headers of unallocated pages,
+  and crash recovery after `kill -9` asserted in `pgbuf_set_bcb_page_vpid` on the migrated side (official side
+  passed). Fixed in cubrid-fastmig 81c18f0; the default (clone) run then passes end to end (§ Verified runs).
 
 ## Disk
 
