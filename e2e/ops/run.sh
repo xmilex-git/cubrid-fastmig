@@ -100,6 +100,15 @@ server_pid() {   # the cub_server of $DB whose environment is this side's CUBRID
 }
 start() { bash "$CTL" start "$DB" && UP=1 && SERVER_PIDS+=($(server_pid)); }
 stop() { bash "$CTL" stop "$DB" && UP=0; }
+# after a side: SIGTERM to the cub_master on the claimed port and to any cub_pl left by the kill -9, matched by this
+# install's CUBRID= in their environment (never `cubrid service stop` on the shared host: cubrid-server-control P4)
+stop_master() {
+  local p
+  for p in $(ss -ltnp "sport = :$PORT" | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u) $(pgrep -x cub_pl); do
+    tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -qx "CUBRID=$INST" && { echo "SIGTERM $p $(cat /proc/$p/comm)"; kill -TERM "$p"; }
+  done
+  timeout 30 bash -c "while [ -n \"\$(ss -ltn 'sport = :$PORT' | tail -n +2)\" ]; do sleep 1; done" || echo "port $PORT still listening"
+}
 kill9_restart() {   # kill -9 of this side's server, then a start: the restart runs crash recovery
   local p; p=$(server_pid)
   [ -n "$p" ] || { echo "no cub_server of $DB"; return 1; }
@@ -228,7 +237,7 @@ printf 'side\tlast_archive_before\tlast_archive_after\n' >"$OUT/archives.tsv"
 for s in migrated official; do
   run_side "$s" || { FAIL=1; echo "$s: prepare or first start failed; see $OUT/$s/log" >&2
     [ "$UP" = 0 ] || stop >/dev/null 2>&1; cubrid deletedb -d "$DB" >/dev/null 2>&1; }
-  cubrid service stop >"$OUT/$s/log/service-stop.log" 2>&1
+  stop_master >"$OUT/$s/log/master-stop.log" 2>&1
 done
 
 # parity: the checks of every step, migrated against official

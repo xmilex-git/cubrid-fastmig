@@ -41,3 +41,8 @@ Not a difference from the official path either, but a change every 10.2 source s
 `db_trig` (rewritten to develop `db_trigger`, workspace#542) owned by a user without SELECT on a trigger's target class
 returns that trigger's row on develop; the 10.2 `db_trig` hid it, 11.4 `db_trig` and develop `db_trigger` show it
 (measured on 10.2.18 / 11.4.6 / develop, workspace#539). Users with rights, the trigger owner and DBA see the same rows.
+
+The operations scenario runner (e2e/ops/README.md, workspace#588) runs the same DML on both paths. The two serial rows
+above make every value a serial or an AUTO_INCREMENT column generates after the migration differ between the paths, so
+its parity checks leave exactly the columns listed in e2e/ops/README.md § Sides and steps out of their sums and compare
+their counts and order instead.
