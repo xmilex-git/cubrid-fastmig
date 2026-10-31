@@ -51,7 +51,10 @@ backup_cycle() {
   dir=$OUT/$SIDE/backup/$CHAIN
   mkdir -p "$dir"
   echo "level $level into $dir"
-  cubrid backupdb -C -l "$level" -D "$dir" "$DB" || return 1
+  # a level already in the directory makes backupdb ask before it removes the obsolete volumes of that level and higher
+  # (logpb_remote_ask_user_before_delete_volumes); the side has no terminal, so the answer is given: y. Without it the
+  # second level 2 of a chain was "aborted by the user" (night run 1, cycle 3, workspace#594)
+  printf 'y\n' | cubrid backupdb -C -l "$level" -D "$dir" "$DB" || return 1
   printf 'backup\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$c" "$level" "$CHAIN" >>"$OUT/$SIDE/times.tsv"
 }
 
