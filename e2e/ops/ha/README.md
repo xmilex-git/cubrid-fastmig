@@ -2,7 +2,7 @@
 
 Shows that a master DB and a slave DB, each moved to develop by cubrid-fastmig on its own, form a working develop HA
 pair: replication, failover and fail-back. The tool does not move an HA pair as one (ADR 0003: no HA transition);
-this is the operator's procedure checked end to end. Decision: G11 [workspace#587](https://github.com/xmilex-git/workspace/issues/587) (4);
+this is the operator's procedure checked end to end. Decision: G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587) (4);
 ticket: T38 [workspace#590](https://github.com/xmilex-git/workspace/issues/590). Runtime check, not a unit test.
 
 ## Two nodes on one host
@@ -21,7 +21,7 @@ this host do not make a pair. The nodes are two rootless podman containers of th
 | cores | `/data/core` bound at its path: a node's core lands with the host's (core_pattern is host-global) |
 | installs | each node gets reflink copies of the source and target installs; `ha_conf.sh` overwrites their `cubrid.conf`/`cubrid_ha.conf` |
 | `CUBRID_TMP` | `/var/tmp/cubrid` inside the node: the default `$CUBRID/tmp` under the run dir is 88 characters, and the PL server socket then exceeds `sun_path` (108): the PL server, so `cub_server`, does not start (run-01, 2026-10-31) |
-| LOB base | each node's `databases.txt` keeps the LOB base `safe_copy.sh` or migrate wrote (inside that node's DB copy); only db-host changes. The scenario's LOB UPDATE deletes old files, so a LOB base shared with the registered baseline would lose them (T36) |
+| LOB base | source pair: each node keeps the LOB base `safe_copy.sh` wrote (inside that node's DB copy; it writes no LOB). Target pair: the master keeps the one migrate wrote and the slave takes it (§ Procedure, `ha_lob_base`). Never the registered baseline's: the scenario's LOB deletes remove files (T36) |
 
 ## Run
 
@@ -35,7 +35,7 @@ FASTMIG_HA_SIDE=migrated \
 bash e2e/ops/ha/parity.sh <...>/run-NN <...>/run-MM
 ```
 
-`<ops>` is T36's `e2e/ops` (workspace#588, 217b108 or later): the DML round files of the source label (synonyms from
+`<ops>` is T36's `e2e/ops` (workspace#588, bce276e or later): the DML round files of the source label (synonyms from
 11.2, PL/CSQL from 11.4) and `checks.sql`, run with `-N` like T36. One side per run keeps at most three DB copies.
 
 The script deletes nothing: remove `run-NN` by its literal path afterwards (it holds two installs and up to three DBs

@@ -3,7 +3,7 @@
 Takes one baseline DB (basedb/README.md) to the target version two ways — through cubrid-fastmig (the **migrated** side)
 and through the engine's official path, source `unloaddb` → target `loaddb` (the **official** side) — then runs the
 same **operations scenario** (운영 시나리오, [GLOSSARY.md](../../GLOSSARY.md)) on each side and compares what each step
-leaves behind (**parity**). Decision: G11 [workspace#587](https://github.com/xmilex-git/workspace/issues/587); runner:
+leaves behind (**parity**). Decision: G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587); runner:
 T36 [workspace#588](https://github.com/xmilex-git/workspace/issues/588). Users of the runner: the version matrix T37
 [workspace#589](https://github.com/xmilex-git/workspace/issues/589) and HA T38
 [workspace#590](https://github.com/xmilex-git/workspace/issues/590). This is a runtime check, not a unit test
@@ -11,7 +11,7 @@ T36 [workspace#588](https://github.com/xmilex-git/workspace/issues/588). Users o
 
 Pass: every step exits as expected, every parity diff is empty, the server error logs of both sides hold no assert
 and no new core appeared, and the migrated side created at least `FASTMIG_OPS_MIN_ARCHIVES` log archives. Server
-statistics and the wording of error logs are not compared (G11 1).
+statistics and the wording of error logs are not compared (G12 1).
 
 ## Run
 
@@ -35,7 +35,7 @@ Environment:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FASTMIG_OPS_INSTALL` | required | the target-line install, **optdebug** (G11 6), the caller's own reflink copy: `conf/cubrid.conf` is overwritten. Both sides run on it |
+| `FASTMIG_OPS_INSTALL` | required | the target-line install, **optdebug** (G12 6), the caller's own reflink copy: `conf/cubrid.conf` is overwritten. Both sides run on it |
 | `FASTMIG_OPS_PORT` | required | claimed `cubrid_port_id` |
 | `FASTMIG_OPS_SERVER_CTL` | required | the workspace `cubrid-server-control` wrapper |
 | `FASTMIG_OPS_ROUNDS` | `6` (§ Rounds) | as `[rounds]` |
@@ -138,7 +138,7 @@ workspace#588). Archives the migrated side created between `baseline` and `dml-a
 | 5 | 6 | 2 | 3 |
 
 5 is the smallest count that reaches 2 archives; the default adds one round of margin. One round takes about 4 s on that
-DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G11 5).
+DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G12 5).
 
 ## Engine facts the runner works around
 
@@ -179,7 +179,7 @@ DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G11 5).
 ## Verified runs
 
 T1 11.4 clean → develop, optdebug develop 682b080b2 (`~/optdebug/CUBRID-fastmig-dev` reflink copy), default clone path,
-6 rounds, cubrid-fastmig c69528b (on main 1b53a47, which holds the #591 fix 81c18f0), 2026-10-31, workspace#588:
+6 rounds, cubrid-fastmig 6f67eab (holds the #591 fix 81c18f0), 2026-10-31, workspace#588:
 
 | Run | Result |
 |---|---|

@@ -12,6 +12,7 @@
 //!
 //! Input: the source classes and line (the rows to delete), an open [`HeapWriter`] on the table's heap. Output: the
 //! rows deleted from the target heap; [`rows`] counts them for the plan.
+//! Source: engine `log_applier.c:la_get_last_ha_applied_info`, `util_sa.c:restoreslave` (develop @682b080b2).
 
 use std::io;
 

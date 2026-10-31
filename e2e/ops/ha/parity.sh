@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Parity of the HA check (G11 (1), workspace#590): the checks of a migrated run against those of an official run of the
+# Parity of the HA check (G12 (1), workspace#590): the checks of a migrated run against those of an official run of the
 # same baseline. Input: bash e2e/ops/ha/parity.sh <migrated run dir> <official run dir> (both from e2e/ops/ha/run.sh).
 # Output: one line per check file ("<phase>-<host> same|DIFF") and <official run dir>/parity/<file>.diff; exit 0 when
 # every check file of either run exists in both and is equal. The master-against-slave diffs (<phase>.diff) are

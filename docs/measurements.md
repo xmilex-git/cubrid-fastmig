@@ -4,7 +4,7 @@ Two comparisons on the biggest databases this project built (about 22 million ro
 log archives 4,289 MB for 11.4 and 4,417 MB for develop), each tool under its fastest settings. Wall time is what
 the map's acceptance criteria use.
 
-- Binary: cubrid-fastmig `60a96c6` release (sha256 `f0a94a67040e18c7…`).
+- Binary: cubrid-fastmig `60a96c6` release (sha256 `f0a94a67040e18c7…`), before 81c18f0: the clone path did not yet write the headers of unallocated pages (workspace#591).
 - Host: Xeon Silver 4216, XFS on NVMe, `cp` from coreutils 8.30. Every run is pinned to CPUs 16-31.
 - cubrid-fastmig runs `migrate --workers 16 --mem 16G --volumes-in-first-dir`, without `--verify`. The clone
   default is reported as *clone*; `--no-clone`, where every volume is byte-copied, is reported as *copy*.

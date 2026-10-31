@@ -1,17 +1,17 @@
 # Operations verification
 
 What runs on migrated databases besides `verify` and the set comparison: the operations scenario (GLOSSARY) and its
-parity with the official path. Decision: G11 [workspace#587](https://github.com/xmilex-git/workspace/issues/587).
+parity with the official path. Decision: G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587).
 The version matrix (T37 [workspace#589](https://github.com/xmilex-git/workspace/issues/589)) adds its section here.
 
 ## HA
 
-T38 [workspace#590](https://github.com/xmilex-git/workspace/issues/590), G11 (4): the tool does not move an HA pair as
+T38 [workspace#590](https://github.com/xmilex-git/workspace/issues/590), G12 (4): the tool does not move an HA pair as
 one; master and slave are migrated one by one and the target pair is configured on the target line. Procedure, harness
 and the facts behind them: [e2e/ops/ha/README.md](../e2e/ops/ha/README.md).
 
 Runs of 2026-10-31: T1 clean baselines, target CUBRID 11.5.0.2781-682b080 optdebug, two podman nodes, one DML round of
-T36 (`e2e/ops/dml/round.sql`, `round_synonym.sql`, `round_plcsql.sql` at 217b108) on the master, `checks.sql` on both
+T36 (`e2e/ops/dml/round.sql`, `round_synonym.sql`, `round_plcsql.sql` at bce276e) on the master, `checks.sql` on both
 nodes after the target pair's replication and after failover; the target pair copies logs where the source pair did
 (`FASTMIG_HA_SAME_COPY_LOG_PATH=1`). Migrated: cubrid-fastmig with the HA apply info reset (1b53a47). Official: the
 manual's HA upgrade (`loaddb`, `backupdb`, `restoredb -u` on the slave).
@@ -28,7 +28,7 @@ tables without a primary key (`session_hash`, `region_list`, `part_*` of basedb)
 storage (the slave takes the master's lob-base-path).[^lob]
 Before the reset, a carried `_db_ha_apply_info` row stopped the slave's applier (run-05, ADR 0002 amendment).
 
-Not run: an 11.4 target (out of G11's HA scope), a node with two or more apply-info rows, the 4.2 GB DB, more than one
+Not run: an 11.4 target (out of G12's HA scope), a node with two or more apply-info rows, the 4.2 GB DB, more than one
 DML round.
 
 [^pk]: CUBRID HA replicates by primary key and synchronizes only tables that have one (cubrid-manual `ko/ha.rst`

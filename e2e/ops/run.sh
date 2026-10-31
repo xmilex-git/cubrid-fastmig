@@ -8,7 +8,7 @@
 #   FASTMIG_OPS_MIN_ARCHIVES, FASTMIG_OPS_WORKERS, FASTMIG_OPS_SOURCE_UNLOAD, FASTMIG_OPS_LOB_BASE, FASTMIG_OPS_BREAK
 # Output: <out>/steps.tsv, <out>/<side>/{log,check}/, <out>/parity/, <out>/server-log-summary.tsv, <out>/archives.tsv.
 #   Exit 0 pass, 1 fail, 2 bad arguments.
-# Source: G11 workspace#587 (decisions 1-6), T36 workspace#588; e2e/run.sh (step, sql_file, migrate and deferred SQL).
+# Source: G12 workspace#587 (decisions 1-6), T36 workspace#588; e2e/run.sh (step, sql_file, migrate and deferred SQL).
 set -uo pipefail
 
 BIN=$(realpath "${1:?cubrid-fastmig binary}")

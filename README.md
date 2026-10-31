@@ -21,7 +21,7 @@ The first target is 11.4 → develop.
 - Downgrades and multi-hop migrations through intermediate versions.
 - Online or incremental migration; the source must be shut down cleanly.
 - The log and backup chains of the source; the target starts with a new log.
-- HA environments.
+- Moving an HA pair as one. Each node is migrated on its own and the pair is configured again on the target line; that procedure is verified (docs/ops-verification.md § HA, ADR 0003).
 - Changes to the CUBRID engine.
 
 ## The source database is deleted only after verification

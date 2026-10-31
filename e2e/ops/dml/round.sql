@@ -2,7 +2,7 @@
 -- Every new key comes from the current max or count, so each side and each round writes the same rows; values a serial
 -- or AUTO_INCREMENT column generates differ between the sides (docs/intended-differences.md) and are never keyed on.
 -- Objects: basedb/10_schema.sql, 30_objects.sql, 31_dba_objects.sql, 46_partition_fx.sql. Synonyms and PL/CSQL are in
--- round_synonym.sql and round_plcsql.sql (sources that have them). Source: G11 workspace#587 (3).
+-- round_synonym.sql and round_plcsql.sql (sources that have them). Source: G12 workspace#587 (3).
 
 -- orders: 2000 new rows of customers 1001..5000 (the round deletes the oldest customer), the trigger trg_orders_ai ->
 -- audit_log AUTO_INCREMENT, their items, invoices from the serial

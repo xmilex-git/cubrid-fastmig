@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HA check of migrated databases (workspace#590, decision G11 workspace#587 (4)): build a source HA pair, sync it, stop
+# HA check of migrated databases (workspace#590, decision G12 workspace#587 (4)): build a source HA pair, sync it, stop
 # it, move master and slave each through cubrid-fastmig, configure HA on the target, then replicate, fail over and fail
 # back. The tool does not move an HA pair as one; this shows that two separately migrated nodes form a working pair.
 #
@@ -8,7 +8,7 @@
 #   <pristine dir>  <BASEDB_ROOT>/<label>/pristine/<variant> (basedb/README.md), label 11.4 or develop
 #   <out dir>       a new directory under the workspace scratch; both nodes' installs and DBs live here (see README)
 # env: FASTMIG_HA_SOURCE_INSTALL (the source-line install, 11.4.6 or develop), FASTMIG_HA_TARGET_INSTALL (develop
-#   optdebug, G11 (6)); both are reflink-copied per node, the originals are not touched.
+#   optdebug, G12 (6)); both are reflink-copied per node, the originals are not touched.
 #   FASTMIG_HA_DML (space-separated SQL files of one DML round, run on the current master of the target pair; T36
 #   e2e/ops dml/*.sql), FASTMIG_HA_CHECKS (read-only SQL file run on both target nodes after each phase; T36
 #   checks.sql), FASTMIG_HA_ROUNDS (default 1), FASTMIG_HA_WORKERS (migrate worker limit, default 4),

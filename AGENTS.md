@@ -1,5 +1,3 @@
-| `aes`, `ctr` | `ondisk::tde_keys` | AES-256-CTR of the data keys in the TDE keyinfo record (engine `EVP_aes_256_ctr`); reproduces the engine key format, hand-written crypto is a risk (workspace#515) |
-| `sha2` | `ondisk::tde_keys` | SHA-256 of the master key in the keyinfo record (engine `tde_make_mk_hash`, workspace#515) |
 # AGENTS.md — cubrid-fastmig
 
 Offline CUBRID database migration in Rust. Purpose, scope and the crate roles are in

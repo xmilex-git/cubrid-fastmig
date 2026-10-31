@@ -3,7 +3,7 @@
 -- AUTO_INCREMENT generates (intended differences between the two sides, docs/intended-differences.md: compared as
 -- counts and order only). Per index: the count read through that index against the heap count of the same predicate;
 -- the runner fails on "INDEX!=HEAP".
--- Source: G11 workspace#587 (1); T36 workspace#588.
+-- Source: G12 workspace#587 (1); T36 workspace#588.
 
 -- tables
 SELECT 'customer', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', CASE WHEN code LIKE 'R%' THEN NULL ELSE id END, code, name, name_n,

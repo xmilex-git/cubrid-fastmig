@@ -8,7 +8,8 @@
 //! inconsistent, `FileTable::check`), `file-unreadable`; and the tracked files for the catalog check.
 //! O(s log s) in the sector count, plus a 32 B read per unallocated page of an owned sector.
 //! Source: G3 workspace#483 Q8; engine `file_manager.c` (`file_header_sanity_check`, file tracker), `disk_manager.c`
-//! STAB (ondisk `sector_table`, workspace#490).
+//! STAB (ondisk `sector_table`, workspace#490); `file_io.c:fileio_initialize_res` and
+//! `page_buffer.c:pgbuf_set_bcb_page_vpid` for the unallocated-page header (develop @682b080b2, workspace#591).
 
 use std::collections::BTreeMap;
 

@@ -8,3 +8,4 @@ checkdb를 쓰지 않는 이유는 비용이다: 힙 행마다 그 키의 OID �
 
 - 검증기는 마이그레이션과 같은 값 디코더를 쓰므로 디코더 공통 버그는 잡지 못한다. 값 정확성의 독립 오라클은 엔진 unloaddb 집합 비교다.
 - 엔진 checkdb는 프로토타입에서 소형 도착 DB에 한 번만, 엔진이 Rust가 만든 페이지를 읽는지 보는 교차 확인으로 돌린다([P1](https://github.com/xmilex-git/workspace/issues/484)). 합격 기준은 아니다.
+- 보완([G12 workspace#587](https://github.com/xmilex-git/workspace/issues/587), 2026-10-31): (1)·(2)는 옮긴 직후의 합격이다. 옮긴 DB를 운영한 뒤의 합격은 운영 시나리오(`e2e/ops/`)에서 assert·코어·에러 0과, 같은 시나리오를 돌린 공식 경로 DB와의 parity(단계마다 고정 질의 결과가 같음)로 판정한다. 시나리오 뒤에는 생성 값이 두 쪽에서 달라 unloaddb 집합 비교를 하지 않는다([docs/ops-verification.md](../ops-verification.md), [e2e/ops/README.md](../../e2e/ops/README.md)).

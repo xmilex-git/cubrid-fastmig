@@ -1,4 +1,4 @@
-# The official HA pair of the parity check (G11 (1), workspace#590): the target pair built the way the manual upgrades
+# The official HA pair of the parity check (G12 (1), workspace#590): the target pair built the way the manual upgrades
 # an HA pair (cubrid-manual upgrade.rst "HA 환경에서 DB 마이그레이션", steps C1-C9): the master's DB through
 # unloaddb -> loaddb on the target line, backupdb there, restoredb of that backup on the slave, HA conf, start.
 # Sourced by e2e/ops/ha/run.sh after pair.sh; defines functions only. Uses run.sh's OUT, DB, PRISTINE, H, nd, tgt_env.

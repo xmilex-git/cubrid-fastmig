@@ -332,10 +332,10 @@ a byte copy, and the clone owns only that share; so a clone is never slower than
 `FALLOC_FL_UNSHARE_RANGE`, used for this until workspace#556, read the shared blocks back from disk a page at a time
 on one worker per volume and lost to the copy once about 40 % of a volume was rewritten.
 
-Big DBs (4.2 GB of volumes, about 22 million rows; `--workers 16 --mem 1G`, warm, CPU 16-31, three rounds in turn,
+Big DBs, measured for workspace#556 before the unallocated-page headers of workspace#591 (81c18f0) were added to the clone path (4.2 GB of volumes, about 22 million rows; `--workers 16 --mem 1G`, warm, CPU 16-31, three rounds in turn,
 median wall seconds; own bytes = the target volumes' blocks not shared with the source, `filefrag`):
 
-| Source → develop | BASE (CoW on write) | `FALLOC_FL_UNSHARE_RANGE` | write over (now) | `--no-clone` |
+| Source → develop | BASE (CoW on write) | `FALLOC_FL_UNSHARE_RANGE` | write over (current method) | `--no-clone` |
 |---|---|---|---|---|
 | 11.4: seconds | 16.95 | 19.68 | 17.41 | 17.44 |
 | 11.4: taking the ranges, s | 0.002 | 2.84 | 0.92 | — |

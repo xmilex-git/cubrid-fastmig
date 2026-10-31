@@ -74,6 +74,10 @@ _Avoid_: addvol, 볼륨 생성(엔진 createdb와 섞인다)
 볼륨 확장과 볼륨 추가를 함께 이르는 말: 도착 DB가 공간이 모자랄 때 늘어나는 방식과 그 설정(`db_volume_size`, 새 볼륨의 자리).
 _Avoid_: 자동 확장(엔진 기능 이름과 섞인다), 공간 확보
 
+**미할당 페이지 (unallocated page)**:
+어느 파일에도 할당되지 않은 볼륨 페이지: 파일이 예약한 섹터 안에서 아직 할당하지 않은 페이지와 빈 섹터의 페이지. 엔진은 이런 페이지를 NULL LSA와 자기 VPID 머리로 포맷하거나(`fileio_initialize_res`) 한 번도 쓰지 않은 채(머리 VPID가 NULL) 둔다. 머리가 다른 VPID(0으로 채운 머리는 (0, 0))를 가리키면 엔진이 그 페이지를 처음 fix할 때(예: kill -9 뒤 recovery redo) `pgbuf_set_bcb_page_vpid`에서 assert한다. clone 볼륨에서 내용이 필요 없는 페이지에 도구가 자기 블록을 줄 때 이 머리를 쓰고(`preallocate::unallocated_pages`), 검증기는 파일 섹터의 미할당 페이지 머리를 `unallocated-page-header`로 검사한다([workspace#591](https://github.com/xmilex-git/workspace/issues/591)).
+_Avoid_: 빈 페이지(빈 섹터와 섞인다), 0 페이지, free page
+
 ## 카탈로그와 인덱스
 
 **클래스 객체 (class object)**:
@@ -139,7 +143,7 @@ _Avoid_: HA 이관, 복제 상태 이전
 _Avoid_: checkdb, 체커
 
 **집합 비교 (set comparison)**:
-출발 DB와 도착 DB의 엔진 unloaddb 결과가 순서와 무관하게 같은 행·스키마를 담는지 보는 최종 합격 판정. 검증기와 독립된 값 정확성의 오라클이다.
+출발 DB와 도착 DB의 엔진 unloaddb 결과가 순서와 무관하게 같은 행·스키마를 담는지 보는, 옮긴 직후의 합격 판정. 검증기와 독립된 값 정확성의 오라클이다. 옮긴 DB를 운영한 뒤의 합격은 parity가 따로 본다(G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587), [ADR 0007](docs/adr/0007-rust-verifier-instead-of-checkdb.md)).
 _Avoid_: diff 비교, 정합성 체크
 
 **의도된 차이 (intended difference)**:
@@ -190,11 +194,11 @@ _Avoid_: 통합 테스트, e2e 테스트
 _Avoid_: 정상 경로, 표준 경로
 
 **운영 시나리오 (operations scenario)**:
-옮긴 DB에 운영 중 일어나는 일을 차례로 가하는 고정 절차. 기준 DB의 모든 기능에 대한 DML 반복, 통계 갱신, checkpoint, `kill -9` 뒤 재기동, vacuumdb, addvoldb, compactdb, backupdb → restoredb로 이루어진다. `e2e/ops/` 실행기가 돌리고 단계마다 고정 질의로 결과를 남긴다(G11 [workspace#587](https://github.com/xmilex-git/workspace/issues/587)).
+옮긴 DB에 운영 중 일어나는 일을 차례로 가하는 고정 절차. 기준 DB의 모든 기능에 대한 DML 반복, 통계 갱신, checkpoint, `kill -9` 뒤 재기동, vacuumdb, addvoldb, compactdb, backupdb → restoredb로 이루어진다. `e2e/ops/` 실행기가 돌리고 단계마다 고정 질의로 결과를 남긴다(G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587)).
 _Avoid_: 스트레스 테스트, 운영 테스트
 
 **parity**:
-같은 출발 DB를 도구로 옮긴 쪽과 공식 경로로 만든 쪽에 같은 운영 시나리오를 돌렸을 때, 단계마다 고정 질의 결과가 같은 것. serial·AUTO_INCREMENT가 만든 값은 의도된 차이라서 비교하지 않고, 개수와 순서만 비교한다. 서버 통계와 에러 로그 문구는 비교 대상이 아니다.
+같은 출발 DB를 도구로 옮긴 쪽과 공식 경로로 만든 쪽에 같은 운영 시나리오를 돌렸을 때, 단계마다 고정 질의 결과가 같은 것. serial·AUTO_INCREMENT가 만든 값은 의도된 차이라서 비교하지 않고, 개수와 순서만 비교한다. 서버 통계와 에러 로그 문구는 비교 대상이 아니다. 운영 시나리오의 assert·코어·에러 0과 함께 운영 검증의 합격 기준이다(G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587), ADR 0007 보완).
 _Avoid_: 동등성, 정합성 체크
 
 ## 볼륨 밖 자산
