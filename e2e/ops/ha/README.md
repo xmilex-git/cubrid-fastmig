@@ -65,14 +65,15 @@ diff need not be empty; the pass rule is parity: the same diffs and the same che
 `db_ha_apply_info` (`_db_ha_apply_info` in develop) holds each applier's position in its master's log, found by
 (`db_name`, `copied_log_path`) and trusted when its `db_creation_time` equals the copied log header's
 (`log_applier.c la_get_last_ha_applied_info`). G4 keeps `db_creation`, and the target log starts at a later page
-(`copy::new_log_start`), so a carried row sends the applier into a log chain the target lacks. Runs on 11.4.6 →
-develop (T1 clean), 2026-10-31:
+(`copy::new_log_start`), so a carried row sends the applier into a log chain the target lacks. Runs on T1 clean, 11.4.6 →
+develop (run-04..06) and develop → develop (run-07), 2026-10-31:
 
 | Run | Tool | Copied-log path | Result |
 |---|---|---|---|
 | run-04 | carried the row | new | row not matched; applier starts at the copied log's end; replication, failover, fail-back pass |
 | run-05 | carried the row | the source pair's | applier starts at required LSA 9205\|15704; "cannot find archive log for 9205 page", -81; slave heartbeat start fails |
 | run-06 | empties the table | the source pair's | plan "1 rows reset" on both nodes; applier starts in the new log (9265\|16240, 9266\|368); replication, failover, fail-back pass; no assert, no core |
+| run-07 (develop → develop) | empties the table | the source pair's | same-version writer: "1 rows reset" on both nodes; applier starts in the new log (9235\|9032, 9236\|688); replication, failover, fail-back pass; no assert, no core |
 
 So migrate empties the table on both paths (`catalog::ha_apply_info`, ADR 0002 amendment), the start `restoreslave`
 gives a rebuilt slave. Both nodes have rows: the master's applier of the slave's log writes one too.
