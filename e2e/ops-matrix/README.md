@@ -54,7 +54,7 @@ FASTMIG_OPS_SERVER_CTL=<workspace>/.agents/skills/cubrid-server-control/scripts/
 [FASTMIG_OPS_MATRIX_BIG_ROOT=<BIG_ROOT> FASTMIG_OPS_MATRIX_BIG_UNLOAD=<work dir>/unload/fm114_clean] \
   taskset -c 0-15 just ops-matrix <develop|11.4|big> <out root> [id...]
 
-just ops-matrix-summary <out root> > docs/ops-verification.md
+just ops-matrix-summary <out root>   # rewrites only the "## Version matrix" section; HA (T38) stays
 ```
 
 `[id...]` reruns only those rows; each run takes the next free `<out root>/<id>/run-NN`, and the summary reads the
@@ -71,7 +71,7 @@ LOB base exist, without writing or running anything (the binary need not be buil
 <out root>/lane-<lane>-install.txt   the install, its cubrid_rel, libcubrid sha256, binary sha256
 ```
 
-[summarize.sh](summarize.sh) turns these into docs/ops-verification.md: per row the failed / all step and check
+[summarize.sh](summarize.sh) turns these into the "Version matrix" section of docs/ops-verification.md: per row the failed / all step and check
 rows, the differing / all parity steps, the server log counts of both sides (errors, asserts, cores and PL server drops, the runner's known flake), the archives created and the verdict
 (the runner's exit code). A failing row gets a defect ticket, recorded in [defects.tsv](defects.tsv) (`id`,
 ticket) and shown in the table.

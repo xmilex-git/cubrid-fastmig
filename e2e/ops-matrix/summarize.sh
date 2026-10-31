@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
-# Builds docs/ops-verification.md, the pass table of the T37 version matrix, from the runs run_lane.sh left
-# (workspace#589).
+# Writes the section "## Version matrix" of docs/ops-verification.md, the pass table of the T37 version matrix, from
+# the runs run_lane.sh left (workspace#589). The other sections of the document (HA, T38) are kept as they are.
 #
-# Input: bash e2e/ops-matrix/summarize.sh <out root> > docs/ops-verification.md
+# Input: bash e2e/ops-matrix/summarize.sh <out root> <document>
 #   <out root>  the run_lane.sh out root; per row of paths.tsv the highest <id>/run-NN is read
+#   <document>  docs/ops-verification.md: its "## Version matrix" section is replaced (up to the next "## " heading),
+#               or inserted before the first "## " heading when it has none
 # Reads per run: run-NN.rc, steps.tsv (side step seconds rc: migrated/official step and check-<step> rows, parity
 #   rows), server-log-summary.tsv, archives.tsv, meta.txt; lane-*-install.txt; defects.tsv (row id -> defect ticket).
-# Output: the markdown document on stdout. Exit 0, also when rows failed or did not run (the table says so).
+# Output: the document rewritten in place, the section alone also in <out root>/ops-verification-section.md. Exit 0,
+#   also when rows failed or did not run (the table says so); 2 bad arguments.
 # Source: T37 workspace#589 (pass rule: assert, core and error log 0, parity diff 0, log archives >= 2 after the
 #   rounds); runner output e2e/ops/README.md § Output.
 set -uo pipefail
 
 ROOT=$(realpath "${1:?out root}")
+DOC=${2:?document (docs/ops-verification.md)}
+[ -f "$DOC" ] || { echo "no $DOC" >&2; exit 2; }
 MATRIX=$(dirname "$(realpath "$0")")
 
 # col <tsv> <header name> <side>: the named column of the side's row (the files carry a header line)
@@ -24,8 +29,10 @@ side_logs() {
   echo "$(col "$1" error_lines "$2")/$(col "$1" assert_lines "$2")/$(col "$1" cores "$2")/$(col "$1" pl_drops "$2")"
 }
 
+SECTION=$ROOT/ops-verification-section.md
+{
 cat <<'EOF'
-# Operations verification: the version matrix (workspace#589)
+## Version matrix
 
 Each row takes one baseline DB to the target version two ways — cubrid-fastmig (*migrated*) and the official path,
 source `unloaddb` → target `loaddb` (*official*) — and runs the same operations scenario on both
@@ -46,7 +53,7 @@ Columns: *Steps* = failed / all step and check rows of both sides; *Parity* = di
 
 EOF
 
-echo '## Engines and binary'
+echo '### Engines and binary'
 echo
 for f in "$ROOT"/lane-*-install.txt; do
   [ -f "$f" ] || continue
@@ -55,7 +62,7 @@ for f in "$ROOT"/lane-*-install.txt; do
     "$(sed -n 2p "$f")" "$(sed -n 's/^libcubrid_sha256=//p' "$f")" "$(sed -n 's/^bin_sha256=//p' "$f")"
 done
 echo
-echo '## Table'
+echo '### Table'
 echo
 echo '| Row | Source → target | Variant | Rounds | Steps | Parity | Err/Assert/Core/PL | Archives | Verdict | Earlier runs | Defect |'
 echo '|---|---|---|---|---|---|---|---|---|---|---|'
@@ -107,3 +114,16 @@ done <"$MATRIX/paths.tsv"
 
 echo
 echo "Runs: \`$(basename "$ROOT")\`, the highest \`run-NN\` per row; generated $(date -Is) by e2e/ops-matrix/summarize.sh."
+} >"$SECTION"
+
+# splice: replace the old section (its heading up to the next "## "), or insert before the first "## " heading
+has=0; grep -qx '## Version matrix' "$DOC" && has=1
+awk -v sec="$SECTION" -v has="$has" '
+  function put() { while ((getline l < sec) > 0) print l; print ""; done = 1 }
+  /^## Version matrix$/ { put(); skip = 1; next }
+  skip && /^## / { skip = 0 }
+  skip { next }
+  /^## / && !done && !has { put() }
+  { print }
+  END { if (!done) { print ""; put() } }
+' "$DOC" >"$DOC.new" && mv "$DOC.new" "$DOC"
