@@ -1,10 +1,10 @@
 //! The SQL files a migration leaves next to the target for the user to run on the target engine:
-//! `deferred-indexes.sql`, `recompile-plcsql.sql`, `update-statistics.sql`.
+//! `deferred-indexes.sql`, `recompile-plcsql.sql`, `recompile-views.sql`, `update-statistics.sql`.
 //!
-//! Input: the deferred (function/filter) indexes with their class objects; the PL/CSQL routine names.
+//! Input: the deferred (function/filter) indexes with their class objects; the PL/CSQL routine names; the user views' query specs.
 //! Output: the files' text.
 //! Source: workspace#486 (deferred indexes: `CREATE INDEX` from the class object's `expr_str`/`pred_string`),
-//! workspace#488 (PL/CSQL routines to recompile), workspace#482 7 (`UPDATE STATISTICS ON ALL CLASSES;`);
+//! workspace#488 (PL/CSQL routines to recompile), workspace#599 (view specs to recompile), workspace#482 7 (`UPDATE STATISTICS ON ALL CLASSES;`);
 //! DDL shape of release/11.4 `unload_schema.c:emit_index_def` (function key at `col_id`, `attr_index_start + 1`
 //! keys, `) where <pred>`, `DESC`, `INVISIBLE`, `COMMENT`); function info `{expr_str, expr_stream, col_id,
 //! attr_index_start, fi_domain}` and filter info `{pred_string, pred_stream, att_ids}` (R7 § 3.5-3.6).
@@ -218,4 +218,31 @@ pub fn plcsql_routines(rows: &[crate::class_rows::Row]) -> Vec<(Vec<u8>, bool)> 
             _ => None,
         })
         .collect()
+}
+
+/// `recompile-views.sql`: `ALTER VCLASS [owner].[name] CHANGE QUERY <n> <spec>;` per query spec of every user view, so
+/// the develop engine checks each spec against the view's declared columns again and stores it with
+/// `cast(<column> as <declared domain>)` where its own derivation of the column differs (SUM over NUMERIC(p,s): an
+/// older line derives numeric(38,s), develop numeric without precision). loaddb's `ADD QUERY` on the official path
+/// does the same; without it develop's executor finds an output value of another domain than the column
+/// (`qdata_check_output_column`). `CHANGE QUERY` keeps the columns, their comments, the view OID and its grants;
+/// `ALTER VIEW ... AS` would drop the columns and derive them anew. `views` are `(unique name owner.name, specs)`.
+/// Source: workspace#599; develop `semantic_check.c:pt_validate_query_spec` → `pt_type_cast_vclass_query_spec_column`,
+/// `execute_schema.c:do_alter_one_clause_with_template` case `PT_MODIFY_QUERY` (spec number from 1).
+pub fn recompile_views_sql(views: &[(Vec<u8>, Vec<Vec<u8>>)]) -> String {
+    let mut s = String::from(
+        "-- View query specs copied as the source engine stored them (workspace#599). Run on the target before the views\n\
+         -- are queried: csql -u dba <db> -i recompile-views.sql\n",
+    );
+    for (name, specs) in views {
+        for (n, spec) in specs.iter().enumerate() {
+            s.push_str(&format!(
+                "ALTER VCLASS {} CHANGE QUERY {} {};\n",
+                class_ident(name),
+                n + 1,
+                String::from_utf8_lossy(spec).trim_end()
+            ));
+        }
+    }
+    s
 }

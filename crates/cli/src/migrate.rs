@@ -4,7 +4,7 @@
 //! Input: the source DB name (found in the source `databases.txt`), the target directory and options.
 //! Output: the target volumes, a new `_lgat`, `_vinf`, `_keys`, Java SP directories, referenced LOB files, and in
 //! `<dest>/fastmig/`: `plan.json`, `report.json`, `verify.jsonl` (with `--verify`), the SQL files for the user
-//! (`deferred-indexes.sql`, `recompile-plcsql.sql`, `post-migration-fixes.sql`, `update-statistics.sql`), `lob-manifest`, `lob-outside-base`,
+//! (`deferred-indexes.sql`, `recompile-plcsql.sql`, `recompile-views.sql`, `post-migration-fixes.sql`, `update-statistics.sql`), `lob-manifest`, `lob-outside-base`,
 //! `measured-classes` and `source-fingerprint` (read by finalize); then the target's `databases.txt` line. Progress
 //! (the phases in `PHASES`) goes to stderr. The source is only read; its active log is read-locked for the whole run.
 //! Order: the plan refuses before anything is written; the new log comes last of the writes; with `--verify` the
@@ -843,6 +843,11 @@ fn write_outputs(
         marker,
         &dir.join("recompile-plcsql.sql"),
         &plan.recompile_plcsql_sql,
+    )?;
+    write_recorded(
+        marker,
+        &dir.join("recompile-views.sql"),
+        &plan.recompile_views_sql,
     )?;
     write_recorded(
         marker,

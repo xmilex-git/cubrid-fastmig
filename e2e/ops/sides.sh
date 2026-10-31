@@ -167,7 +167,7 @@ prepare_migrated() {
     --workers "$W" --verify --progress plain || return 1
   grep -q "^$DB[[:space:]]" "$CUBRID_DATABASES/databases.txt" || { echo "target not registered"; return 1; }
   local f
-  for f in deferred-indexes recompile-plcsql update-statistics; do
+  for f in deferred-indexes recompile-plcsql recompile-views update-statistics; do
     [ ! -f "$SIDE_DB/fastmig/$f.sql" ] || { echo "== $f"; sql_file -S "$SIDE_DB/fastmig/$f.sql" || return 1; }
   done
   # finalize deletes the source copy, so only the two sides' DBs remain; a lob-base outside the copy belongs to the

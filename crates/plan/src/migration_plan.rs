@@ -20,7 +20,9 @@ use fastmig_catalog::classify::{ClassKind, classify};
 use fastmig_catalog::collation_check::check_collations;
 use fastmig_catalog::deferred_indexes::{deferred_indexes, report_name};
 use fastmig_catalog::identifier_lower::IdentifierCasing;
-use fastmig_catalog::output_sql::{deferred_indexes_sql, plcsql_routines, recompile_plcsql_sql};
+use fastmig_catalog::output_sql::{
+    deferred_indexes_sql, plcsql_routines, recompile_plcsql_sql, recompile_views_sql,
+};
 use fastmig_catalog::owner_qualification::qualify_names;
 use fastmig_catalog::owner_qualified_names;
 use fastmig_catalog::source_classes::{SourceClass, read_classes};
@@ -148,6 +150,8 @@ pub struct Plan {
     pub server_passwords: HashMap<Oid, Vec<u8>>,
     /// `<dest>/fastmig/recompile-plcsql.sql`.
     pub recompile_plcsql_sql: String,
+    /// `<dest>/fastmig/recompile-views.sql`; empty unless an older line moves to develop (workspace#599).
+    pub recompile_views_sql: String,
     pub plcsql_routines: usize,
     pub lob: LobScan,
     pub java: DirSize,
@@ -575,6 +579,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     let mut new_heaps_bound = 0usize;
     let mut grants = ExecuteGrants::default();
     let mut servers = ServerPasswords::default();
+    let mut views_sql = String::new();
     // catalog regeneration inputs that refuse: collations, default values (regenerates-line only)
     if regenerates {
         let charset = i.vols.volume(0)?.header.db_charset as u8;
@@ -695,6 +700,24 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         let qualified = deferred_indexes(&mapped, line)?;
         let items: Vec<_> = qualified.iter().map(|(c, k)| (*c, k)).collect();
         deferred_sql = deferred_indexes_sql(&items, line).map_err(invalid)?;
+        // an older line derives some view columns with another domain than develop; develop re-checks each spec
+        // against the declared columns and stores its casts, as loaddb's ADD QUERY does (workspace#599)
+        if i.target_line == VersionLine::Develop && line != VersionLine::Develop {
+            let views: Vec<(Vec<u8>, Vec<Vec<u8>>)> = mapped
+                .iter()
+                .filter(|c| c.class.class_type == ClassType::Vclass && !c.class.is_system_class())
+                .filter(|c| !c.class.query_specs.is_empty())
+                .map(|c| (c.class.name.clone(), c.class.query_specs.clone()))
+                .collect();
+            if !views.is_empty() {
+                warnings.push(format!(
+                    "{} views keep the query specs the source stored; run fastmig/recompile-views.sql on the target \
+                     before querying them (workspace#599)",
+                    views.len()
+                ));
+                views_sql = recompile_views_sql(&views);
+            }
+        }
         // DBLink passwords under the source key: re-wrapped for develop (workspace#556)
         servers = server_passwords(
             i.vols,
@@ -972,6 +995,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
             &servers.fix_sql,
         ]),
         recompile_plcsql_sql: recompile_plcsql_sql(&routines),
+        recompile_views_sql: views_sql,
         server_passwords: servers.values,
         plcsql_routines: routines.len(),
         lob,

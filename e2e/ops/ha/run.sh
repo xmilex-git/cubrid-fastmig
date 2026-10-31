@@ -201,7 +201,7 @@ migrate_node() {
   "$BIN" plan "$DB" "${common[@]}" --json >"$OUT/log/plan-${H[i]}.json" || return 1
   "$BIN" migrate "$DB" "${common[@]}" --workers "$W" --verify --progress plain || return 1
   # the SQL migrate leaves for the user (G5), SA in the node under the target install
-  local f out; for f in deferred-indexes recompile-plcsql update-statistics; do
+  local f out; for f in deferred-indexes recompile-plcsql recompile-views update-statistics; do
     [ -f "$d/tgt/fastmig/$f.sql" ] || continue
     out=$(node_sh "$i" $(tgt_env "$i") "csql -S -u dba -i '$d/tgt/fastmig/$f.sql' $DB" 2>&1) || return 1
     printf '%s\n' "$out"

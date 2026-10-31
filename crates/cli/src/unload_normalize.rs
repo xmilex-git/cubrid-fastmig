@@ -45,6 +45,8 @@ pub enum Rewrite {
     DeduplicateLevel,
     /// `call [set_password_encoded...]('<hash>')` → `('')`: develop salts an unsalted hash anew on every unload.
     PasswordHash,
+    /// Unwrap every ` cast(<expr> as <type>)` of a view query to `<expr>`.
+    ViewColumnCast,
     /// The 10.2 print forms, one per function of [`crate::unload_rules_10_2`].
     OwnerQualifiedNames,
     ViewQueryOnePass,
@@ -267,6 +269,17 @@ const V11_4_TO_DEVELOP: &[Rule] = &[
         side: Side::Both,
         rewrite: Rewrite::PasswordHash,
     },
+    // develop derives some view columns with another domain than the source line did (SUM over NUMERIC(p,s): numeric
+    // without precision, not numeric(38,s)), so its ADD QUERY, and fastmig/recompile-views.sql on a migrated view,
+    // store `cast(<expr> as <declared domain>)` where the source stored `<expr>` (workspace#599). Every cast of a view
+    // query is unwrapped on both sides: the rest of the query is still compared; whether the target holds the casts
+    // the official path stores is the comparison against the official path's unload, not this one's.
+    Rule {
+        name: "view-column-cast",
+        files: &["schema"],
+        side: Side::Both,
+        rewrite: Rewrite::ViewColumnCast,
+    },
 ];
 
 /// Applies `rules` to one file's entries of one side; returns how many entries each rule changed. `owners` are the
@@ -310,6 +323,7 @@ pub fn normalize(
                     .filter_map(drop_deduplicate_level)
                     .count(),
                 Rewrite::PasswordHash => entries.iter_mut().filter_map(mask_password_hash).count(),
+                Rewrite::ViewColumnCast => entries.iter_mut().filter_map(unwrap_view_casts).count(),
                 Rewrite::OwnerQualifiedNames => {
                     v10_2::owner_qualified_names(suffix, entries, owners)
                 }
@@ -484,4 +498,73 @@ fn drop_deduplicate_level(e: &mut Vec<u8>) -> Option<()> {
         e.drain(from..to);
     }
     Some(())
+}
+
+/// Unwraps every ` cast(<expr> as <type>)` of an `ALTER VCLASS ... ADD QUERY` or `CHANGE QUERY` entry to `<expr>`,
+/// outside string values and bracketed names (see rule view-column-cast).
+fn unwrap_view_casts(e: &mut Vec<u8>) -> Option<()> {
+    let has = |w: &[u8]| e.windows(w.len()).any(|x| x == w);
+    if !e.starts_with(b"ALTER VCLASS [") || !(has(b" ADD QUERY ") || has(b" CHANGE QUERY ")) {
+        return None;
+    }
+    let mut changed = false;
+    while let Some((start, expr_end, close)) = next_cast(e) {
+        let expr = e[start + CAST.len()..expr_end].to_vec();
+        e.splice(start..=close, expr);
+        changed = true;
+    }
+    changed.then_some(())
+}
+
+const CAST: &[u8] = b" cast(";
+
+/// The first ` cast(` of `e` outside string values and bracketed names whose parenthesis holds ` as ` at its own
+/// level: `(start of " cast(", end of <expr>, closing parenthesis)`.
+fn next_cast(e: &[u8]) -> Option<(usize, usize, usize)> {
+    // `'` opens a string value ('' inside one reads as close + open), `[` a name up to `]`
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < e.len() {
+        match (quote, e[i]) {
+            (Some(q), b) if b == q => quote = None,
+            (Some(_), _) => {}
+            (None, b'\'') => quote = Some(b'\''),
+            (None, b'[') => quote = Some(b']'),
+            (None, _) if e[i..].starts_with(CAST) => {
+                if let Some((expr_end, close)) = cast_body(e, i + CAST.len()) {
+                    return Some((i, expr_end, close));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// From just inside a cast's parenthesis: `(the first " as " at depth 1, the closing parenthesis)`.
+fn cast_body(e: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut quote: Option<u8> = None;
+    let mut depth = 1;
+    let mut as_at = None;
+    for i in from..e.len() {
+        match (quote, e[i]) {
+            (Some(q), b) if b == q => quote = None,
+            (Some(_), _) => {}
+            (None, b'\'') => quote = Some(b'\''),
+            (None, b'[') => quote = Some(b']'),
+            (None, b'(') => depth += 1,
+            (None, b')') => {
+                depth -= 1;
+                if depth == 0 {
+                    return as_at.map(|a| (a, i));
+                }
+            }
+            (None, _) if depth == 1 && as_at.is_none() && e[i..].starts_with(b" as ") => {
+                as_at = Some(i)
+            }
+            _ => {}
+        }
+    }
+    None
 }

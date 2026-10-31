@@ -113,7 +113,7 @@ grep -q "^$DB[[:space:]]" "$OUT/dbs/databases.txt" && registered=1
 
 if [ $registered = 1 ]; then
   # 5. the SQL migrate leaves for the user: deferred indexes before the set comparison (G5)
-  for f in deferred-indexes recompile-plcsql update-statistics; do
+  for f in deferred-indexes recompile-plcsql recompile-views update-statistics; do
     [ ! -f "$TGT/fastmig/$f.sql" ] || step "sql-$f" 0 sql_file "$TGT/fastmig/$f.sql" "$DB"
   done
   # 6. target unloaddb, set comparison against the source's engine unload

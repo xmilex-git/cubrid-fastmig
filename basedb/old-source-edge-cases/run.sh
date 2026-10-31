@@ -54,7 +54,7 @@ if tail -1 "$out/fastmig/plan.out" | grep -q 'rc=0'; then
   use "$dev" "$out/db-fm"
   if grep -q "^$sdb[[:space:]]" "$out/db-fm/databases.txt"; then
     tgt="$out/db-fm/$sdb"
-    for f in deferred-indexes recompile-plcsql update-statistics; do
+    for f in deferred-indexes recompile-plcsql recompile-views update-statistics; do
       [ ! -f "$tgt/fastmig/$f.sql" ] || ( cd "$out/fastmig" && csql -S -u dba -i "$tgt/fastmig/$f.sql" "$sdb" > "$f.out" 2>&1 )
     done
     checks "$sdb" "$out/fastmig" ""
