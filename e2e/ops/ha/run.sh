@@ -113,11 +113,11 @@ checks() {
   return 0
 }
 
-# dml <i> <src|tgt>: FASTMIG_HA_ROUNDS rounds of FASTMIG_HA_DML on node i
+# dml <i> <src|tgt>: FASTMIG_HA_ROUNDS rounds of FASTMIG_HA_DML (space-separated files, run in order) on node i
 dml() {
-  local r
+  local r f
   [ -n "${FASTMIG_HA_DML:-}" ] || { echo "FASTMIG_HA_DML unset: no DML"; return 0; }
-  for r in $(seq "$ROUNDS"); do sql "$1" "$2" "$FASTMIG_HA_DML" || return 1; done
+  for r in $(seq "$ROUNDS"); do for f in $FASTMIG_HA_DML; do echo "round $r $f"; sql "$1" "$2" "$f" || return 1; done; done
 }
 
 # apply_info <i> <src|tgt>: the slave's db_ha_apply_info rows (what migrate carries over, README "Open questions")
@@ -139,20 +139,30 @@ stage() {
     : >"$d/tgt-dbs/databases.txt"
   done
 }
+# the DML and checks files are copied into the run dir: only it is mounted in the nodes
+stage_sql() {
+  local f dml=()
+  mkdir -p "$OUT/sql"
+  for f in ${FASTMIG_HA_DML:-}; do cp "$f" "$OUT/sql/" || return 1; dml+=("$OUT/sql/$(basename "$f")"); done
+  FASTMIG_HA_DML="${dml[*]}"
+  [ -z "${FASTMIG_HA_CHECKS:-}" ] || { cp "$FASTMIG_HA_CHECKS" "$OUT/sql/" && FASTMIG_HA_CHECKS="$OUT/sql/$(basename "$FASTMIG_HA_CHECKS")"; }
+}
 step stage 0 stage || exit 1
+stage_sql || exit 1
 step pair-up 0 pair_up "$RUN_ID" "$OUT" || { pair_down; exit 1; }
 trap 'pair_down' EXIT
 
+# the master stays to_be_active until the slave joins (run-02), so both start before the modes are read
 step src-hb-start-master 0 hb 0 src start
-step src-mode-master 0 wait_mode 0 src active
 step src-hb-start-slave 0 hb 1 src start
+step src-mode-master 0 wait_mode 0 src active
 step src-mode-slave 0 wait_mode 1 src standby
 step src-hb-status 0 hb 0 src status
 printf 'CREATE TABLE fm590_sync (token VARCHAR(64) PRIMARY KEY);\nCOMMIT;\n' >"$OUT/log/sync-table.sql"
 step src-sync-table 0 sql 0 src "$OUT/log/sync-table.sql"
-step src-dml 0 dml 0 src
+# The source pair writes only the replicated marker: T36's round.sql and checks.sql are written for the develop
+# target and fail on 11.4 (run-03: non-updatable view, numeric coercion), so they run on the target pair only.
 step src-sync 0 sync_mark 0 1 src src-end
-step src-checks 0 checks source src
 step src-apply-info 0 apply_info 1 src
 # slave first, so the master's last log is copied and applied before it stops; both must end with a normal shutdown
 step src-hb-stop-slave 0 hb 1 src stop
@@ -190,14 +200,21 @@ target_conf() {
     d=$(nd "$i")
     ha_hosts "$d/tgt-dbs/databases.txt" "${H[0]}" "${H[1]}"
     ha_conf "$d/tgt-install" "$DB" "${H[0]}" "${H[1]}"
+    [ "${FASTMIG_HA_SAME_COPY_LOG_PATH:-0}" = 1 ] || continue
+    # an operator who keeps CUBRID_DATABASES: the target copies the peer's log to the path the source pair used, so the
+    # db_ha_apply_info row migrate carried over matches (db_name, copied_log_path). The source pair's copied logs are
+    # moved aside, so the copied log there is the new master's only.
+    echo "ha_copy_log_base=$d/src" >>"$d/tgt-install/conf/cubrid_ha.conf"
+    mv "$d/src/${DB}_${H[1 - i]}" "$d/src/${DB}_${H[1 - i]}.source-pair" || return 1
   done
   [ "${FASTMIG_HA_RESET_APPLY_INFO:-0}" = 1 ] || return 0
   node_sh 1 $(tgt_env 1) "csql -S -u dba -c 'DELETE FROM db_ha_apply_info' $DB"
 }
 step tgt-conf 0 target_conf
+# the master stays to_be_active until the slave joins (run-02), so both start before the modes are read
 step tgt-hb-start-master 0 hb 0 tgt start
-step tgt-mode-master 0 wait_mode 0 tgt active
 step tgt-hb-start-slave 0 hb 1 tgt start
+step tgt-mode-master 0 wait_mode 0 tgt active
 step tgt-mode-slave 0 wait_mode 1 tgt standby
 step tgt-hb-status 0 hb 0 tgt status
 step tgt-apply-info-start 0 apply_info 1 tgt
@@ -221,8 +238,10 @@ evidence() {
   for i in 0 1; do
     d=$(nd "$i")
     hb "$i" tgt status
-    grep -rl -i 'assert' "$d/src-install/log" "$d/tgt-install/log" 2>/dev/null | sed "s|^|assert-in: |"
-    grep -rh -c 'ERROR' "$d/tgt-install/log/server" 2>/dev/null | awk -v h="${H[i]}" '{ s += $1 } END { print h, "error lines", s + 0 }'
+    # only log files this run wrote: the install copies carry older runs' logs
+    find "$d/src-install/log" "$d/tgt-install/log" -type f -newermt "@$START_EPOCH" -exec grep -il assert {} + | sed "s|^|assert-in: |"
+    find "$d/tgt-install/log/server" -type f -name '*.err' -newermt "@$START_EPOCH" -exec cat {} + | grep -c 'ERROR' \
+      | sed "s|^|${H[i]} error lines |"
   done
   # cores are matched to this run's processes by the reader (pid in the name, cubrid-diagnose P13)
   find /data/core/ -maxdepth 1 -name 'core.cub*' -newermt "@$START_EPOCH" -printf 'core: %p\n'
