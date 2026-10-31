@@ -1,0 +1,36 @@
+-- TPC-H Query 18: Large Volume Customer
+-- T40 (workspace#595): ORDER BY made total with o_orderkey (LIMIT); else as q18.sql
+select
+	c_name,
+	c_custkey,
+	o_orderkey,
+	TO_CHAR(o_orderdate, 'YYYY-MM-DD') as o_orderdate,
+	o_totalprice,
+	sum(l_quantity)
+from
+	customer,
+	orders,
+	lineitem
+where
+	o_orderkey in (
+		select
+			l_orderkey
+		from
+			lineitem
+		group by
+			l_orderkey having
+				sum(l_quantity) > 300
+	)
+	and c_custkey = o_custkey
+	and o_orderkey = l_orderkey
+group by
+	c_name,
+	c_custkey,
+	o_orderkey,
+	o_orderdate,
+	o_totalprice
+order by
+	o_totalprice desc,
+	o_orderdate,
+	o_orderkey
+LIMIT 100;

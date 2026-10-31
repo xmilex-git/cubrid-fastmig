@@ -57,3 +57,15 @@ ops-matrix LANE OUT_ROOT *IDS: release
 # The pass table of the version matrix from its runs: rewrites the "Version matrix" section of docs/ops-verification.md.
 ops-matrix-summary OUT_ROOT:
     bash e2e/ops-matrix/summarize.sh {{OUT_ROOT}} docs/ops-verification.md
+
+# Application query parity of one baseline DB (e2e/ops/queries/README.md), SET = tpch | basedb; needs FASTMIG_OPS_INSTALL, FASTMIG_OPS_PORT, FASTMIG_OPS_SERVER_CTL.
+ops-queries PRISTINE TARGET_VERSION SET OUT: release
+    bash e2e/ops/queries/run.sh target/release/cubrid-fastmig {{PRISTINE}} {{TARGET_VERSION}} {{SET}} {{OUT}}
+
+# The basedb query set over the clean rows of the version matrix for one target; same environment as ops-queries.
+ops-queries-paths BASEDB_ROOT TARGET_VERSION OUT_ROOT: release
+    bash e2e/ops/queries/run_paths.sh target/release/cubrid-fastmig {{BASEDB_ROOT}} {{TARGET_VERSION}} {{OUT_ROOT}}
+
+# Build the TPC-H SF1-scale source DB (e2e/ops/queries/README.md § TPC-H DB) with one engine; needs a claimed TPCH_PORT.
+tpch-db LABEL INSTALL ROOT:
+    bash e2e/ops/queries/tpch-db/build.sh {{LABEL}} {{INSTALL}} "${TPCH_PORT:?TPCH_PORT required}" "${FASTMIG_OPS_SERVER_CTL:?FASTMIG_OPS_SERVER_CTL required}" {{ROOT}}

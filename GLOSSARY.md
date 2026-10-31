@@ -201,6 +201,10 @@ _Avoid_: 스트레스 테스트, 운영 테스트
 같은 출발 DB를 도구로 옮긴 쪽과 공식 경로로 만든 쪽에 같은 운영 시나리오를 돌렸을 때, 단계마다 고정 질의 결과가 같은 것. serial·AUTO_INCREMENT가 만든 값은 의도된 차이라서 비교하지 않고, 개수와 순서만 비교한다. 서버 통계와 에러 로그 문구는 비교 대상이 아니다. 운영 시나리오의 assert·코어·에러 0과 함께 운영 검증의 합격 기준이다(G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587), ADR 0007 보완).
 _Avoid_: 동등성, 정합성 체크
 
+**애플리케이션 질의 (application query)**:
+조인·집계·서브쿼리·윈도우·문자열/날짜/JSON 함수·파티션 프루닝·다른 사용자 권한을 섞은 읽기 전용 고정 질의. 옮긴 쪽과 공식 경로 쪽에서 같은 질의의 출력을 바이트로 비교한다(parity). 결과 순서는 ORDER BY로 전부 고정하고 DOUBLE 집계는 자리를 맞춘다. 실행 계획은 기록만 하고 비교하지 않는다. TPC-H 22질의와 basedb 질의 30개, `e2e/ops/queries/`(T40 [workspace#595](https://github.com/xmilex-git/workspace/issues/595)).
+_Avoid_: 사용자 쿼리, 샘플 쿼리
+
 ## 볼륨 밖 자산
 
 **볼륨 밖 자산 (out-of-volume asset)**:
