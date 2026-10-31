@@ -16,15 +16,15 @@ nodes after the target pair's replication, after failover and after failback; th
 source pair did (`FASTMIG_HA_SAME_COPY_LOG_PATH=1`). Migrated: cubrid-fastmig with the HA apply info reset (1b53a47).
 Official: the manual's HA upgrade (`loaddb`, `backupdb`, `restoredb -u` on the slave, whose `_vinf` names only its own
 directory). run.sh fails a step on an assert in this run's logs or step outputs, on a core of either node and on
-`INDEX!=HEAP` (harness 26a81fa; runs 15-16). Runs 09-14 used the harness before that review (no failback, assert and
-core read by hand).
+`INDEX!=HEAP` (harness 398ec54; runs 15-18, runs 17-18 with the tool at 762c7fa). Runs 09-14 used the harness before
+that review (no failback, assert and core read by hand); runs 17-18 replace runs 13-14 in the table.
 
 | Pair | Side | Run | Steps (source pair, migrate, target start, replication, failover, failback) | HA apply info reset | Checks errors | Asserts, cores | Parity |
 |---|---|---|---|---|---|---|---|
 | 11.4.6 → develop | migrated | run-15 | 46, all exit 0; ends in the first roles | 1 per node | 0 | 0, 0 (checked) | 9/9 same |
 | 11.4.6 → develop | official | run-16 | 35, all exit 0; ends in the first roles | — | 0 | 0, 0 (checked) | |
-| develop → develop | migrated | run-13 | all exit 0, failback half (old master back as slave) | 1 per node | 0 | 0, 0 (read) | 6/6 same |
-| develop → develop | official | run-14 | all exit 0, failback half | — | 0 | 0, 0 (read) | |
+| develop → develop | migrated | run-17 | 46, all exit 0; ends in the first roles | 1 per node | 0 | 0, 0 (checked) | 9/9 same |
+| develop → develop | official | run-18 | 35, all exit 0; ends in the first roles | — | 0 | 0, 0 (checked) | |
 
 Master and slave differ on both sides alike (`check/target.diff`, `check/failover.diff`, `check/failback.diff`
 equal between the sides): only tables without a primary key (`session_hash`, `region_list`, `part_*` of basedb).[^pk]
