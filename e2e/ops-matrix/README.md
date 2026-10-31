@@ -72,7 +72,7 @@ LOB base exist, without writing or running anything (the binary need not be buil
 ```
 
 [summarize.sh](summarize.sh) turns these into the "Version matrix" section of docs/ops-verification.md: per row the failed / all step and check
-rows, the differing / all parity steps, the server log counts of both sides (errors, asserts, cores and PL server drops, the runner's known flake), the archives created and the verdict
+rows, the differing / all parity steps, the server log counts of both sides (errors, asserts, cores, PL server drops — the runner's known flake — and the engine's -1066 session-expired lines), the archives created and the verdict
 (the runner's exit code). A failing row gets a defect ticket, recorded in [defects.tsv](defects.tsv) (`id`,
 ticket) and shown in the table.
 

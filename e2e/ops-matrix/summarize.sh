@@ -24,9 +24,9 @@ col() {
   awk -F'\t' -v c="$2" -v s="$3" 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == c) k = i; next }
     $1 == s && k { print $k; exit }' "$1" 2>/dev/null
 }
-# side_logs <server-log-summary.tsv> <side>: errors/asserts/cores/PL drops of one side
+# side_logs <server-log-summary.tsv> <side>: errors/asserts/cores/PL drops/session expired of one side
 side_logs() {
-  echo "$(col "$1" error_lines "$2")/$(col "$1" assert_lines "$2")/$(col "$1" cores "$2")/$(col "$1" pl_drops "$2")"
+  echo "$(col "$1" error_lines "$2")/$(col "$1" assert_lines "$2")/$(col "$1" cores "$2")/$(col "$1" pl_drops "$2")/$(col "$1" session_expired "$2")"
 }
 
 SECTION=$ROOT/ops-verification-section.md
@@ -48,7 +48,7 @@ migrated side created at least the minimum number of log archives (2 for the sma
 runs one round). Server statistics and error-log wording are not compared (G11 decision 1).
 
 Columns: *Steps* = failed / all step and check rows of both sides; *Parity* = differing / all checked steps;
-*Err/Assert/Core/PL* = migrated, official (PL = "Networking with PL server failed" lines, a known flake counted apart, e2e/ops/README.md § Known flakes); *Archives* = log archives created on the migrated side (official) / minimum.
+*Err/Assert/Core/PL/Exp* = migrated, official (PL = "Networking with PL server failed" lines, a known flake counted apart, e2e/ops/README.md § Known flakes; Exp = engine "-1066 Session expired" lines, not errors, § Engine facts); *Archives* = log archives created on the migrated side (official) / minimum.
 *Verdict* = the runner's exit code of the shown run (the highest `run-NN`); *Earlier runs* = every run before it, with its exit code and PL server drops (rerun rule: e2e/ops-matrix/README.md § Lanes).
 
 EOF
@@ -64,7 +64,7 @@ done
 echo
 echo '### Table'
 echo
-echo '| Row | Source → target | Variant | Rounds | Steps | Parity | Err/Assert/Core/PL | Archives | Verdict | Earlier runs | Defect |'
+echo '| Row | Source → target | Variant | Rounds | Steps | Parity | Err/Assert/Core/PL/Exp | Archives | Verdict | Earlier runs | Defect |'
 echo '|---|---|---|---|---|---|---|---|---|---|---|'
 
 # awk prologue: h[<header name>] = column number, from the header line every runner TSV carries
