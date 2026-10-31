@@ -898,7 +898,8 @@ fn take_cloned_ranges(
         .iter()
         .map(|j| OpenOptions::new().write(true).open(&j.target))
         .collect::<io::Result<Vec<File>>>()?;
-    // (job index, range, zero), rewritten ranges cut into copy-engine chunks so all workers share the big ones
+    // (job index, range, zero), every range cut into copy-engine chunks so all workers share the big ones (a zero
+    // range too: ZERO_RANGE and two header writes per page, measured as fast as one task per range, workspace#593)
     let mut tasks: Vec<(usize, u64, u64, bool)> = Vec::new();
     let ranges = (target.unshare_ranges.iter().map(|r| (r, false)))
         .chain(target.zero_ranges.iter().map(|r| (r, true)));
@@ -908,11 +909,10 @@ fn take_cloned_ranges(
             .position(|j| j.volid == r.volid)
             .ok_or_else(|| io::Error::other(format!("no target for volume {}", r.volid)))?;
         let (start, end) = (r.first as u64 * io, (r.first as u64 + r.pages as u64) * io);
-        let step = if zero { end - start } else { CHUNK_BYTES };
         tasks.extend(
             (start..end)
-                .step_by(step.max(1) as usize)
-                .map(|s| (j, s, end.min(s + step), zero)),
+                .step_by(CHUNK_BYTES as usize)
+                .map(|s| (j, s, end.min(s + CHUNK_BYTES), zero)),
         );
     }
     worker_pool::run(tasks.len(), worker_limit, |i| {
