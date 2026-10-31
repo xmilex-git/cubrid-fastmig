@@ -56,7 +56,7 @@ step the side runs `checks.sql` (step `check-<step>`) into `<side>/check/<step>.
 
 | Step | Server | What |
 |---|---|---|
-| `prepare` | down | migrated: reflink copy → `migrate --verify --volumes-in-first-dir` → `deferred-indexes.sql`, `recompile-plcsql.sql`, `recompile-views.sql`, `update-statistics.sql` (csql -S) → `finalize` (deletes the source copy; skipped with `FASTMIG_OPS_LOB_BASE`). official: `createdb` with the source's volume 0 and log sizes → a reflink copy of the source's LOB files in `<out>/official/lob-src`, outside the lob base, every locator of a copy of the objects file pointed at it by an absolute path (§ Engine facts) → `loadjava` of the Java class → `loaddb -S` of the unload (`-s`, `-d`, `-i`, `--trigger-file`; 10.2: `--no-user-specified-name`) |
+| `prepare` | down | migrated: reflink copy → `migrate --verify --volumes-in-first-dir` → `recompile-plcsql.sql`, `recompile-views.sql`, `deferred-indexes.sql`, `update-statistics.sql` (csql -S) → `finalize` (deletes the source copy; skipped with `FASTMIG_OPS_LOB_BASE`). official: `createdb` with the source's volume 0 and log sizes → a reflink copy of the source's LOB files in `<out>/official/lob-src`, outside the lob base, every locator of a copy of the objects file pointed at it by an absolute path (§ Engine facts) → `loadjava` of the Java class → `loaddb -S` of the unload (`-s`, `-d`, `-i`, `--trigger-file`; 10.2: `--no-user-specified-name`) |
 | `server-start` | up | `break-official-extra-row` follows on the official side when asked |
 | `baseline` | up | checks only: the two paths agree before any write |
 | `dml` | up | `[rounds]` × the DML round |

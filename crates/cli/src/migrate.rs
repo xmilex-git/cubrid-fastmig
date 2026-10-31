@@ -55,6 +55,7 @@ use crate::catalog_regeneration;
 use crate::finalize::OUTSIDE_BASE;
 use crate::limits::{self, Limits};
 use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
+use crate::required_sql;
 use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
 use crate::storage_kind_detect::RunStorage;
@@ -320,6 +321,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         Some(o.limits.memory_limit_bytes),
         Some(temp_limit),
     )?;
+    let required = required_sql::text(&required_sql::list(&plan));
     let report = migrate(
         &o,
         Begun {
@@ -337,6 +339,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     )
     .map_err(CliError::Failed)?;
     monitor.finish();
+    eprint!("{required}");
     println!("{report}");
     Ok(())
 }
@@ -914,7 +917,7 @@ fn report_json(
         )
     };
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"added_volumes\": {added_volumes},\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"catalog\": {catalog},\n  \"heap_peak_bytes\": {},\n  \"temp_disk\": {temp_disk},\n  \"progress\": {}\n}}",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"worker_limit\": {},\n  \"memory_limit_bytes\": {},\n  \"spill_dir\": {:?},\n  \"seconds\": {{{}}},\n  \"volumes\": [{}],\n  \"added_volumes\": {added_volumes},\n  \"java\": {},\n  \"java_static\": {},\n  \"keys_copied\": {keys},\n  \"lob\": {},\n  \"lob_orphans\": {{\"files\": {}, \"bytes\": {}}},\n  \"lob_absolute_under_base\": {},\n  \"source_append_lsa\": \"{}\",\n  \"vacuum_log_block_npages\": {npages},\n  \"new_log_first_pageid\": {first_pageid},\n  \"verify\": {verify_summary},\n  \"catalog\": {catalog},\n  \"heap_peak_bytes\": {},\n  \"required_sql\": {},\n  \"temp_disk\": {temp_disk},\n  \"progress\": {}\n}}",
         plan.source_version.name(),
         line_name(plan.version_pair.target),
         o.worker_limit,
@@ -930,6 +933,7 @@ fn report_json(
         plan.lob.absolute_under_base,
         src_log.append_lsa,
         heap_counter::now_and_peak().map_or("null".into(), |(_, peak)| peak.to_string()),
+        required_sql::json(&required_sql::list(plan)),
         fastmig_progress::report::json(&rep.progress),
     )
 }

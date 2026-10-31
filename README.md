@@ -33,6 +33,21 @@ target with no migration defect is registered and loses its `FASTMIG_INCOMPLETE`
 The verifier runs on both source and target, so defects already present in the source are
 not reported as migration defects.
 
+## Required SQL on the target, in order
+
+`migrate` ends by printing the files below with what each fixes, and keeps the same list in
+`<dest>/fastmig/report.json` (`required_sql`). Run them as DBA, in this order, before the target is used
+(`csql -u dba <db> -i <dest>/fastmig/<file>`); a file with nothing to do is not listed (workspace#599):
+
+1. `recompile-plcsql.sql`: recompiles PL/CSQL routines, which run their copied compiled code until then.
+2. `recompile-views.sql` (a source before develop moving to develop): `ALTER VCLASS … CHANGE QUERY` per view spec,
+   so develop stores the column casts loaddb would. Until it runs, a query of such a view aborts a debug-build develop
+   server (assert in `qdata_check_output_column`).
+3. `deferred-indexes.sql`: builds the function and filter indexes migrate did not build (ADR 0006).
+4. `update-statistics.sql`: `UPDATE STATISTICS ON ALL CLASSES;`.
+
+`post-migration-fixes.sql` is not on that list: its statements are reviewed one by one before they run.
+
 ## Disk and memory are chosen before the start
 
 `plan` shows the temp disk the index rebuild needs at least (one index at a time) and at most

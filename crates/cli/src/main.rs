@@ -17,6 +17,7 @@ mod partition_streams;
 mod plan;
 mod plan_report;
 mod progress_args;
+mod required_sql;
 mod resource_estimate;
 mod set_comparison;
 mod source_fingerprint;

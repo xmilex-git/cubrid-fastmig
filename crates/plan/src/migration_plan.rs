@@ -152,6 +152,8 @@ pub struct Plan {
     pub recompile_plcsql_sql: String,
     /// `<dest>/fastmig/recompile-views.sql`; empty unless an older line moves to develop (workspace#599).
     pub recompile_views_sql: String,
+    /// User views with a statement in `recompile_views_sql`.
+    pub recompiled_views: usize,
     pub plcsql_routines: usize,
     pub lob: LobScan,
     pub java: DirSize,
@@ -580,6 +582,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
     let mut grants = ExecuteGrants::default();
     let mut servers = ServerPasswords::default();
     let mut views_sql = String::new();
+    let mut recompiled_views = 0;
     // catalog regeneration inputs that refuse: collations, default values (regenerates-line only)
     if regenerates {
         let charset = i.vols.volume(0)?.header.db_charset as u8;
@@ -716,6 +719,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
                     views.len()
                 ));
                 views_sql = recompile_views_sql(&views);
+                recompiled_views = views.len();
             }
         }
         // DBLink passwords under the source key: re-wrapped for develop (workspace#556)
@@ -996,6 +1000,7 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         ]),
         recompile_plcsql_sql: recompile_plcsql_sql(&routines),
         recompile_views_sql: views_sql,
+        recompiled_views,
         server_passwords: servers.values,
         plcsql_routines: routines.len(),
         lob,
