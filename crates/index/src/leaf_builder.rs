@@ -20,6 +20,7 @@ use fastmig_ondisk::btree::DISK_VPID_SIZE;
 use fastmig_ondisk::btree::leaf_record::{KeyRef, write_leaf_record};
 use fastmig_ondisk::btree::node_header::NodeHeader;
 use fastmig_ondisk::{Oid, Vpid};
+use fastmig_progress::Meter;
 use std::cmp::Ordering;
 
 pub struct LeafPage {
@@ -166,13 +167,17 @@ impl Builder<'_, '_> {
     }
 }
 
-/// Builds one shard. `stream` yields (key, OID) in key then OID order.
+/// Pairs a shard takes from its stream between two adds to the progress meter.
+const COUNT_BATCH: u64 = 1 << 16;
+
+/// Builds one shard. `stream` yields (key, OID) in key then OID order; `progress` counts the pairs taken.
 pub fn build_shard(
     shape: &IndexShape,
     order: &dyn KeyOrder,
     sink: &dyn PageSink,
     ovf_keys: &OvfKeyFile,
     stream: &mut dyn KeyStream,
+    progress: Option<Meter>,
 ) -> Result<ShardLeaves, BuildError> {
     let mut b = Builder {
         shape,
@@ -195,7 +200,16 @@ pub fn build_shard(
     let mut prev_key: Option<Vec<u8>> = None;
     let mut key: Vec<u8> = Vec::new();
     let mut oids: Vec<Oid> = Vec::new();
+    // pairs taken since the last add to the meter
+    let mut counted = 0u64;
     while let Some((k, oid)) = stream.next_pair()? {
+        counted += 1;
+        if counted == COUNT_BATCH {
+            if let Some(m) = &progress {
+                m.add(counted);
+            }
+            counted = 0;
+        }
         if !oids.is_empty() {
             match order.compare(k, &key) {
                 Ordering::Equal => {
@@ -222,6 +236,9 @@ pub fn build_shard(
     }
     if !oids.is_empty() {
         b.key_group(&key, &oids, prev_key.as_deref())?;
+    }
+    if let Some(m) = &progress {
+        m.add(counted);
     }
     let mut out = b.out;
     if let Some(cur) = b.current {

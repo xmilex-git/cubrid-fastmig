@@ -1,20 +1,22 @@
 //! Throughput and remaining time, computed by the monitor from the counters (never by a worker).
 //!
-//! Input: the [`Progress`] state and a [`ProcSample`] at each tick. Output: per tick, the running phase's measured
+//! Input: the [`Progress`] state and a [`ProcSample`] at each tick. Output: per tick, the running phase's shown
 //! rate (an exponential moving average over the last few seconds), its ETA, and the whole run's ETA.
-//! Rules (user requests relayed in workspace#472 추가/추가 2, workspace#560):
-//! - a phase not yet measured is estimated as `amount / default rate` ([`crate::default_rates`]), times the speed
-//!   factor of its prior bottleneck (from its spec);
-//! - a bottleneck's speed factor is measured time / default-predicted time over the work bound by it so far: the
-//!   observations made before the phases (the precheck's pair count) and every phase that has run
-//!   [`MIN_SAMPLE_S`], each classified by what it used ([`crate::bottleneck`]). A host whose CPU work runs 1.5x slower
-//!   than the defaults makes the remaining CPU-bound phases 1.5x longer, and leaves the I/O-bound ones alone;
-//!   a bottleneck nothing has been bound by yet keeps its default (factor 1); work whose use shows no bottleneck
-//!   ([`crate::bottleneck`]) moves no factor;
-//! - the running phase uses its own moving average once it has run [`MIN_SAMPLE_S`] and the rate is not ~0, never
-//!   below its scaled default counted down by its time so far (a counter may cover only part of the phase),
-//!   otherwise its scaled default counted down by its time so far; a phase shorter than [`MIN_SAMPLE_S`] does not
-//!   move a speed factor (a clone "copies" gigabytes in a millisecond);
+//! Rules (user requests relayed in workspace#472 추가/추가 2; the ETA rule decided by the map supervisor for
+//! workspace#560, 2026-10-31):
+//! - a phase's default seconds are its amount over its default rate ([`crate::default_rates`]), summed over its
+//!   parts for a phase in two ([`crate::meter::PhaseSpec::two_parts`]); its share done is its done default seconds
+//!   over those;
+//! - a bottleneck's speed factor is measured time / default seconds over the work bound by it so far: the
+//!   observations made before the phases (the precheck's pair count) and every phase that has ended after running
+//!   [`MIN_SAMPLE_S`] (a running phase's counter may run ahead of its time), each classified by what it used
+//!   ([`crate::bottleneck`]). A host whose CPU work runs 1.5x slower than the defaults makes the remaining CPU-bound
+//!   phases 1.5x longer, and leaves the I/O-bound ones alone; a bottleneck nothing has been bound by yet keeps its
+//!   default (factor 1); work whose use shows no bottleneck moves no factor;
+//! - a phase not yet begun takes its default seconds times its prior bottleneck's factor;
+//! - the running phase takes its default seconds left times a blend of that factor and its own seconds per default
+//!   second, weighted [`PRIOR_WEIGHT`] against the share done: the prior first, the phase's own observation as it
+//!   gets done. No moving average, no floor: a good prior is not overwritten by a noisy rate;
 //! - the run's ETA is always given, marked approximate by the caller.
 
 use std::sync::atomic::Ordering::Relaxed;
@@ -32,6 +34,10 @@ pub const MIN_SAMPLE_S: f64 = 2.0;
 const TAU_S: f64 = 3.0;
 /// A speed factor stays within these bounds.
 const FACTOR_RANGE: (f64, f64) = (0.05, 20.0);
+/// Weight of the bottleneck's factor against the running phase's own observation, in fractions of the phase done:
+/// the observation counts as much as the prior once this share is done. 0.5 from the workspace#560 replay of passes
+/// 2-4 (worst sample 14.2 / 11.9 / 11.7 / 11.4% at 0.1 / 0.25 / 0.5 / 1.0, every other run within 9.2% at 0.5).
+const PRIOR_WEIGHT: f64 = 0.5;
 
 /// What the display shows for one tick.
 pub struct Estimate {
@@ -43,9 +49,10 @@ pub struct Estimate {
     pub total_eta: f64,
 }
 
-/// Per-phase moving averages, owned by the monitor thread.
+/// The running phase's moving average of default seconds done per second, owned by the monitor thread: the rate
+/// shown; the ETA does not use it (workspace#560).
 pub struct Estimator {
-    last: Option<(usize, Instant, u64)>,
+    last: Option<(usize, Instant, f64)>,
     ema: f64,
 }
 
@@ -68,12 +75,12 @@ impl Estimator {
                 total_eta: 0.0,
             };
         };
-        let done = ph.done();
+        let done = done_secs(p, ph);
         match self.last {
             Some((i, t, d)) if i == cur => {
                 let dt = now.duration_since(t).as_secs_f64();
                 if dt > 0.0 {
-                    let inst = done.saturating_sub(d) as f64 / dt;
+                    let inst = (done - d).max(0.0) / dt;
                     let alpha = 1.0 - (-dt / TAU_S).exp();
                     self.ema += alpha * (inst - self.ema);
                 }
@@ -81,35 +88,43 @@ impl Estimator {
             _ => {
                 // a new phase: seed the average with its rate so far
                 let el = elapsed(ph, now);
-                self.ema = if el > 0.0 { done as f64 / el } else { 0.0 };
+                self.ema = if el > 0.0 { done / el } else { 0.0 };
             }
         }
         self.last = Some((cur, now, done));
 
         let factors = speed_factors(p, now, sample);
         let el = elapsed(ph, now);
-        let trusted = ph.spec.unit != Unit::Step && el >= MIN_SAMPLE_S && self.ema > 1e-9;
-        // the whole phase's scaled default minus its time so far: counts down while the phase adds nothing yet (the
-        // verifier's heap pass) instead of standing still
-        let left_by_default = || {
-            let r = classified(ph, now, sample, p.worker_limit).unwrap_or(ph.spec.prior);
-            (scaled_default(p, ph, factors.of(r)) - el).max(0.0)
-        };
-        let phase_eta = if trusted {
-            // never below the default: a counter may cover only part of the phase (the index build counts keys in
-            // its heap scan, not in the tree build after it), so its rate alone ends the phase too early
-            (remaining(ph) as f64 / self.ema).max(left_by_default())
-        } else if ph.spec.unit == Unit::Step {
+        let phase_eta = if ph.spec.unit == Unit::Step {
             (STEP.as_secs_f64() - el).max(0.0)
         } else {
-            left_by_default()
+            // the bottleneck's factor at first, the phase's own seconds per default second as it gets done
+            let total = total_secs(p, ph);
+            let prior =
+                factors.of(classified(ph, now, sample, p.worker_limit).unwrap_or(ph.spec.prior));
+            let f = if total > 0.0 {
+                (done / total).min(1.0)
+            } else {
+                0.0
+            };
+            let k = if done > 0.0 {
+                (PRIOR_WEIGHT * prior + f * (el / done)) / (PRIOR_WEIGHT + f)
+            } else {
+                prior
+            };
+            (k * (total - done)).max(0.0)
         };
         let pending: f64 = p.phases[cur + 1..]
             .iter()
             .map(|q| scaled_default(p, q, factors.of(q.spec.prior)))
             .sum();
         Estimate {
-            rate: trusted.then_some(self.ema),
+            // the moving average in the phase's unit, shown only: one rate, so not for a phase in two parts
+            rate: (ph.spec.unit != Unit::Step
+                && el >= MIN_SAMPLE_S
+                && self.ema > 1e-9
+                && ph.spec.second.is_none())
+            .then(|| self.ema * ph.spec.rate.with_workers(p.worker_limit)),
             phase_eta,
             total_eta: phase_eta + pending,
         }
@@ -161,24 +176,39 @@ pub(crate) fn classified(
     }
 }
 
-fn remaining(ph: &Phase) -> u64 {
-    ph.total.load(Relaxed).saturating_sub(ph.done())
+/// Seconds the defaults give `amounts` of phase `ph`'s parts.
+fn default_secs(p: &Progress, ph: &Phase, amounts: [u64; 2]) -> f64 {
+    [Some(ph.spec.rate), ph.spec.second.map(|(_, r)| r)]
+        .into_iter()
+        .zip(amounts)
+        .map(|(r, a)| match r.map(|r| r.with_workers(p.worker_limit)) {
+            Some(rate) if rate > 0.0 => a as f64 / rate,
+            _ => 0.0,
+        })
+        .sum()
 }
 
-fn default_secs(p: &Progress, ph: &Phase, amount: u64) -> f64 {
-    let rate = ph.spec.rate.with_workers(p.worker_limit);
-    if rate > 0.0 {
-        amount as f64 / rate
-    } else {
-        0.0
-    }
+/// The share of phase `ph` done, in default seconds (so both parts of a phase in two count); `None` with no total.
+pub(crate) fn fraction(p: &Progress, ph: &Phase) -> Option<f64> {
+    let total = total_secs(p, ph);
+    (total > 0.0).then(|| (done_secs(p, ph) / total).min(1.0))
+}
+
+/// Default seconds of what phase `ph` has done.
+fn done_secs(p: &Progress, ph: &Phase) -> f64 {
+    default_secs(p, ph, [ph.done_of(0), ph.done_of(1)])
+}
+
+/// Default seconds of phase `ph`'s whole amount.
+fn total_secs(p: &Progress, ph: &Phase) -> f64 {
+    default_secs(p, ph, ph.totals.each_ref().map(|t| t.load(Relaxed)))
 }
 
 /// A whole phase: a step takes its fixed time; measured work its default time times the factor.
 fn scaled_default(p: &Progress, ph: &Phase, factor: f64) -> f64 {
     match ph.spec.unit {
         Unit::Step => STEP.as_secs_f64(),
-        _ => default_secs(p, ph, ph.total.load(Relaxed)) * factor,
+        _ => total_secs(p, ph) * factor,
     }
 }
 
@@ -208,9 +238,14 @@ pub(crate) fn speed_factors(
             predicted[r as usize] += o.predicted_s;
         }
     }
-    for ph in p.phases.iter().filter(|q| q.spec.unit != Unit::Step) {
+    // ended phases only: a running phase's counter may run ahead of its time and pull the factor with it
+    for ph in p
+        .phases
+        .iter()
+        .filter(|q| q.spec.unit != Unit::Step && q.ended.get().is_some())
+    {
         let el = elapsed(ph, now);
-        let pred = default_secs(p, ph, ph.done());
+        let pred = done_secs(p, ph);
         if pred > 0.0
             && let Some(r) = classified(ph, now, sample_now, p.worker_limit)
         {

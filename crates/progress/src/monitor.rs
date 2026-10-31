@@ -122,10 +122,27 @@ fn watch(
     let mut ended_shown = vec![false; p.phases.len()];
     let mut next_line = Instant::now();
     let mut next_trail: Option<Instant> = None;
+    // the running phase, its counters' sum and when it last moved (the phase's start before it ever moves)
+    let mut idle: Option<(usize, u64, Instant)> = None;
     loop {
         let stopping = stop.load(Relaxed);
         let now = Instant::now();
         let e = est.tick(p, now, ProcSample::now());
+        if let Some(ph) = p.phases.get(p.current()) {
+            let cur = p.current();
+            let sum = ph.done_of(0) + ph.done_of(1);
+            let since = match idle {
+                Some((i, last, at)) if i == cur && last == sum => at,
+                Some((i, _, _)) if i == cur => now,
+                _ => ph.started.get().copied().unwrap_or(now),
+            };
+            idle = Some((cur, sum, since));
+            let ms = now.duration_since(since).as_millis() as u64;
+            let max = ph.idle_max_ms.load(Relaxed);
+            if max == u64::MAX || ms > max {
+                ph.idle_max_ms.store(ms, Relaxed);
+            }
+        }
         // one trail point per [`ESTIMATE_TICK`] in every mode, from the start estimate on (before it the phase totals
         // are unknown and the estimate is only the time so far): the report reads four of them
         if p.current() < p.phases.len()

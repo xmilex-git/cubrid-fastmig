@@ -30,7 +30,9 @@ use fastmig_catalog::target_classes::{Origin, TargetClass as CatalogClass};
 use fastmig_catalog::template_store::builtin;
 use fastmig_index::IndexDef;
 use fastmig_index::heap_scan::WORKER_SHARE;
-use fastmig_index::pair_count::{PairStats, pair_bytes_and_growth, record_pair_bytes};
+use fastmig_index::pair_count::{
+    PairStats, owner_heap_pages, pair_bytes_and_growth, record_pair_bytes,
+};
 use fastmig_index::rebuild::{TargetClass, class_constraints, plain_index_defs};
 use fastmig_index::temp_disk::index_batches;
 use fastmig_ondisk::heap_rewrite::{ClassReEncoder, Growth, ReEncode};
@@ -70,6 +72,9 @@ pub struct ResourceEstimate {
     pub source_groups: HashMap<(String, String), fastmig_verify::btree_walk::LeafCounts>,
     /// Seconds of the counting scan: one read of every indexed heap, the price of one more batch.
     pub scan_seconds: f64,
+    /// User pages of each indexed heap as the source has them, by class: the index build's heap scan reads these and
+    /// the pages the page treatment appends (workspace#560).
+    pub heaps: Vec<(String, u64)>,
     pub workers: usize,
     pub physical_memory: u64,
     /// The run regenerates the system catalog (an 11.x or 10.2 source): its rows are built in memory.
@@ -194,6 +199,7 @@ pub fn estimate(
             e.indexes.extend(s.indexes);
             e.per_def.extend(s.per_def);
             e.per_def_figures.extend(s.per_def_figures);
+            e.heaps.extend(s.heaps);
             e.appended_pages = appended;
             e.appended_seconds = appended_seconds;
             e
@@ -230,6 +236,11 @@ fn count(
         plain_index_defs(classes, &cons, vols.io_pagesize(), charset, line).map_err(invalid)?;
     let refs: Vec<&IndexDef> = defs.iter().collect();
     let from_heaps = matches!(rows, Rows::Heaps(..));
+    let heap_pages = if from_heaps {
+        owner_heap_pages(vols, &refs).map_err(invalid)?
+    } else {
+        Vec::new()
+    };
     let counted = match rows {
         Rows::Heaps(re_encoders, skip) => pair_bytes_and_growth(
             vols,
@@ -286,6 +297,10 @@ fn count(
                 .collect(),
             source_groups: HashMap::new(),
             scan_seconds: 0.0,
+            heaps: heap_pages
+                .into_iter()
+                .map(|(oid, pages)| (name_of(oid), pages))
+                .collect(),
             appended_seconds: 0.0,
             workers,
             physical_memory: 0,
@@ -392,6 +407,11 @@ impl ResourceEstimate {
             .min(self.physical_memory)
     }
 
+    /// User pages of the indexed heaps.
+    pub fn heap_pages(&self) -> u64 {
+        self.heaps.iter().map(|h| h.1).sum()
+    }
+
     pub fn json(&self, mem: u64) -> String {
         let (lo, hi) = (self.temp_min(), self.temp_max());
         let b = self.batches(lo).unwrap_or(0);
@@ -405,9 +425,14 @@ impl ResourceEstimate {
                 )
             })
             .collect();
+        let heaps: Vec<String> = (self.heaps.iter())
+            .map(|(class, pages)| format!("{{\"class\": {class:?}, \"pages\": {pages}}}"))
+            .collect();
         format!(
-            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"appended_pages\": {}, \"appended_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_max_bytes\": {}, \"verify_batches_at_min\": {}, \"verify_extra_seconds_at_min\": {:.1}, \"verify_mem_min_bytes\": {}, \"rss_expected_max_bytes\": {}, \"rss_expected_max_verify_bytes\": {}, \"indexes\": [{}]}}",
+            "{{\"pair_bytes\": {hi}, \"scan_seconds\": {:.3}, \"heap_pages\": {}, \"heaps\": [{}], \"appended_pages\": {}, \"appended_seconds\": {:.3}, \"workers\": {}, \"temp_min_bytes\": {lo}, \"temp_max_bytes\": {hi}, \"batches_at_min\": {b}, \"extra_seconds_at_min\": {:.1}, \"mem_min_bytes\": {}, \"mem_bytes\": {mem}, \"mem_recommended_bytes\": {}, \"verify_source_bytes\": {}, \"verify_min_bytes\": {}, \"verify_max_bytes\": {}, \"verify_batches_at_min\": {}, \"verify_extra_seconds_at_min\": {:.1}, \"verify_mem_min_bytes\": {}, \"rss_expected_max_bytes\": {}, \"rss_expected_max_verify_bytes\": {}, \"indexes\": [{}]}}",
             self.scan_seconds,
+            self.heap_pages(),
+            heaps.join(", "),
             self.appended_pages,
             self.appended_seconds,
             self.workers,

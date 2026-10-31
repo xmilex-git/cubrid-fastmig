@@ -1,14 +1,15 @@
-//! The progress part of a run's report.json: per phase its amount, time, measured rate, what it used (CPU seconds,
-//! device bytes) and the bottleneck it showed (`null`: none shown, the prior kept); the run's total time beside the
-//! estimate made when the plan's totals were first known, and the estimated total at 10, 30 and 60 s and at 20% of
-//! the run (the evidence for better defaults in [`crate::default_rates`] and for the speed factors, workspace#560).
+//! The progress part of a run's report.json: per phase its amount (and its second part's, for a phase in two), time,
+//! measured rate, the longest stretch its counters stood still while it ran (`counter_idle_max_s`: over 2 s, some of
+//! its work is not counted), what it used (CPU seconds, device bytes) and the bottleneck it showed (`null`: none
+//! shown, the prior kept); the run's total time beside the estimate made when the plan's totals were first known,
+//! and the estimated total at 10, 30 and 60 s and at 20, 50 and 80% of the run (the evidence for better defaults in
+//! [`crate::default_rates`] and for the speed factors, workspace#560).
 //!
 //! Input: the finished [`Progress`]. Output: a JSON object as text.
 //! The trail points are the monitor's estimates from the start estimate on (none with `--progress none`): each is the
 //! last one made at or before its time, the first one when the precheck still ran then (its `at_s` says when), `null`
 //! when the run was shorter or no monitor ran.
 
-use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
 
 use crate::bottleneck::Bottleneck;
@@ -24,10 +25,24 @@ pub fn json(p: &Progress) -> String {
         .phases
         .iter()
         .map(|ph| {
-            let unit = match ph.spec.unit {
+            let unit_name = |u: Unit| match u {
                 Unit::Step => "step",
                 Unit::Bytes => "bytes",
                 Unit::Count(noun) => noun,
+            };
+            let unit = unit_name(ph.spec.unit);
+            let second = ph.spec.second.map_or(String::new(), |(u, _)| {
+                format!(
+                    ", \"second\": {{\"unit\": \"{}\", \"total\": {}, \"done\": {}}}",
+                    unit_name(u),
+                    ph.totals[1].load(std::sync::atomic::Ordering::Relaxed),
+                    ph.done_of(1)
+                )
+            });
+            // a step has no counter; a phase the monitor never saw running has no figure
+            let idle = match ph.idle_max_ms.load(std::sync::atomic::Ordering::Relaxed) {
+                ms if ph.spec.unit == Unit::Step || ms == u64::MAX => "null".into(),
+                ms => format!("{:.1}", ms as f64 / 1000.0),
             };
             let s = elapsed(ph, now);
             let rate = if ph.spec.unit != Unit::Step && s > 0.0 {
@@ -42,9 +57,9 @@ pub fn json(p: &Progress) -> String {
                 )
             });
             format!(
-                "{{\"name\": \"{}\", \"unit\": \"{unit}\", \"total\": {}, \"done\": {}, \"seconds\": {s:.3}, \"rate_per_s\": {rate}, \"used\": {use_}, \"bottleneck\": {}}}",
+                "{{\"name\": \"{}\", \"unit\": \"{unit}\", \"total\": {}, \"done\": {}{second}, \"seconds\": {s:.3}, \"rate_per_s\": {rate}, \"counter_idle_max_s\": {idle}, \"used\": {use_}, \"bottleneck\": {}}}",
                 ph.spec.name,
-                ph.total.load(Relaxed),
+                ph.total(),
                 ph.done(),
                 bottleneck_json(classified(ph, now, sample, p.worker_limit))
             )
@@ -83,11 +98,13 @@ pub fn json(p: &Progress) -> String {
         .get()
         .map_or("null".into(), |e| format!("{e:.3}"));
     format!(
-        "{{\"estimated_total_s_at_start\": {est}, \"actual_total_s\": {actual:.3}, \"estimated_total_s_at\": {{\"10s\": {}, \"30s\": {}, \"60s\": {}, \"20%\": {}}}, \"observations\": [{}], \"phases\": [{}]}}",
+        "{{\"estimated_total_s_at_start\": {est}, \"actual_total_s\": {actual:.3}, \"estimated_total_s_at\": {{\"10s\": {}, \"30s\": {}, \"60s\": {}, \"20%\": {}, \"50%\": {}, \"80%\": {}}}, \"observations\": [{}], \"phases\": [{}]}}",
         at(10.0),
         at(30.0),
         at(60.0),
         at(0.2 * actual),
+        at(0.5 * actual),
+        at(0.8 * actual),
         observations.join(", "),
         phases.join(", ")
     )

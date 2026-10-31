@@ -33,6 +33,7 @@ use fastmig_ondisk::record::{
 use fastmig_ondisk::spage::{RecordType, SPAGE_HEADER_SIZE, SPAGE_SLOT_SIZE, Slot, SlottedPage};
 use fastmig_ondisk::value::{KeyDomain, Value};
 use fastmig_ondisk::{Hfid, Oid, Vpid};
+use fastmig_progress::Meter;
 
 use crate::database::{Database, Role};
 use crate::defect::{Check, Defect, OidText, VpidText};
@@ -113,9 +114,17 @@ pub fn scan_heap<'m>(
     workers: &WorkerLimit,
     memory: &'m MemoryLimit,
     spill: &SpillDir,
+    progress: Option<Meter>,
 ) -> Result<HeapPass<'m>, BuildError> {
     let job = HeapScanJob { target: t, indexes };
-    let mut p = scan_heaps(db, std::slice::from_ref(&job), workers, memory, spill)?;
+    let mut p = scan_heaps(
+        db,
+        std::slice::from_ref(&job),
+        workers,
+        memory,
+        spill,
+        progress,
+    )?;
     Ok(p.pop().unwrap())
 }
 
@@ -127,6 +136,7 @@ pub fn scan_heaps<'m>(
     workers: &WorkerLimit,
     memory: &'m MemoryLimit,
     spill: &SpillDir,
+    progress: Option<Meter>,
 ) -> Result<Vec<HeapPass<'m>>, BuildError> {
     let mut scans = Vec::with_capacity(jobs.len());
     let mut file_pages = Vec::with_capacity(jobs.len());
@@ -180,6 +190,10 @@ pub fn scan_heaps<'m>(
             s.refs.extend(o.refs);
             s.lobs.extend(o.lobs);
             s.defects.extend(o.defects);
+            drop(s);
+            if let Some(m) = &progress {
+                m.add(1);
+            }
             Ok(())
         },
     )?;

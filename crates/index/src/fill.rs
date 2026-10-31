@@ -2,9 +2,10 @@
 //! over every owner class at once, then every tree built at once, all under the one worker and memory limit.
 //!
 //! Input: the target's space manager, the [`IndexDef`]s (BTID, owners, shape, key domain), the limits and an
-//! optional progress meter (keys extracted). Output: one [`FilledIndex`] per definition, in order — the B-tree
-//! statistics the catalog representation stores (workspace#482 G2 item 7) and the overflow key file if one was
-//! needed. A unique violation, a duplicate entry, a NULL primary key column or an unreadable row stops the fill.
+//! optional progress meter (heap pages scanned; its second part, pairs written to leaves). Output: one [`FilledIndex`]
+//! per definition, in order — the B-tree statistics the catalog representation stores (workspace#482 G2 item 7) and
+//! the overflow key file if one was needed. A unique violation, a duplicate entry, a NULL primary key column or an
+//! unreadable row stops the fill.
 //! Source: R6 § 2 (engine no-logging parallel load); workspace#503 (two-step API: BTIDs exist before the keys, so
 //! class objects and catalog rows can name them first, workspace#504), G1 workspace#481 (`--workers`, `--mem`).
 
@@ -165,13 +166,12 @@ fn fill_batch(
         lim.spill,
         || vec![0u8; io_pagesize].into_boxed_slice(),
         |buf, c, vpid, emit| {
-            let mut n = 0u64;
             let r = page_keys(vols, &keys[c], buf, vpid, &mut |ix, oid, key: RowKey| {
-                n += 1;
                 emit(ix, oid, key)
             });
+            // pages, not keys: a page's cost is its read and its records, whatever keys its class has (workspace#560)
             if let Some(m) = &progress {
-                m.add(n);
+                m.add(1);
             }
             r
         },
@@ -217,6 +217,7 @@ fn fill_batch(
             nulls,
             sink: &sinks[i],
             make_ovf_key_sink: &make_ovf[i],
+            progress: progress.map(Meter::second),
         })
         .collect();
     let free = lim.memory.try_acquire(lim.memory.limit());

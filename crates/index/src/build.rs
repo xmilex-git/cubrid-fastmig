@@ -27,6 +27,7 @@ use crate::worker_limit::WorkerLimit;
 use fastmig_ondisk::btree::node_header::NodeHeader;
 use fastmig_ondisk::btree::root_header::RootHeader;
 use fastmig_ondisk::{Vfid, Vpid};
+use fastmig_progress::Meter;
 use std::cmp::Ordering;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
@@ -89,6 +90,8 @@ pub struct IndexJob<'a, 'm> {
     pub nulls: u64,
     pub sink: &'a dyn PageSink,
     pub make_ovf_key_sink: &'a dyn MakeSink,
+    /// Counts the pairs written to leaves (the index-build phase's second half, workspace#560).
+    pub progress: Option<Meter<'a>>,
 }
 
 pub fn build_index(
@@ -105,6 +108,7 @@ pub fn build_index(
         nulls,
         sink,
         make_ovf_key_sink,
+        progress,
     } = job;
     let shape = &shape;
     let _own = worker_limit.acquire(1);
@@ -155,7 +159,7 @@ pub fn build_index(
             )?));
         }
         let mut stream = KwayMerge::new(cursors, order);
-        let built = build_shard(shape, order, sink, &ovf_keys, &mut stream)?;
+        let built = build_shard(shape, order, sink, &ovf_keys, &mut stream, progress)?;
         *shards[s].lock().unwrap() = Some(built);
         Ok::<(), BuildError>(())
     })?;

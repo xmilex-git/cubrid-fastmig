@@ -56,10 +56,18 @@ pub const CLONED_RANGE_BYTES: DefaultRate = DefaultRate {
     points: &[(1, 1.7e9)],
 };
 
-/// Index build keys, large 11.4 DB (73.0 M keys, 77 indexes): 72.3 / 20.0 / 10.0 s at 1 / 4 / 16 workers
-/// (workspace#536 runs, report.json survey of workspace#560).
-pub const INDEX_KEYS: DefaultRate = DefaultRate {
-    points: &[(1, 1.01e6), (4, 3.65e6), (16, 7.3e6)],
+/// Heap pages the index build's scan reads (its first part): the large 11.4 DB (111.4 k pages) in about 43.5 / 10.1 /
+/// 2.2 s and the large develop DB (105.0 k pages) in 44.9 / 10.9 / 2.9 s at 1 / 4 / 16 workers, read from the 2 s
+/// progress lines of workspace#560 pass 2 (CPUs 16-31); the rate is the mean of the two. Pages, not keys: a page
+/// costs its read and its records whatever keys its class has (keys per page run 289..973 between classes there).
+pub const INDEX_SCAN_PAGES: DefaultRate = DefaultRate {
+    points: &[(1, 2.45e3), (4, 10.35e3), (16, 43.5e3)],
+};
+
+/// Index build keys written to leaves (the index build's second part: merge, leaves, upper levels): 73.0 M keys in
+/// the rest of the same runs, about 28.0 / 9.3 / 7.6 s at 1 / 4 / 16 workers.
+pub const TREE_BUILD_KEYS: DefaultRate = DefaultRate {
+    points: &[(1, 2.6e6), (4, 7.85e6), (16, 9.6e6)],
 };
 
 /// Heap pages walked by the page treatment (patch or re-encode), large 11.4 DB (75.9 k pages): 22.8 / 6.1 / 1.9 s at
@@ -68,11 +76,17 @@ pub const HEAP_PAGES: DefaultRate = DefaultRate {
     points: &[(1, 3.3e3), (4, 12.5e3), (16, 39.9e3)],
 };
 
-/// Index pairs the verifier merges, target and source together: 146.0 M pairs at 1 / 4 / 16 workers in 209 / 49.5 /
-/// 17.7 s on the large 11.4 DB and 153 / 42.0 / 15.9 s on the large develop DB (workspace#560 calibration pass 1,
-/// CPUs 16-31); the rate is the mean of the two (each within 0.84..1.16x of it).
-pub const VERIFY_PAIRS: DefaultRate = DefaultRate {
-    points: &[(1, 0.83e6), (4, 3.2e6), (16, 8.7e6)],
+/// Heap pages the verifier reads (its first part: heap pass and run sort, target and source): twice the pages above
+/// in 134.2 / 34.6 / 9.9 s (11.4) and 102.8 / 27.2 / 8.8 s (develop) at 1 / 4 / 16 workers (verify report
+/// `phases_s`, workspace#560 pass 2); the rate is the mean of the two (each within 0.85..1.12x of it).
+pub const VERIFY_HEAP_PAGES: DefaultRate = DefaultRate {
+    points: &[(1, 1.85e3), (4, 7.08e3), (16, 23.2e3)],
+};
+
+/// Index pairs the verifier merges (its second part), target and source together: 146.0 M pairs in 48.7 / 14.0 / 6.7
+/// s at 1 / 4 / 16 workers, the mean of the same runs.
+pub const VERIFY_MERGE_PAIRS: DefaultRate = DefaultRate {
+    points: &[(1, 3.0e6), (4, 10.4e6), (16, 21.8e6)],
 };
 
 /// Pairs the precheck's counting scan (`resource_estimate`, `fastmig_index::pair_count`) counts on a source of the

@@ -122,10 +122,11 @@ const PHASES: &[PhaseSpec] = &[
         default_rates::HEAP_PAGES,
         Bottleneck::Cpu,
     ),
-    PhaseSpec::work(
+    PhaseSpec::two_parts(
         "index-build",
-        Unit::Count("keys"),
-        default_rates::INDEX_KEYS,
+        Unit::Count("pages"),
+        default_rates::INDEX_SCAN_PAGES,
+        (Unit::Count("keys"), default_rates::TREE_BUILD_KEYS),
         Bottleneck::Cpu,
     ),
     PhaseSpec::step("catalog-regeneration"),
@@ -137,10 +138,11 @@ const PHASES: &[PhaseSpec] = &[
         default_rates::FSYNC_BYTES,
         Bottleneck::Write,
     ),
-    PhaseSpec::work(
+    PhaseSpec::two_parts(
         "verifier",
-        Unit::Count("pairs"),
-        default_rates::VERIFY_PAIRS,
+        Unit::Count("pages"),
+        default_rates::VERIFY_HEAP_PAGES,
+        (Unit::Count("pairs"), default_rates::VERIFY_MERGE_PAIRS),
         Bottleneck::Cpu,
     ),
     PhaseSpec::step("register"),
@@ -398,10 +400,18 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     // the sync goes over every file the run created, cloned volumes too (workspace#560)
     rep.progress
         .set_total(DURABLE_SYNC, bytes + new_log::file_bytes(&src.log));
-    rep.progress.set_total(INDEX_BUILD, b_pairs);
+    // the build scans the indexed heaps as the page treatment leaves them, then writes every pair to a leaf
+    rep.progress
+        .set_total(INDEX_BUILD, b.est.heap_pages() + b_appended);
+    rep.progress.set_second_total(INDEX_BUILD, b_pairs);
     if o.verify {
-        // the verifier merges the target's pairs and the source's, about as many
-        rep.progress.set_total(VERIFIER, 2 * b_pairs);
+        // the verifier reads every heap of the target and of the source (about as many pages, the target's grown by
+        // the page treatment), then merges the target's pairs and the source's (about as many). shortcut: a later
+        // index batch reads its heaps again, not counted, until a batched run is measured
+        let source_pages = b.est.verify_heap_pages.unwrap_or(0) as u64;
+        rep.progress
+            .set_total(VERIFIER, 2 * source_pages + b_appended);
+        rep.progress.set_second_total(VERIFIER, 2 * b_pairs);
     }
     if plan.unshare {
         let io = src.vols.io_pagesize() as u64;

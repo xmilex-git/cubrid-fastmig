@@ -238,7 +238,7 @@ pub fn run_verifier(
     worker_limit: usize,
     lim: &Limits,
     report: &Path,
-    pairs: Option<Meter>,
+    progress: Option<Meter>,
 ) -> io::Result<(u8, String)> {
     let wb = WorkerLimit::new(worker_limit);
     let mb = MemoryLimit::new(usize::try_from(lim.memory_limit_bytes).unwrap_or(usize::MAX));
@@ -251,7 +251,7 @@ pub fn run_verifier(
         memory: &mb,
         spill: &spill,
         temp_disk: lim.temp_disk,
-        pairs,
+        progress,
     };
     let mut tdb = open(target, role)?;
     if let Some(s) = source {

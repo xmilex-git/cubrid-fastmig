@@ -6,11 +6,10 @@
 //! that ended since the previous line.
 //! Source: user request relayed in workspace#472 (line format).
 
-use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
 
 use crate::clock;
-use crate::estimate::{Estimate, elapsed};
+use crate::estimate::{Estimate, elapsed, fraction};
 use crate::meter::{Phase, Progress};
 use crate::unit::{self, Unit};
 
@@ -57,12 +56,25 @@ pub(crate) fn tag(p: &Progress, i: usize) -> String {
     )
 }
 
-/// `42.1% (198 MiB/470 MiB, 1.1 GiB/s)`; empty for a step.
-pub(crate) fn amount(ph: &Phase, rate: Option<f64>) -> String {
+/// `42.1% (198 MiB/470 MiB, 1.1 GiB/s)`; for a phase in two parts `42.1% (75869/75869 pages, 0/72985257 keys)`
+/// (the share in default seconds); empty for a step.
+pub(crate) fn amount(p: &Progress, ph: &Phase, rate: Option<f64>) -> String {
     if ph.spec.unit == Unit::Step {
         return String::new();
     }
-    let total = ph.total.load(Relaxed);
+    if let (Some((unit2, _)), Some(f)) = (ph.spec.second, fraction(p, ph)) {
+        let part = |unit: Unit, k: usize| {
+            let total = ph.totals[k].load(std::sync::atomic::Ordering::Relaxed);
+            unit.fraction(ph.done_of(k).min(total), total)
+        };
+        return format!(
+            "{:.1}% ({}, {}) ",
+            f * 100.0,
+            part(ph.spec.unit, 0),
+            part(unit2, 1)
+        );
+    }
+    let total = ph.total();
     let rate = rate.map_or(String::new(), |r| format!(", {}", ph.spec.unit.rate(r)));
     if total == 0 {
         return format!("({}{rate}) ", ph.spec.unit.amount(ph.done()));
@@ -90,7 +102,7 @@ pub fn running(p: &Progress, i: usize, e: &Estimate, heap: &Heap) -> String {
     format!(
         "{} {}{} {}",
         tag(p, i),
-        amount(&p.phases[i], e.rate),
+        amount(p, &p.phases[i], e.rate),
         eta(e),
         heap.text()
     )

@@ -267,7 +267,7 @@ _Avoid_: 다단계 정렬, 재정렬
 ## 진행 표시
 
 **단계 (phase)**:
-한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier(`--verify`일 때만 일하고, 아니면 0초), register. `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
+한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier(`--verify`일 때만 일하고, 아니면 0초), register. 속도가 다른 두 일이 번갈아 도는 단계는 두 부분으로, 부분마다 자기 단위와 기본 처리량으로 센다: index-build는 heap scan이 읽은 힙 페이지와 리프에 쓴 키, verifier는 heap pass가 읽은 힙 페이지와 merge한 pair. 표시와 report.json은 한 단계로 내되 두 부분의 양을 따로 보인다. 모든 단계는 시간을 쓰는 일마다 카운터가 움직여야 한다(카운터가 2초 넘게 서 있으면 세지 않는 일이 있다는 뜻, report.json `counter_idle_max_s`)(workspace#560). `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
 _Avoid_: 스텝(짧은 고정 작업만 가리킬 때 외에는), 스테이지
 
 **진행 표시 (progress display)**:
@@ -287,7 +287,7 @@ _Avoid_: 대역폭(측정값과 섞인다)
 _Avoid_: 샘플, probe(능동 측정과 섞인다)
 
 **속도 계수 (speed factor)**:
-병목 자원마다 따로 두는 값: 그 자원에 묶인 일(관측과, 2초 넘게 돌아 병목 자원이 판정된 단계)의 실제 시간 ÷ 기본 처리량으로 예측한 시간. 아직 안 끝난 단계의 예상 시간에 그 단계 병목 자원의 계수를 곱해, 이 호스트·장치의 실제 속도에 맞춘다. 아무 일도 묶이지 않은 자원은 1(기본값 그대로). 예상 완료 시각은 실행 시작부터 늘 보이고 `~`로 근사임을 표시한다.
+병목 자원마다 따로 두는 값: 그 자원에 묶인 일(관측과, 2초 넘게 돌고 끝나 병목 자원이 판정된 단계)의 실제 시간 ÷ 기본 처리량으로 예측한 시간. 아직 시작하지 않은 단계의 예상 시간에 그 단계 병목 자원의 계수를 곱해, 이 호스트·장치의 실제 속도에 맞춘다. 실행 중인 단계는 이 계수와 그 단계 자신의 실제 초 ÷ 완료 기본 초를 섞는다: 처음엔 계수를, 진행될수록(완료 비율만큼) 자기 관측을 믿는다. 아무 일도 묶이지 않은 자원은 1(기본값 그대로). 예상 완료 시각은 실행 시작부터 늘 보이고 `~`로 근사임을 표시한다.
 _Avoid_: 보정값, 가중치
 
 **힙 최대치 (heap peak)**:

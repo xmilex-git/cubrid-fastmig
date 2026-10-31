@@ -8,11 +8,10 @@
 //! Source: ECMA-48 CUU (`ESC [ n A`), EL (`ESC [ 2 K`) and ED (`ESC [ J`); Linux `TIOCGWINSZ` (asm-generic/ioctls.h 0x5413).
 
 use std::io::Write;
-use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
 
 use crate::clock;
-use crate::estimate::{Estimate, elapsed};
+use crate::estimate::{Estimate, elapsed, fraction};
 use crate::meter::Progress;
 use crate::render_line::{Heap, amount, finished_amount, secs};
 use crate::unit::Unit;
@@ -105,18 +104,17 @@ fn frame(p: &Progress, e: &Estimate, heap: &Heap, now: Instant, width: usize) ->
                 finished_amount(ph, now)
             )
         } else if i == p.current() {
-            let total = ph.total.load(Relaxed);
-            let bar = if ph.spec.unit != Unit::Step && total > 0 {
+            let bar = if let Some(f) = fraction(p, ph).filter(|_| ph.spec.unit != Unit::Step) {
                 // what is left after the name, the amount and the ETA (about 60 columns)
                 let bar_w = width.saturating_sub(head.len() + 64).clamp(10, 40);
-                let fill = (ph.done().min(total) as f64 / total as f64 * bar_w as f64) as usize;
+                let fill = (f * bar_w as f64) as usize;
                 format!("[{}{}] ", "#".repeat(fill), ".".repeat(bar_w - fill))
             } else {
                 String::new()
             };
             format!(
                 "[>] {head}  {bar}{}ETA {}",
-                amount(ph, e.rate),
+                amount(p, ph, e.rate),
                 clock::duration(e.phase_eta)
             )
         } else {

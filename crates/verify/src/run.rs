@@ -51,8 +51,9 @@ pub struct Limits<'a> {
     pub spill: &'a SpillDir,
     /// Bytes spill files may hold at once (`--temp-disk`); None: every index in one heap pass (workspace#553).
     pub temp_disk: Option<u64>,
-    /// Index pairs merged, added per shard and per deferred index: the run's verifier phase (workspace#560).
-    pub pairs: Option<Meter<'a>>,
+    /// The run's verifier phase (workspace#560): heap pages scanned, and in its second part ([`Meter::second`])
+    /// index pairs merged, added per shard and per deferred index.
+    pub progress: Option<Meter<'a>>,
 }
 
 #[derive(Default)]
@@ -363,8 +364,8 @@ pub fn verify_database(
         let floor = lim.memory.try_acquire(lim.workers.limit() * MERGE_FLOOR);
         let mut runs: BTreeMap<usize, IndexRuns> = BTreeMap::new();
         let mut nulls: BTreeMap<usize, u64> = BTreeMap::new();
-        let passes =
-            scan_heaps(db, &jobs, lim.workers, lim.memory, lim.spill).map_err(build_err)?;
+        let passes = scan_heaps(db, &jobs, lim.workers, lim.memory, lim.spill, lim.progress)
+            .map_err(build_err)?;
         for (((job, &ci), mine), p) in jobs.iter().zip(&kept).zip(&feeds).zip(passes) {
             if first {
                 let sc = &db.classes[ci];
@@ -438,6 +439,7 @@ pub fn verify_database(
             lim.workers,
             lim.memory,
             lim.spill,
+            lim.progress,
         )
         .map_err(build_err)?;
         r.heaps += 1;
@@ -467,7 +469,7 @@ pub fn verify_database(
             let mut lp = LeafPairs::new(&t);
             let mut d = check_oids(&mut lp, &live, &|c| owners.contains(&c));
             r.index_pairs += lp.counts.live_objects as u64;
-            if let Some(m) = lim.pairs {
+            if let Some(m) = lim.progress.map(Meter::second) {
                 m.add(lp.counts.live_objects as u64);
             }
             d.extend(lp.finish(None));
@@ -576,7 +578,7 @@ fn check_batch(
             let mut lp = LeafPairs::shard(tree, leaves);
             let mut d = merge_pairs(runs, slice, &mut lp)?;
             let (ld, counts, end) = lp.into_shard();
-            if let Some(m) = lim.pairs {
+            if let Some(m) = lim.progress.map(Meter::second) {
                 m.add(counts.live_objects as u64);
             }
             d.extend(ld);

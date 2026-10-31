@@ -36,6 +36,10 @@ pub struct PhaseSpec {
     pub rate: DefaultRate,
     /// The bottleneck assumed until the phase has run long enough to be classified ([`crate::bottleneck`]).
     pub prior: Bottleneck,
+    /// A second part of the phase, counted apart ([`Meter::second`]) in its own unit at its own rate: the index
+    /// build's tree build after its heap scan, the verifier's merge after its heap pass (workspace#560). The two may
+    /// alternate (batches).
+    pub second: Option<(Unit, DefaultRate)>,
 }
 
 impl PhaseSpec {
@@ -46,6 +50,7 @@ impl PhaseSpec {
             unit: Unit::Step,
             rate: DefaultRate { points: &[] },
             prior: Bottleneck::Cpu,
+            second: None,
         }
     }
 
@@ -60,14 +65,34 @@ impl PhaseSpec {
             unit,
             rate,
             prior,
+            second: None,
+        }
+    }
+
+    /// Work in two parts at two rates, shown as one phase: `unit` and `rate` for the part counted by the phase's
+    /// meter, `second` for the part counted by [`Meter::second`].
+    pub const fn two_parts(
+        name: &'static str,
+        unit: Unit,
+        rate: DefaultRate,
+        second: (Unit, DefaultRate),
+        prior: Bottleneck,
+    ) -> PhaseSpec {
+        PhaseSpec {
+            name,
+            unit,
+            rate,
+            prior,
+            second: Some(second),
         }
     }
 }
 
 pub(crate) struct Phase {
     pub spec: PhaseSpec,
-    pub total: AtomicU64,
-    slots: Box<[Slot]>,
+    /// Per part (the second used only with [`PhaseSpec::second`]): the total and the per-thread done counters.
+    pub totals: [AtomicU64; 2],
+    slots: [Box<[Slot]>; 2],
     pub started: OnceLock<Instant>,
     pub ended: OnceLock<Instant>,
     /// What the phase's byte rate is compared with to classify it ([`crate::bottleneck`]).
@@ -75,11 +100,25 @@ pub(crate) struct Phase {
     /// What the process had used when the phase began and ended (`None` inside: /proc unreadable).
     pub sample_start: OnceLock<Option<ProcSample>>,
     pub sample_end: OnceLock<Option<ProcSample>>,
+    /// The longest stretch, in ms, the running phase's counters did not move, as the monitor saw it: over 2 s, some
+    /// work of the phase is not counted (workspace#560). `u64::MAX` until the monitor sees the phase run.
+    pub idle_max_ms: AtomicU64,
 }
 
 impl Phase {
+    /// Done in part `k`.
+    pub fn done_of(&self, k: usize) -> u64 {
+        self.slots[k].iter().map(|s| s.0.load(Relaxed)).sum()
+    }
+
+    /// Done in the phase's own unit (its first part).
     pub fn done(&self) -> u64 {
-        self.slots.iter().map(|s| s.0.load(Relaxed)).sum()
+        self.done_of(0)
+    }
+
+    /// The total in the phase's own unit (its first part).
+    pub fn total(&self) -> u64 {
+        self.totals[0].load(Relaxed)
     }
 }
 
@@ -139,13 +178,14 @@ impl Progress {
             .enumerate()
             .map(|(i, &spec)| Phase {
                 spec,
-                total: AtomicU64::new(0),
-                slots: (0..SLOTS).map(|_| Slot::default()).collect(),
+                totals: [AtomicU64::new(0), AtomicU64::new(0)],
+                slots: [0, 1].map(|_| (0..SLOTS).map(|_| Slot::default()).collect()),
                 started: OnceLock::new(),
                 ended: OnceLock::new(),
                 device: devices.get(i).copied().unwrap_or(DeviceThroughput::NVME),
                 sample_start: OnceLock::new(),
                 sample_end: OnceLock::new(),
+                idle_max_ms: AtomicU64::new(u64::MAX),
             })
             .collect();
         if let Some(p) = phases.first() {
@@ -169,14 +209,21 @@ impl Progress {
 
     /// The handle workers add to for phase `i`.
     pub fn meter(&self, i: usize) -> Meter<'_> {
+        let [a, b] = &self.phases[i].slots;
         Meter {
-            slots: &self.phases[i].slots,
+            slots: a,
+            second: b,
         }
     }
 
     /// Sets phase `i`'s total once the plan knows it; a phase without one counts 0 in the estimate.
     pub fn set_total(&self, i: usize, total: u64) {
-        self.phases[i].total.store(total, Relaxed);
+        self.phases[i].totals[0].store(total, Relaxed);
+    }
+
+    /// Sets the total of phase `i`'s second part ([`PhaseSpec::two_parts`]).
+    pub fn set_second_total(&self, i: usize, total: u64) {
+        self.phases[i].totals[1].store(total, Relaxed);
     }
 
     /// Ends the running phase and begins the next.
@@ -261,6 +308,7 @@ impl Progress {
 #[derive(Clone, Copy)]
 pub struct Meter<'a> {
     slots: &'a [Slot],
+    second: &'a [Slot],
 }
 
 static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
@@ -269,7 +317,15 @@ thread_local! {
     static MY_SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
-impl Meter<'_> {
+impl<'a> Meter<'a> {
+    /// The handle of the phase's second part ([`PhaseSpec::two_parts`]).
+    pub fn second(self) -> Meter<'a> {
+        Meter {
+            slots: self.second,
+            second: self.second,
+        }
+    }
+
     /// Adds `n` units of finished work. Call once per batch, not per item.
     #[inline]
     pub fn add(&self, n: u64) {

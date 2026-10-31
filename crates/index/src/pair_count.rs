@@ -113,6 +113,20 @@ fn owner_classes<'c>(defs: &[&'c IndexDef<'c>]) -> Result<Vec<OwnerClass<'c>>, B
         .collect()
 }
 
+/// User pages of each owner class's heap: what an index build's heap scan reads (its progress total, workspace#560).
+pub fn owner_heap_pages<'c>(
+    vols: &VolumeSet,
+    defs: &[&'c IndexDef<'c>],
+) -> Result<Vec<(Oid, u64)>, BuildError> {
+    owner_classes(defs)?
+        .iter()
+        .map(|c| {
+            let pages = FileTable::read(vols, c.keys.hfid.vfid)?.user_pages().len() as u64;
+            Ok((c.keys.class_oid, pages))
+        })
+        .collect()
+}
+
 /// Adds one class's per-index bytes to the definitions it feeds.
 fn add(out: &mut [PairBytes], c: &OwnerClass, stats: Vec<PairStats>) {
     for (&d, s) in c.feeds.iter().zip(stats) {
