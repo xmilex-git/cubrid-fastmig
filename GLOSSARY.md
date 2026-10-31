@@ -267,7 +267,7 @@ _Avoid_: 다단계 정렬, 재정렬
 ## 진행 표시
 
 **단계 (phase)**:
-한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier(`--verify`일 때만 일하고, 아니면 0초), register. 속도가 다른 두 일이 번갈아 도는 단계는 두 부분으로, 부분마다 자기 단위와 기본 처리량으로 센다: index-build는 heap scan이 읽은 힙 페이지와 리프에 쓴 키, verifier는 heap pass가 읽은 힙 페이지와 merge한 pair. 표시와 report.json은 한 단계로 내되 두 부분의 양을 따로 보인다. 모든 단계는 시간을 쓰는 일마다 카운터가 움직여야 한다(카운터가 2초 넘게 서 있으면 세지 않는 일이 있다는 뜻, report.json `counter_idle_max_s`)(workspace#560). `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
+한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier(`--verify`일 때만 일하고, 아니면 0초), register. 단위당 비용이 다른 일이 섞인 단계는 부분으로 나눠, 부분마다 자기 단위와 기본 처리량으로 센다: index-build는 heap scan이 읽은 힙 페이지와 리프에 쓴 키, verifier는 target과 source 쪽마다 heap pass가 읽은 힙 페이지와 sort 단계·merge가 각각 한 번씩 센 pair(source 쪽 기본값은 출발 라인별). 표시와 report.json은 한 단계로 내되 부분마다 양을 따로 보인다. 모든 단계는 시간을 쓰는 일마다 카운터가 움직여야 한다(카운터가 2초 넘게 서 있으면 세지 않는 일이 있다는 뜻, report.json `counter_idle_max_s`)(workspace#560). `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
 _Avoid_: 스텝(짧은 고정 작업만 가리킬 때 외에는), 스테이지
 
 **진행 표시 (progress display)**:

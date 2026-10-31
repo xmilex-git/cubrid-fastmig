@@ -36,10 +36,10 @@ pub struct PhaseSpec {
     pub rate: DefaultRate,
     /// The bottleneck assumed until the phase has run long enough to be classified ([`crate::bottleneck`]).
     pub prior: Bottleneck,
-    /// A second part of the phase, counted apart ([`Meter::second`]) in its own unit at its own rate: the index
-    /// build's tree build after its heap scan, the verifier's merge after its heap pass (workspace#560). The two may
-    /// alternate (batches).
-    pub second: Option<(Unit, DefaultRate)>,
+    /// The phase's further parts, each counted apart ([`Meter::part`]) in its own unit at its own rate: work whose cost
+    /// per unit differs from the first part's (the index build's tree build after its heap scan; the verifier's
+    /// target pairs, source pages and source pairs, workspace#560). Parts may alternate (batches).
+    pub more: &'static [(Unit, DefaultRate)],
 }
 
 impl PhaseSpec {
@@ -50,7 +50,7 @@ impl PhaseSpec {
             unit: Unit::Step,
             rate: DefaultRate { points: &[] },
             prior: Bottleneck::Cpu,
-            second: None,
+            more: &[],
         }
     }
 
@@ -65,17 +65,17 @@ impl PhaseSpec {
             unit,
             rate,
             prior,
-            second: None,
+            more: &[],
         }
     }
 
-    /// Work in two parts at two rates, shown as one phase: `unit` and `rate` for the part counted by the phase's
-    /// meter, `second` for the part counted by [`Meter::second`].
-    pub const fn two_parts(
+    /// Work in parts at their own rates, shown as one phase: `unit` and `rate` for the part counted by the phase's
+    /// meter, `more[k - 1]` for the part counted by [`Meter::part`]`(k)`.
+    pub const fn parts(
         name: &'static str,
         unit: Unit,
         rate: DefaultRate,
-        second: (Unit, DefaultRate),
+        more: &'static [(Unit, DefaultRate)],
         prior: Bottleneck,
     ) -> PhaseSpec {
         PhaseSpec {
@@ -83,16 +83,21 @@ impl PhaseSpec {
             unit,
             rate,
             prior,
-            second: Some(second),
+            more,
         }
+    }
+
+    /// Each part's unit and default rate, the first part's first.
+    pub fn all_parts(&self) -> impl Iterator<Item = (Unit, DefaultRate)> + '_ {
+        std::iter::once((self.unit, self.rate)).chain(self.more.iter().copied())
     }
 }
 
 pub(crate) struct Phase {
     pub spec: PhaseSpec,
-    /// Per part (the second used only with [`PhaseSpec::second`]): the total and the per-thread done counters.
-    pub totals: [AtomicU64; 2],
-    slots: [Box<[Slot]>; 2],
+    /// Per part ([`PhaseSpec::all_parts`]): the total and the per-thread done counters.
+    pub totals: Box<[AtomicU64]>,
+    slots: Box<[Box<[Slot]>]>,
     pub started: OnceLock<Instant>,
     pub ended: OnceLock<Instant>,
     /// What the phase's byte rate is compared with to classify it ([`crate::bottleneck`]).
@@ -178,8 +183,10 @@ impl Progress {
             .enumerate()
             .map(|(i, &spec)| Phase {
                 spec,
-                totals: [AtomicU64::new(0), AtomicU64::new(0)],
-                slots: [0, 1].map(|_| (0..SLOTS).map(|_| Slot::default()).collect()),
+                totals: (0..=spec.more.len()).map(|_| AtomicU64::new(0)).collect(),
+                slots: (0..=spec.more.len())
+                    .map(|_| (0..SLOTS).map(|_| Slot::default()).collect())
+                    .collect(),
                 started: OnceLock::new(),
                 ended: OnceLock::new(),
                 device: devices.get(i).copied().unwrap_or(DeviceThroughput::NVME),
@@ -209,10 +216,9 @@ impl Progress {
 
     /// The handle workers add to for phase `i`.
     pub fn meter(&self, i: usize) -> Meter<'_> {
-        let [a, b] = &self.phases[i].slots;
         Meter {
-            slots: a,
-            second: b,
+            parts: &self.phases[i].slots,
+            part: 0,
         }
     }
 
@@ -221,9 +227,9 @@ impl Progress {
         self.phases[i].totals[0].store(total, Relaxed);
     }
 
-    /// Sets the total of phase `i`'s second part ([`PhaseSpec::two_parts`]).
-    pub fn set_second_total(&self, i: usize, total: u64) {
-        self.phases[i].totals[1].store(total, Relaxed);
+    /// Sets the total of phase `i`'s part `k` ([`PhaseSpec::parts`]).
+    pub fn set_part_total(&self, i: usize, k: usize, total: u64) {
+        self.phases[i].totals[k].store(total, Relaxed);
     }
 
     /// Ends the running phase and begins the next.
@@ -307,8 +313,8 @@ impl Progress {
 /// A phase's counter handle, cheap to copy into worker closures.
 #[derive(Clone, Copy)]
 pub struct Meter<'a> {
-    slots: &'a [Slot],
-    second: &'a [Slot],
+    parts: &'a [Box<[Slot]>],
+    part: usize,
 }
 
 static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
@@ -318,18 +324,15 @@ thread_local! {
 }
 
 impl<'a> Meter<'a> {
-    /// The handle of the phase's second part ([`PhaseSpec::two_parts`]).
-    pub fn second(self) -> Meter<'a> {
-        Meter {
-            slots: self.second,
-            second: self.second,
-        }
+    /// The handle of the phase's part `k` ([`PhaseSpec::parts`]); 0 is the phase's own.
+    pub fn part(self, k: usize) -> Meter<'a> {
+        Meter { part: k, ..self }
     }
 
     /// Adds `n` units of finished work. Call once per batch, not per item.
     #[inline]
     pub fn add(&self, n: u64) {
-        self.slots[slot_index()].0.fetch_add(n, Relaxed);
+        self.parts[self.part][slot_index()].0.fetch_add(n, Relaxed);
     }
 }
 

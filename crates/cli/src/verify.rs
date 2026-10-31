@@ -246,12 +246,15 @@ pub fn run_verifier(
         Some(a) => SpillDir::in_arena(a.clone()),
         None => SpillDir::create(&lim.spill_dir)?,
     };
+    // the verifier phase's parts (migrate's PhaseSpec): target pages, target pairs, source pages, source pairs
+    let part = |k: usize| progress.map(|m| m.part(k));
     let limits = fastmig_verify::Limits {
         workers: &wb,
         memory: &mb,
         spill: &spill,
         temp_disk: lim.temp_disk,
-        progress,
+        pages: part(0),
+        pairs: part(1),
     };
     let mut tdb = open(target, role)?;
     if let Some(s) = source {
@@ -262,6 +265,11 @@ pub fn run_verifier(
     let sres = match source {
         Some(s) => {
             let sdb = open(s, Role::Source)?;
+            let limits = fastmig_verify::Limits {
+                pages: part(2),
+                pairs: part(3),
+                ..limits
+            };
             Some(verify_database(&sdb, &BTreeSet::new(), &limits)?)
         }
         None => None,

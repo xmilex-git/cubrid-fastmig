@@ -117,7 +117,7 @@ pub fn build_index(
     let t0 = Instant::now();
     // no more spilled runs than one merge holds buffers for in the merge memory of a worker; every shard below
     // holds a worker permit, so the shards running at once stay within the merge memory of the workers
-    bound_open_runs(&mut runs, order, spill, merge_budget)?;
+    bound_open_runs(&mut runs, order, spill, merge_budget, None)?;
     // spilled runs are sorted already; the in-memory ones sort inside the grant they were collected under
     let extra = worker_limit.try_acquire(runs.mem.len().saturating_sub(1));
     let workers = 1 + extra.count;

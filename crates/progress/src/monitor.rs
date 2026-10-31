@@ -130,7 +130,7 @@ fn watch(
         let e = est.tick(p, now, ProcSample::now());
         if let Some(ph) = p.phases.get(p.current()) {
             let cur = p.current();
-            let sum = ph.done_of(0) + ph.done_of(1);
+            let sum: u64 = (0..ph.totals.len()).map(|k| ph.done_of(k)).sum();
             let since = match idle {
                 Some((i, last, at)) if i == cur && last == sum => at,
                 Some((i, _, _)) if i == cur => now,

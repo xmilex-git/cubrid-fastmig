@@ -2,7 +2,7 @@
 //! over every owner class at once, then every tree built at once, all under the one worker and memory limit.
 //!
 //! Input: the target's space manager, the [`IndexDef`]s (BTID, owners, shape, key domain), the limits and an
-//! optional progress meter (heap pages scanned; its second part, pairs written to leaves). Output: one [`FilledIndex`]
+//! optional progress meter (heap pages scanned; its part 1, pairs written to leaves). Output: one [`FilledIndex`]
 //! per definition, in order — the B-tree statistics the catalog representation stores (workspace#482 G2 item 7) and
 //! the overflow key file if one was needed. A unique violation, a duplicate entry, a NULL primary key column or an
 //! unreadable row stops the fill.
@@ -217,7 +217,7 @@ fn fill_batch(
             nulls,
             sink: &sinks[i],
             make_ovf_key_sink: &make_ovf[i],
-            progress: progress.map(Meter::second),
+            progress: progress.map(|m| m.part(1)),
         })
         .collect();
     let free = lim.memory.try_acquire(lim.memory.limit());

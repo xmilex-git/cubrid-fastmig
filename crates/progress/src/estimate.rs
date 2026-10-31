@@ -5,7 +5,7 @@
 //! Rules (user requests relayed in workspace#472 추가/추가 2; the ETA rule decided by the map supervisor for
 //! workspace#560, 2026-10-31):
 //! - a phase's default seconds are its amount over its default rate ([`crate::default_rates`]), summed over its
-//!   parts for a phase in two ([`crate::meter::PhaseSpec::two_parts`]); its share done is its done default seconds
+//!   parts for a phase in parts ([`crate::meter::PhaseSpec::parts`]); its share done is its done default seconds
 //!   over those;
 //! - a bottleneck's speed factor is measured time / default seconds over the work bound by it so far: the
 //!   observations made before the phases (the precheck's pair count) and every phase that has ended after running
@@ -119,11 +119,11 @@ impl Estimator {
             .map(|q| scaled_default(p, q, factors.of(q.spec.prior)))
             .sum();
         Estimate {
-            // the moving average in the phase's unit, shown only: one rate, so not for a phase in two parts
+            // the moving average in the phase's unit, shown only: one rate, so not for a phase in parts
             rate: (ph.spec.unit != Unit::Step
                 && el >= MIN_SAMPLE_S
                 && self.ema > 1e-9
-                && ph.spec.second.is_none())
+                && ph.spec.more.is_empty())
             .then(|| self.ema * ph.spec.rate.with_workers(p.worker_limit)),
             phase_eta,
             total_eta: phase_eta + pending,
@@ -176,13 +176,13 @@ pub(crate) fn classified(
     }
 }
 
-/// Seconds the defaults give `amounts` of phase `ph`'s parts.
-fn default_secs(p: &Progress, ph: &Phase, amounts: [u64; 2]) -> f64 {
-    [Some(ph.spec.rate), ph.spec.second.map(|(_, r)| r)]
-        .into_iter()
-        .zip(amounts)
-        .map(|(r, a)| match r.map(|r| r.with_workers(p.worker_limit)) {
-            Some(rate) if rate > 0.0 => a as f64 / rate,
+/// Seconds the defaults give phase `ph`'s parts at `amount(k)` each.
+fn default_secs(p: &Progress, ph: &Phase, amount: impl Fn(usize) -> u64) -> f64 {
+    ph.spec
+        .all_parts()
+        .enumerate()
+        .map(|(k, (_, r))| match r.with_workers(p.worker_limit) {
+            rate if rate > 0.0 => amount(k) as f64 / rate,
             _ => 0.0,
         })
         .sum()
@@ -196,12 +196,12 @@ pub(crate) fn fraction(p: &Progress, ph: &Phase) -> Option<f64> {
 
 /// Default seconds of what phase `ph` has done.
 fn done_secs(p: &Progress, ph: &Phase) -> f64 {
-    default_secs(p, ph, [ph.done_of(0), ph.done_of(1)])
+    default_secs(p, ph, |k| ph.done_of(k))
 }
 
 /// Default seconds of phase `ph`'s whole amount.
 fn total_secs(p: &Progress, ph: &Phase) -> f64 {
-    default_secs(p, ph, ph.totals.each_ref().map(|t| t.load(Relaxed)))
+    default_secs(p, ph, |k| ph.totals[k].load(Relaxed))
 }
 
 /// A whole phase: a step takes its fixed time; measured work its default time times the factor.

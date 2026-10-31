@@ -23,6 +23,7 @@ use fastmig_index::spill_run::{SpillCursor, SpillPos};
 use fastmig_index::splitter::ShardBounds;
 use fastmig_ondisk::Oid;
 use fastmig_ondisk::value::KeyDomain;
+use fastmig_progress::Meter;
 
 use crate::btree_walk::LeafPairs;
 use crate::defect::{Check, Defect, OidText};
@@ -35,12 +36,27 @@ fn key_text(kd: &KeyDomain, k: &[u8]) -> String {
     }
 }
 
+/// Heap-side pairs merged between two adds to the progress meter.
+const COUNT_BATCH: u64 = 1 << 16;
+
 /// Merges `runs` (sorted; shard `s` of `bounds` when given) with `leaves`.
 pub fn merge_pairs(
     runs: &IndexRuns,
     shard: Option<(&ShardBounds, usize)>,
     leaves: &mut LeafPairs,
+    progress: Option<Meter>,
 ) -> io::Result<Vec<Defect>> {
+    // heap-side pairs merged since the last add to the meter (workspace#560: per batch, not per shard)
+    let mut counted = 0u64;
+    let mut count = |n: u64| {
+        counted += n;
+        if counted >= COUNT_BATCH {
+            if let Some(m) = &progress {
+                m.add(counted);
+            }
+            counted = 0;
+        }
+    };
     let kd = leaves.tree().kd.clone();
     let index = leaves.tree().name.clone();
     let class = leaves.tree().class.clone();
@@ -105,12 +121,14 @@ pub fn merge_pairs(
                     );
                 }
                 h = take_pair(heap.next_pair()?, &mut hk);
+                count(1);
                 l = take_pair(leaves.next_pair(), &mut lk);
                 record.leaf_read(leaves.counts.records, &mut out);
             }
             Ordering::Less => {
                 out.push(d("missing-in-index", h.unwrap(), &hk));
                 h = take_pair(heap.next_pair()?, &mut hk);
+                count(1);
             }
             Ordering::Greater => {
                 out.push(d("missing-in-heap", l.unwrap(), &lk));
@@ -120,6 +138,9 @@ pub fn merge_pairs(
         }
     }
     record.settle(&mut out);
+    if let Some(m) = &progress {
+        m.add(counted);
+    }
     Ok(out)
 }
 

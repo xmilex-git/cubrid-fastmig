@@ -1,4 +1,4 @@
-//! The progress part of a run's report.json: per phase its amount (and its second part's, for a phase in two), time,
+//! The progress part of a run's report.json: per phase its amount (and its further parts' as `more`), time,
 //! measured rate, the longest stretch its counters stood still while it ran (`counter_idle_max_s`: over 2 s, some of
 //! its work is not counted), what it used (CPU seconds, device bytes) and the bottleneck it showed (`null`: none
 //! shown, the prior kept); the run's total time beside the estimate made when the plan's totals were first known,
@@ -31,14 +31,21 @@ pub fn json(p: &Progress) -> String {
                 Unit::Count(noun) => noun,
             };
             let unit = unit_name(ph.spec.unit);
-            let second = ph.spec.second.map_or(String::new(), |(u, _)| {
-                format!(
-                    ", \"second\": {{\"unit\": \"{}\", \"total\": {}, \"done\": {}}}",
-                    unit_name(u),
-                    ph.totals[1].load(std::sync::atomic::Ordering::Relaxed),
-                    ph.done_of(1)
-                )
-            });
+            let more: Vec<String> = (ph.spec.more.iter().enumerate())
+                .map(|(j, (u, _))| {
+                    format!(
+                        "{{\"unit\": \"{}\", \"total\": {}, \"done\": {}}}",
+                        unit_name(*u),
+                        ph.totals[j + 1].load(std::sync::atomic::Ordering::Relaxed),
+                        ph.done_of(j + 1)
+                    )
+                })
+                .collect();
+            let second = if more.is_empty() {
+                String::new()
+            } else {
+                format!(", \"more\": [{}]", more.join(", "))
+            };
             // a step has no counter; a phase the monitor never saw running has no figure
             let idle = match ph.idle_max_ms.load(std::sync::atomic::Ordering::Relaxed) {
                 ms if ph.spec.unit == Unit::Step || ms == u64::MAX => "null".into(),

@@ -64,7 +64,7 @@ pub const INDEX_SCAN_PAGES: DefaultRate = DefaultRate {
     points: &[(1, 2.45e3), (4, 10.35e3), (16, 43.5e3)],
 };
 
-/// Index build keys written to leaves (the index build's second part: merge, leaves, upper levels): 73.0 M keys in
+/// Index build keys written to leaves (the index build's part 1: merge, leaves, upper levels): 73.0 M keys in
 /// the rest of the same runs, about 28.0 / 9.3 / 7.6 s at 1 / 4 / 16 workers.
 pub const TREE_BUILD_KEYS: DefaultRate = DefaultRate {
     points: &[(1, 2.6e6), (4, 7.85e6), (16, 9.6e6)],
@@ -76,17 +76,40 @@ pub const HEAP_PAGES: DefaultRate = DefaultRate {
     points: &[(1, 3.3e3), (4, 12.5e3), (16, 39.9e3)],
 };
 
-/// Heap pages the verifier reads (its first part: heap pass and run sort, target and source): twice the pages above
-/// in 134.2 / 34.6 / 9.9 s (11.4) and 102.8 / 27.2 / 8.8 s (develop) at 1 / 4 / 16 workers (verify report
-/// `phases_s`, workspace#560 pass 2); the rate is the mean of the two (each within 0.85..1.12x of it).
-pub const VERIFY_HEAP_PAGES: DefaultRate = DefaultRate {
-    points: &[(1, 1.85e3), (4, 7.08e3), (16, 23.2e3)],
+/// Heap pages the verifier's heap pass reads on the target (develop records): 111.5 k pages (from the 11.4 DB) and
+/// 105.1 k (from the develop DB) in about 48.9 / 11.9 / 3.3 s and 49.8 / 11.8 / 3.4 s at 1 / 4 / 16 workers (verify
+/// report `phases_s`, workspace#560 passes 2, 5 and 6); the rate is the mean of the two.
+pub const VERIFY_TARGET_HEAP_PAGES: DefaultRate = DefaultRate {
+    points: &[(1, 2.20e3), (4, 9.16e3), (16, 32.4e3)],
 };
 
-/// Index pairs the verifier merges (its second part), target and source together: 146.0 M pairs in 48.7 / 14.0 / 6.7
-/// s at 1 / 4 / 16 workers, the mean of the same runs.
-pub const VERIFY_MERGE_PAIRS: DefaultRate = DefaultRate {
-    points: &[(1, 3.0e6), (4, 10.4e6), (16, 21.8e6)],
+/// Pair steps of the verifier on the target: each pair once in the run sort step, once in the merge, 146.0 M in about
+/// 26.1 / 8.4 / 4.2 s at 1 / 4 / 16 workers (run sort plus merge, the same reports, both DBs).
+pub const VERIFY_TARGET_PAIRS: DefaultRate = DefaultRate {
+    points: &[(1, 5.59e6), (4, 17.4e6), (16, 35.0e6)],
+};
+
+/// Heap pages the verifier reads on a source of the target's line: the develop DB's 105.1 k in about 49.7 / 11.8 /
+/// 3.35 s at 1 / 4 / 16 workers (the same reports).
+pub const VERIFY_SOURCE_HEAP_PAGES: DefaultRate = DefaultRate {
+    points: &[(1, 2.11e3), (4, 8.9e3), (16, 31.4e3)],
+};
+
+/// Pair steps of the verifier on a source of the target's line: 146.0 M in about 27.4 / 8.8 / 4.5 s.
+pub const VERIFY_SOURCE_PAIRS: DefaultRate = DefaultRate {
+    points: &[(1, 5.33e6), (4, 16.6e6), (16, 32.4e6)],
+};
+
+/// Heap pages the verifier reads on a source of an older line: the 11.4 DB's 111.5 k in about 74.4 / 12.5 / 2.3 s at 1 /
+/// 4 / 16 workers (the same reports; the 16-worker figure is one short run).
+pub const VERIFY_SOURCE_HEAP_PAGES_OLDER_LINE: DefaultRate = DefaultRate {
+    points: &[(1, 1.50e3), (4, 8.92e3), (16, 48.5e3)],
+};
+
+/// Pair steps of the verifier on a source of an older line: 146.0 M in about 34.7 / 16.65 / 7.1 s (its runs spill and
+/// are merged down first).
+pub const VERIFY_SOURCE_PAIRS_OLDER_LINE: DefaultRate = DefaultRate {
+    points: &[(1, 4.21e6), (4, 8.77e6), (16, 20.6e6)],
 };
 
 /// Pairs the precheck's counting scan (`resource_estimate`, `fastmig_index::pair_count`) counts on a source of the

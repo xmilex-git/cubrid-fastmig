@@ -122,11 +122,11 @@ const PHASES: &[PhaseSpec] = &[
         default_rates::HEAP_PAGES,
         Bottleneck::Cpu,
     ),
-    PhaseSpec::two_parts(
+    PhaseSpec::parts(
         "index-build",
         Unit::Count("pages"),
         default_rates::INDEX_SCAN_PAGES,
-        (Unit::Count("keys"), default_rates::TREE_BUILD_KEYS),
+        &[(Unit::Count("keys"), default_rates::TREE_BUILD_KEYS)],
         Bottleneck::Cpu,
     ),
     PhaseSpec::step("catalog-regeneration"),
@@ -138,15 +138,43 @@ const PHASES: &[PhaseSpec] = &[
         default_rates::FSYNC_BYTES,
         Bottleneck::Write,
     ),
-    PhaseSpec::two_parts(
-        "verifier",
-        Unit::Count("pages"),
-        default_rates::VERIFY_HEAP_PAGES,
-        (Unit::Count("pairs"), default_rates::VERIFY_MERGE_PAIRS),
-        Bottleneck::Cpu,
-    ),
+    VERIFIER_SAME_LINE,
     PhaseSpec::step("register"),
 ];
+/// The verifier's parts (workspace#560): the target's heap pages and pairs, then the source's, each side at its own
+/// rate (a source of an older line reads and sorts slower: spilled runs, older records). `verify::run_verifier`
+/// counts them in this order.
+const VERIFIER_SAME_LINE: PhaseSpec = PhaseSpec::parts(
+    "verifier",
+    Unit::Count("pages"),
+    default_rates::VERIFY_TARGET_HEAP_PAGES,
+    &[
+        (Unit::Count("pairs"), default_rates::VERIFY_TARGET_PAIRS),
+        (
+            Unit::Count("pages"),
+            default_rates::VERIFY_SOURCE_HEAP_PAGES,
+        ),
+        (Unit::Count("pairs"), default_rates::VERIFY_SOURCE_PAIRS),
+    ],
+    Bottleneck::Cpu,
+);
+const VERIFIER_OLDER_LINE: PhaseSpec = PhaseSpec::parts(
+    "verifier",
+    Unit::Count("pages"),
+    default_rates::VERIFY_TARGET_HEAP_PAGES,
+    &[
+        (Unit::Count("pairs"), default_rates::VERIFY_TARGET_PAIRS),
+        (
+            Unit::Count("pages"),
+            default_rates::VERIFY_SOURCE_HEAP_PAGES_OLDER_LINE,
+        ),
+        (
+            Unit::Count("pairs"),
+            default_rates::VERIFY_SOURCE_PAIRS_OLDER_LINE,
+        ),
+    ],
+    Bottleneck::Cpu,
+);
 /// Meter of taking the rewritten ranges of the clones (workspace#556, #560): bytes written, 0 on a byte copy.
 const OPEN_SOURCES: usize = 1;
 const VOLUME_COPY: usize = 2;
@@ -273,9 +301,13 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         &o.plan.target_dir,
     )?;
     // the run's clock starts with the precheck, less the time a terminal question waited for its answer (workspace#560)
+    let mut phases = PHASES.to_vec();
+    if plan.version_pair.source != plan.version_pair.target {
+        phases[VERIFIER] = VERIFIER_OLDER_LINE;
+    }
     let progress = Progress::new(
         "migrate",
-        PHASES,
+        &phases,
         &[],
         o.worker_limit,
         started + asked.elapsed(),
@@ -403,15 +435,16 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     // the build scans the indexed heaps as the page treatment leaves them, then writes every pair to a leaf
     rep.progress
         .set_total(INDEX_BUILD, b.est.heap_pages() + b_appended);
-    rep.progress.set_second_total(INDEX_BUILD, b_pairs);
+    rep.progress.set_part_total(INDEX_BUILD, 1, b_pairs);
     if o.verify {
-        // the verifier reads every heap of the target and of the source (about as many pages, the target's grown by
-        // the page treatment), then merges the target's pairs and the source's (about as many). shortcut: a later
-        // index batch reads its heaps again, not counted, until a batched run is measured
+        // per side: every heap (the target's as many pages as the source's, grown by the page treatment), then every
+        // pair once in the sort step (a run sorted, or a spilled run merged down) and once in the merge. shortcut: a
+        // later index batch reads its heaps again, not counted, until a batched run is measured
         let source_pages = b.est.verify_heap_pages.unwrap_or(0) as u64;
-        rep.progress
-            .set_total(VERIFIER, 2 * source_pages + b_appended);
-        rep.progress.set_second_total(VERIFIER, 2 * b_pairs);
+        rep.progress.set_total(VERIFIER, source_pages + b_appended);
+        rep.progress.set_part_total(VERIFIER, 1, 2 * b_pairs);
+        rep.progress.set_part_total(VERIFIER, 2, source_pages);
+        rep.progress.set_part_total(VERIFIER, 3, 2 * b_pairs);
     }
     if plan.unshare {
         let io = src.vols.io_pagesize() as u64;

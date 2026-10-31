@@ -56,23 +56,20 @@ pub(crate) fn tag(p: &Progress, i: usize) -> String {
     )
 }
 
-/// `42.1% (198 MiB/470 MiB, 1.1 GiB/s)`; for a phase in two parts `42.1% (75869/75869 pages, 0/72985257 keys)`
-/// (the share in default seconds); empty for a step.
+/// `42.1% (198 MiB/470 MiB, 1.1 GiB/s)`; for a phase in parts `42.1% (75869/75869 pages, 0/72985257 keys)` (the
+/// share in default seconds); empty for a step.
 pub(crate) fn amount(p: &Progress, ph: &Phase, rate: Option<f64>) -> String {
     if ph.spec.unit == Unit::Step {
         return String::new();
     }
-    if let (Some((unit2, _)), Some(f)) = (ph.spec.second, fraction(p, ph)) {
-        let part = |unit: Unit, k: usize| {
-            let total = ph.totals[k].load(std::sync::atomic::Ordering::Relaxed);
-            unit.fraction(ph.done_of(k).min(total), total)
-        };
-        return format!(
-            "{:.1}% ({}, {}) ",
-            f * 100.0,
-            part(ph.spec.unit, 0),
-            part(unit2, 1)
-        );
+    if let (false, Some(f)) = (ph.spec.more.is_empty(), fraction(p, ph)) {
+        let parts: Vec<String> = (ph.spec.all_parts().enumerate())
+            .map(|(k, (unit, _))| {
+                let total = ph.totals[k].load(std::sync::atomic::Ordering::Relaxed);
+                unit.fraction(ph.done_of(k).min(total), total)
+            })
+            .collect();
+        return format!("{:.1}% ({}) ", f * 100.0, parts.join(", "));
     }
     let total = ph.total();
     let rate = rate.map_or(String::new(), |r| format!(", {}", ph.spec.unit.rate(r)));

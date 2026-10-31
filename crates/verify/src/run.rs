@@ -51,9 +51,10 @@ pub struct Limits<'a> {
     pub spill: &'a SpillDir,
     /// Bytes spill files may hold at once (`--temp-disk`); None: every index in one heap pass (workspace#553).
     pub temp_disk: Option<u64>,
-    /// The run's verifier phase (workspace#560): heap pages scanned, and in its second part ([`Meter::second`])
-    /// index pairs merged, added per shard and per deferred index.
-    pub progress: Option<Meter<'a>>,
+    /// The run's verifier phase (workspace#560), one part per kind of work of this database: heap pages scanned,
+    /// and index pairs sorted (or merged down from spill) and then merged, in batches, and per deferred index.
+    pub pages: Option<Meter<'a>>,
+    pub pairs: Option<Meter<'a>>,
 }
 
 #[derive(Default)]
@@ -364,7 +365,7 @@ pub fn verify_database(
         let floor = lim.memory.try_acquire(lim.workers.limit() * MERGE_FLOOR);
         let mut runs: BTreeMap<usize, IndexRuns> = BTreeMap::new();
         let mut nulls: BTreeMap<usize, u64> = BTreeMap::new();
-        let passes = scan_heaps(db, &jobs, lim.workers, lim.memory, lim.spill, lim.progress)
+        let passes = scan_heaps(db, &jobs, lim.workers, lim.memory, lim.spill, lim.pages)
             .map_err(build_err)?;
         for (((job, &ci), mine), p) in jobs.iter().zip(&kept).zip(&feeds).zip(passes) {
             if first {
@@ -439,7 +440,7 @@ pub fn verify_database(
             lim.workers,
             lim.memory,
             lim.spill,
-            lim.progress,
+            lim.pages,
         )
         .map_err(build_err)?;
         r.heaps += 1;
@@ -469,7 +470,7 @@ pub fn verify_database(
             let mut lp = LeafPairs::new(&t);
             let mut d = check_oids(&mut lp, &live, &|c| owners.contains(&c));
             r.index_pairs += lp.counts.live_objects as u64;
-            if let Some(m) = lim.progress.map(Meter::second) {
+            if let Some(m) = lim.pairs {
                 m.add(lp.counts.live_objects as u64);
             }
             d.extend(lp.finish(None));
@@ -527,7 +528,14 @@ fn check_batch(
             })
             .collect();
         sorts.sort_by_key(|(m, _)| std::cmp::Reverse(m.len()));
-        run_jobs(lim.workers.limit(), sorts, |(m, kd)| m.sort(kd));
+        // the sort step counts every pair once in this side's pairs part, before the merge counts it again
+        // (workspace#560): an in-memory run when sorted, a spilled one in `bound_open_runs`
+        run_jobs(lim.workers.limit(), sorts, |(m, kd)| {
+            m.sort(kd);
+            if let Some(p) = lim.pairs {
+                p.add(m.len() as u64);
+            }
+        });
     }
     let free = lim.memory.try_acquire(lim.memory.limit());
     let merge_budget = (floor.bytes + free.bytes) / lim.workers.limit().max(1);
@@ -535,7 +543,7 @@ fn check_batch(
         lim.workers.limit(),
         index_runs.iter_mut().collect(),
         |(s, run, _): &mut (usize, IndexRuns, u64)| {
-            bound_open_runs(run, &trees[s].kd, lim.spill, merge_budget)
+            bound_open_runs(run, &trees[s].kd, lim.spill, merge_budget, lim.pairs)
         },
     );
     bounded.into_iter().collect::<std::io::Result<()>>()?;
@@ -576,11 +584,8 @@ fn check_batch(
             leaves,
         } => {
             let mut lp = LeafPairs::shard(tree, leaves);
-            let mut d = merge_pairs(runs, slice, &mut lp)?;
+            let mut d = merge_pairs(runs, slice, &mut lp, lim.pairs)?;
             let (ld, counts, end) = lp.into_shard();
-            if let Some(m) = lim.progress.map(Meter::second) {
-                m.add(counts.live_objects as u64);
-            }
             d.extend(ld);
             Ok::<_, std::io::Error>((d, Some((index, shard, counts, end))))
         }
