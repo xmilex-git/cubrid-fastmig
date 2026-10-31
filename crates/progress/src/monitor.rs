@@ -126,8 +126,12 @@ fn watch(
         let stopping = stop.load(Relaxed);
         let now = Instant::now();
         let e = est.tick(p, now, ProcSample::now());
-        // one trail point per [`ESTIMATE_TICK`] in every mode: the report reads four of them
-        if p.current() < p.phases.len() && next_trail.is_none_or(|t| now >= t) {
+        // one trail point per [`ESTIMATE_TICK`] in every mode, from the start estimate on (before it the phase totals
+        // are unknown and the estimate is only the time so far): the report reads four of them
+        if p.current() < p.phases.len()
+            && p.start_estimate.get().is_some()
+            && next_trail.is_none_or(|t| now >= t)
+        {
             next_trail = Some(now + ESTIMATE_TICK);
             let el = now.duration_since(p.run_started).as_secs_f64();
             p.trail

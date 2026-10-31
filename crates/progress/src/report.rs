@@ -4,8 +4,8 @@
 //! the run (the evidence for better defaults in [`crate::default_rates`] and for the speed factors, workspace#560).
 //!
 //! Input: the finished [`Progress`]. Output: a JSON object as text.
-//! The trail points are the monitor's estimates (none with `--progress none`): each is the last one made at or
-//! before its time, `null` when the run was shorter or no monitor ran.
+//! The trail points are the monitor's estimates from the start estimate on (none with `--progress none`): each is the
+//! last one made at or before its time, `null` when the run was shorter, the precheck still ran, or no monitor ran.
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
