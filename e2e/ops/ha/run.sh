@@ -111,7 +111,7 @@ sync_mark() {
 checks() {
   local i
   [ -n "${FASTMIG_HA_CHECKS:-}" ] || { echo "FASTMIG_HA_CHECKS unset: no checks"; return 0; }
-  # -N: no column headers, as T36 runs checks.sql (217b108)
+  # -N: no column headers, as T36 runs checks.sql (bce276e)
   # an index whose count differs from its heap fails the phase, as T36 `check` does
   for i in 0 1; do
     sql "$i" "$2" "$FASTMIG_HA_CHECKS" -N >"$OUT/check/$1-${H[i]}.out" || return 1
@@ -129,7 +129,7 @@ dml() {
 }
 
 # wait_pl <i>: the server reports started before its PL server (JVM) accepts calls; checks.sql calls a Java SP, so wait
-# up to 60 s for the one every baseline DB has (T36 217b108 `start`)
+# up to 60 s for the one every baseline DB has (T36 bce276e `start`)
 wait_pl() {
   local e n; e=$(tgt_env "$1")
   for n in $(seq 30); do
@@ -297,7 +297,7 @@ evidence() {
   # core_pattern core.%e.%p.%h.%t: %h is the node's host name, so other sessions' cores on this host do not count
   cores=$(find /data/core/ -maxdepth 1 \( -name "core.*.${H[0]}.*" -o -name "core.*.${H[1]}.*" \) -newermt "@$START_EPOCH")
   [ -z "$cores" ] || printf 'core: %s\n' $cores
-  # G11: no assert and no core
+  # G12: no assert and no core
   [ -z "$asserts" ] && [ -z "$cores" ]
 }
 step evidence 0 evidence
