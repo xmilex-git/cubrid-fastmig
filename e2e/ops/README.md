@@ -176,6 +176,16 @@ DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G11 5).
   and crash recovery after `kill -9` asserted in `pgbuf_set_bcb_page_vpid` on the migrated side (official side
   passed). Fixed in cubrid-fastmig 81c18f0; the default (clone) run then passes end to end (§ Verified runs).
 
+## Verified runs
+
+T1 11.4 clean → develop, optdebug develop 682b080b2 (`~/optdebug/CUBRID-fastmig-dev` reflink copy), default clone path,
+6 rounds, cubrid-fastmig c69528b (on main 1b53a47, which holds the #591 fix 81c18f0), 2026-10-31, workspace#588:
+
+| Run | Result |
+|---|---|
+| pass | exit 0; 66 steps all as expected; 11 parity diffs empty; error lines, asserts, cores, PL drops 0 on both sides; 3 archives on the migrated side |
+| `FASTMIG_OPS_BREAK=official-extra-row` | exit 1; every step 0; all 11 parity diffs non-empty from `baseline` on, each the one extra `region_list` row (count 100 vs 101, `p_ns` 50 vs 51) |
+
 ## Disk
 
 One DB lives at a time: the migrated side's source copy is finalized away in `prepare`, and the official side starts
