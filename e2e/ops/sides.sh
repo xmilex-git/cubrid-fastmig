@@ -131,8 +131,8 @@ check() {
   [ "$was" = 1 ] || start || return 1
   sql_file -C "$checks" -N >"$f" && ! grep -q "INDEX!=HEAP" "$f"
   rc=$?
-  # diagnostic only, not compared: the customer rows behind the digest (check_rows.sql)
-  csql -C -u dba -N -i "$OPS/check_rows.sql" "$DB" >"${f%.out}.rows" 2>&1
+  # diagnostic only, off by default, not compared: the customer rows behind the digest (check_rows.sql)
+  [ "${FASTMIG_OPS_ROWS_DUMP:-0}" != 1 ] || csql -C -u dba -N -i "$OPS/check_rows.sql" "$DB" >"${f%.out}.rows" 2>&1
   [ "$was" = 1 ] || stop || return 1
   return $rc
 }

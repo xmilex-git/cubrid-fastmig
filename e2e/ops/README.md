@@ -45,6 +45,7 @@ Environment:
 | `FASTMIG_OPS_SOURCE_UNLOAD` | `<BASEDB_ROOT>/<label>/unload/<variant>/<db>` | the unloaddb prefix the official side loads (a 10.2 source: see e2e/README.md) |
 | `FASTMIG_OPS_LOB_BASE` | none | required for a 10.2..11.3 source: the base its LOB locators name (as `FASTMIG_E2E_LOB_BASE`). The official side rewrites that prefix to its own copy of the files, since a LOB UPDATE deletes the old file |
 | `FASTMIG_OPS_BREAK` | none | fail-before probe: `official-extra-row` inserts one `region_list` row on the official side only, right after its server starts; the run must then exit 1 with a parity diff from `baseline` on |
+| `FASTMIG_OPS_ROWS_DUMP` | `0` | `1`: after each check also `<side>/check/<step>.rows`, the customer rows behind its digest ([check_rows.sql](check_rows.sql), T1 and round rows only), not compared; for a customer digest that differs between the sides (workspace#589) |
 
 Exit: `0` pass, `1` a step, a parity diff, an assert/core or the archive count failed, `2` bad arguments or an
 existing `<out dir>`.
