@@ -45,3 +45,7 @@ tc TC_ROOT TC_LIST INSTALL OUT: release
 # One end-to-end run of a baseline DB (e2e/README.md); needs FASTMIG_E2E_INSTALL, FASTMIG_E2E_PORT, FASTMIG_E2E_SERVER_CTL.
 e2e PRISTINE TARGET_VERSION OUT: release
     bash e2e/run.sh target/release/cubrid-fastmig {{PRISTINE}} {{TARGET_VERSION}} {{OUT}}
+
+# Operations scenario on both sides with parity (e2e/ops/README.md); needs FASTMIG_OPS_INSTALL, FASTMIG_OPS_PORT, FASTMIG_OPS_SERVER_CTL.
+ops PRISTINE TARGET_VERSION OUT *ROUNDS: release
+    bash e2e/ops/run.sh target/release/cubrid-fastmig {{PRISTINE}} {{TARGET_VERSION}} {{OUT}} {{ROUNDS}}

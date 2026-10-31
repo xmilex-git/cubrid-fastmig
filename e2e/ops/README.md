@@ -42,57 +42,71 @@ Environment:
 | `FASTMIG_OPS_MIN_ARCHIVES` | `2` | log archives the migrated side must create during the scenario; `0` turns the check off (the 4.2 GB DB, 1 round) |
 | `FASTMIG_OPS_WORKERS` | `4` | migrate worker limit |
 | `FASTMIG_OPS_SOURCE_UNLOAD` | `<BASEDB_ROOT>/<label>/unload/<variant>/<db>` | the unloaddb prefix the official side loads (a 10.2 source: see e2e/README.md) |
-| `FASTMIG_OPS_LOB_BASE` | none | as `FASTMIG_E2E_LOB_BASE` for a 10.2..11.3 source |
-| `FASTMIG_OPS_BREAK` | none | fail-before probe: `official-extra-row` inserts one row on the official side only after `baseline`; the run must then exit 1 with a parity diff from that step on |
+| `FASTMIG_OPS_LOB_BASE` | none | required for a 10.2..11.3 source: the base its LOB locators name (as `FASTMIG_E2E_LOB_BASE`). The official side rewrites that prefix to its own copy of the files, since a LOB UPDATE deletes the old file |
+| `FASTMIG_OPS_BREAK` | none | fail-before probe: `official-extra-row` inserts one `region_list` row on the official side only, right after its server starts; the run must then exit 1 with a parity diff from `baseline` on |
 
 Exit: `0` pass, `1` a step, a parity diff, an assert/core or the archive count failed, `2` bad arguments or an
 existing `<out dir>`.
 
 ## Sides and steps
 
-Both sides keep the source DB name, each in its own `CUBRID_DATABASES` directory, and run one after the other on the
-same install and port (`migrated` first). `prepare` makes the side's DB; the scenario steps then run in this order,
-and after each one the side runs `checks.sql` into `<side>/check/<step>.out`:
+Both sides keep the source DB name, each in its own `CUBRID_DATABASES` directory (`<out>/<side>/dbs`, volumes in
+`<out>/<side>/db`), and run one after the other on the same install and port, `migrated` first. After every scenario
+step the side runs `checks.sql` (step `check-<step>`) into `<side>/check/<step>.out`, always in CS mode (the Java SP runs in the server; a stopped server is started for the checks and stopped again):
 
-| Step | What |
-|---|---|
-| `prepare` | migrated: reflink copy → `migrate --verify --volumes-in-first-dir` → `deferred-indexes.sql`, `recompile-plcsql.sql`, `update-statistics.sql`. official: `createdb` with the source's volume and log sizes → `loaddb` of the unload (`-s`, `-d`, `-i`, `--trigger-file`) → Java class `loadjava` and LOB files under the side's lob base, as the official path needs them |
-| `baseline` | server start, no change: the two paths agree before any write |
-| `dml` | `[rounds]` × the DML round (`dml/round.sql`): INSERT/UPDATE/DELETE over every kind of object of the baseline DB (tables, PK/FK/unique/plain/function/filter indexes, serial and AUTO_INCREMENT, views incl. WITH CHECK OPTION, triggers, RANGE/HASH/LIST partitions, synonyms, Java and PL/CSQL SPs, users and grants, collations, JSON, LOB) |
-| `statistics` | `UPDATE STATISTICS ON ALL CLASSES` |
-| `checkpoint` | `;checkpoint` in `csql --sysadm` |
-| `kill9-recovery` | `kill -9` of `cub_server`, start again (restart recovery) |
-| `vacuumdb` | server stop, `vacuumdb -S` |
-| `addvoldb` | `addvoldb -S` of one data volume |
-| `compactdb` | `compactdb -S` |
-| `backupdb` | `backupdb -S` (full) into `<side>/backup` |
-| `dml-after-backup` | one DML round after the backup |
-| `restoredb` | `restoredb -S` from that backup up to the end of the log: the same state as `dml-after-backup` |
-| `final` | `unloaddb` of the side; then `set-comparison` of migrated against official (step `parity-unload`) |
+| Step | Server | What |
+|---|---|---|
+| `prepare` | down | migrated: reflink copy → `migrate --verify --volumes-in-first-dir` → `deferred-indexes.sql`, `recompile-plcsql.sql`, `update-statistics.sql` (csql -S) → `finalize` (deletes the source copy; skipped with `FASTMIG_OPS_LOB_BASE`). official: `createdb` with the source's volume 0 and log sizes → a reflink copy of the source's LOB files under its lob base (11.4 and develop unloads name them relative to it; in an older unload the `FASTMIG_OPS_LOB_BASE` prefix of each locator is rewritten to that copy) → `loadjava` of the Java class → `loaddb -S` of the unload (`-s`, `-d`, `-i`, `--trigger-file`; 10.2: `--no-user-specified-name`) |
+| `server-start` | up | `break-official-extra-row` follows on the official side when asked |
+| `baseline` | up | checks only: the two paths agree before any write |
+| `dml` | up | `[rounds]` × the DML round |
+| `statistics` | up | `UPDATE STATISTICS ON ALL CLASSES` |
+| `checkpoint` | up | `;checkpoint` in `csql --sysadm` |
+| `kill9-recovery` | up | `kill -9` of the side's `cub_server`, start again (restart recovery) |
+| `vacuumdb` | down | `vacuumdb -S` |
+| `addvoldb` | down | `addvoldb -S --db-volume-size=32M` |
+| `compactdb` | down | `compactdb -S` |
+| `backupdb` | down | `backupdb -S -D <side>/backup` (full) |
+| `dml-after-backup` | up | one DML round after the backup |
+| `restoredb` | down | `restoredb -B <side>/backup` up to the end of the log: the state of `dml-after-backup` |
+| `deletedb` | down | `deletedb -d` (volumes, log and backup) |
 
-`checks.sql` (per source label, like basedb) holds `basedb/counts.sql`, a content digest per table and, per index, a
-count read through that index (`USING INDEX`, a range covering every key) next to the heap count: index = heap on each
-side, the same numbers on both sides.
+The DML round is `dml/round.sql` (every source), plus `dml/round_synonym.sql` (11.2 and later) and
+`dml/round_plcsql.sql` (11.4 and later), all run as dba. It inserts, updates and deletes over every kind of object of
+the baseline DB: tables of every type, PK/FK (with ON DELETE CASCADE)/unique/plain/composite DESC/function/filter
+indexes, the serial and AUTO_INCREMENT columns, the views (an update through WITH CHECK OPTION), both triggers, RANGE,
+HASH and LIST partitions and the partition-expression tables (rows move between partitions), overflow records, the
+synonyms, the Java and PL/CSQL SPs, a GRANT and REVOKE, the `utf8_en_ci`/`utf8_ko_cs` columns, JSON, SET, BIT and LOB
+columns. Each new key comes from the current max or count, so both sides and every round write the same rows; the
+`event_log` payload rotation is the round's big write (it is what fills the log toward archives).
 
-Values generated by a serial or an AUTO_INCREMENT column are compared as counts and order only, never as values: the
-started serial position and `cached_num` are intended differences (docs/intended-differences.md), and a `kill -9`
-loses each side's cache block.
+`checks.sql` prints, per table, the row count and a CRC32 sum over its columns; the catalog (classes, indexes,
+triggers, serial names, SPs, users, grants); what the views and the Java SP return; and, per index, the count read
+through that index (`USING INDEX <i>(+)`) against the count of the same predicate with `USING INDEX NONE`. A line
+`INDEX!=HEAP` fails the check on that side; the two sides' outputs are compared for parity.
+
+Values a serial or an AUTO_INCREMENT column generates are compared as counts and order only (the order of
+`audit_log.id` and `invoice.inv_no` follows the rows behind them), never as values: the official path starts a cached
+serial ahead by `CACHE` × `INCREMENT`, develop's `cached_num` of an AUTO_INCREMENT serial differs
+(docs/intended-differences.md, rows "position of a started serial with a cache" and "`_db_serial.cached_num`"), and a
+`kill -9` loses each side's cache block. Decision approved by the map supervisor 2026-10-31 (workspace#588).
 
 ## Output
 
 ```
-<out>/meta.txt                    arguments, binary sha256, install, rounds, load and free disk before/after
-<out>/steps.tsv                   one row per step: side  step  seconds  rc   (side: migrated | official | parity)
-<out>/<side>/log/<step>.log       the step's own output
-<out>/<side>/check/<step>.out     checks.sql after the step
-<out>/parity/<step>.diff          diff of migrated/check/<step>.out and official/check/<step>.out; empty = same
-<out>/parity/unload.diff          set-comparison diff of the two final unloads
-<out>/server-log-summary.tsv      per side: error lines, assert lines, new cores (pid-matched under core_pattern)
-<out>/archives.tsv                per side: log archives created during the scenario
+<out>/meta.txt                  arguments, binary sha256, install, rounds, archives created, load and free disk before/after
+<out>/steps.tsv                 side  step  seconds  rc     (side: migrated | official | parity)
+<out>/<side>/log/<step>.log     the step's own output
+<out>/<side>/check/<step>.out   checks.sql after the step
+<out>/<side>/server-log/        the install's log files written while the side ran
+<out>/parity/<step>.diff        diff of the two sides' check/<step>.out; empty = same
+<out>/server-log-summary.tsv    side  error_lines ("ERROR ***")  assert_lines  cores (pid-matched under core_pattern)
+<out>/archives.tsv              side  last_archive_before  last_archive_after   (numbers of <db>_lgarNNN, -1 = none;
+                                before = at baseline, after = after dml-after-backup)
 ```
 
-`steps.tsv` has a `parity <step> 0 <0|1>` row per scenario step (1 = the diff is not empty); T37 builds its table from
-`steps.tsv`, `archives.tsv` and `server-log-summary.tsv`.
+`steps.tsv` has one `parity <step> 0 <rc>` row per checked step (rc 1 = the diff is not empty). T37 builds its table
+from `steps.tsv`, `archives.tsv` and `server-log-summary.tsv`.
 
 ## Reuse for HA (T38)
 
@@ -104,6 +118,7 @@ Default rounds: _measured on T1 11.4 clean → develop, recorded here with the a
 
 ## Disk
 
-At most two DB copies live at once: the migrated side's source copy is finalized away after `prepare`, and the
-official side starts after the migrated side's DB is deleted. Both sides' DBs and backups are removed (registered:
-`cubrid deletedb`; a reflink copy: by literal path) before the runner exits; `<out>` keeps text only.
+One DB lives at a time: the migrated side's source copy is finalized away in `prepare`, and the official side starts
+after the migrated side's DB, log and backup are deleted (`deletedb -d`). With `FASTMIG_OPS_LOB_BASE` the source copy
+stays in `<out>/migrated/source`; remove it by its literal path. A failed side is deleted with `deletedb -d` too;
+`<out>` keeps text only.

@@ -185,6 +185,18 @@ _Avoid_: 훅, 가로채기
 기준 DB 하나를 `e2e/` 실행기로 pristine 사본 → plan → migrate → verify → 집합 비교 → 엔진 기동 smoke(LOB 내용 포함) → finalize → 일부러 깨뜨린 도착 → 도착 삭제까지 한 번에 돌리고 단계마다 시간과 종료 코드를 남기는 것. 판정은 도구와 엔진의 종료 코드다.
 _Avoid_: 통합 테스트, e2e 테스트
 
+**공식 경로 (official path)**:
+엔진이 정한 상향 방법: 출발 unloaddb → 도착 loaddb. 의도된 차이와 parity의 기준이 되는 쪽이다.
+_Avoid_: 정상 경로, 표준 경로
+
+**운영 시나리오 (operations scenario)**:
+옮긴 DB에 운영 중 일어나는 일을 차례로 가하는 고정 절차. 기준 DB의 모든 기능에 대한 DML 반복, 통계 갱신, checkpoint, `kill -9` 뒤 재기동, vacuumdb, addvoldb, compactdb, backupdb → restoredb로 이루어진다. `e2e/ops/` 실행기가 돌리고 단계마다 고정 질의로 결과를 남긴다(G11 [workspace#587](https://github.com/xmilex-git/workspace/issues/587)).
+_Avoid_: 스트레스 테스트, 운영 테스트
+
+**parity**:
+같은 출발 DB를 도구로 옮긴 쪽과 공식 경로로 만든 쪽에 같은 운영 시나리오를 돌렸을 때, 단계마다 고정 질의 결과가 같은 것. serial·AUTO_INCREMENT가 만든 값은 의도된 차이라서 비교하지 않고, 개수와 순서만 비교한다. 서버 통계와 에러 로그 문구는 비교 대상이 아니다.
+_Avoid_: 동등성, 정합성 체크
+
 ## 볼륨 밖 자산
 
 **볼륨 밖 자산 (out-of-volume asset)**:
