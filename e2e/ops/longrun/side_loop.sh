@@ -97,13 +97,15 @@ printf 'archives_created\t%s\nmin_archives\t%s\ncheckpoints\t%s\nmin_checkpoints
 step server-stop 0 stop
 
 end_recovery
-# error lines up to here; range_probes then adds only its expected refusals, so asserts and cores are read after it
+# error lines and cores up to here; range_probes then adds its expected refusals and missing-archive aborts (cores),
+# recorded apart as range_cores; asserts are read after it
 read -r e a co pl se < <(side_faults)
 # restoredb into an empty directory reports first that the probe's own <db>_vinf is not there yet (-551): expected
 fresh=$(cat /dev/null "$OUT/$SIDE"/server-log/"${DB}"_restoredb.err | grep -c "ERROR CODE = -551,")
 e=$(( e - fresh ))
 range_probes
-read -r _ a co _ _ < <(side_faults)
-printf 'error_lines\t%s\nasserts\t%s\ncores\t%s\npl_drops\t%s\nsession_expired\t%s\nrestore_fresh_dir\t%s\n' "$e" "$a" "$co" "$pl" "$se" "$fresh" >"$OUT/$SIDE/faults.tsv"
+read -r _ a co2 _ _ < <(side_faults)
+printf 'error_lines\t%s\nasserts\t%s\ncores\t%s\npl_drops\t%s\nsession_expired\t%s\nrestore_fresh_dir\t%s\nrange_cores\t%s\n' \
+  "$e" "$a" "$co" "$pl" "$se" "$fresh" "$(( co2 - co ))" >"$OUT/$SIDE/faults.tsv"
 [ "$e$a$co" = 000 ] || { FAIL=1; echo "$SIDE: server error lines $e (PL server drops $pl), asserts $a, cores $co" >&2; }
 finish "$FAIL"

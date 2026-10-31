@@ -85,14 +85,32 @@ end_recovery() {
   else
     FAIL=1; echo "$SIDE: no PITR mark" >&2
   fi
-  restore_probe chain0-bktime 0 baseline "$lob" -B "$bk/chain-c00" -d backuptime
 }
 
-# range_probes: where the restorable range starts. Run after the error lines are counted (side_loop.sh): a refused
-# restore writes its refusal as an error line, which is the expected outcome here, not a fault.
+# record_probe <probe> <expected check or -> <lob source> <restoredb args...>: a restore whose outcome is recorded,
+# not judged (rc in recovery.tsv, want "-"); when it restores, its checks must still equal <expected>.
+record_probe() {
+  local probe=$1 expected=$2 lob=$3 rc d=-1; shift 3
+  restore_into "$probe" "$lob" "$@" >"$OUT/$SIDE/log/restore-$probe.log" 2>&1
+  rc=$?
+  if [ "$rc" = 0 ] && [ "$expected" != - ]; then
+    step "check-$probe" 0 check "$probe"
+    diff "$OUT/$SIDE/check/$expected.out" "$OUT/$SIDE/check/$probe.out" >"$OUT/$SIDE/recovery/$probe.diff" 2>&1
+    d=$?
+    [ "$d" = 0 ] || { FAIL=1; echo "$SIDE $probe: restored but differs from $expected" >&2; }
+  fi
+  restore_end "$probe"
+  printf '%s\t%s\t-\t%s\n' "$probe" "$rc" "$d" >>"$OUT/$SIDE/recovery.tsv"
+}
+
+# range_probes: where the restorable range starts, from the first chain (right after the move). Run after the error
+# lines and cores are counted (side_loop.sh): a refused restore writes its refusal as an error line, and a restore that
+# needs an archive log_max_archives already deleted asks for it, reads EOF and aborts with "LOG FATAL ERROR:
+# log_fetch_from_archive" and a core (smoke-long-arch, 2026-10-31). Both are the range ending, not faults.
 range_probes() {
-  local bk=$OUT/$SIDE/backup lob moved c1 rc
+  local bk=$OUT/$SIDE/backup lob moved c1
   lob=$(lob_base)
+  record_probe chain0-bktime baseline "$lob" -B "$bk/chain-c00" -d backuptime
   moved=$(times_field moved 2)
   restore_probe before-move 1 - "$lob" -B "$bk/chain-c00" -d "$(date -d "@$(( moved - 60 ))" +%d-%m-%Y:%H:%M:%S)"
   # refused for the right reason only: the time lies before the chain's level 0 (logpb_check_stop_at_time); any other
@@ -100,12 +118,5 @@ range_probes() {
   grep -q "must be after the time" "$OUT/$SIDE/log/restore-before-move.log" ||
     { FAIL=1; echo "$SIDE before-move: not refused as before its backup, see $SIDE/log/restore-before-move.log" >&2; }
   c1=$(awk -F'\t' '$1 == "backup" && $3 == 1 { print $2 }' "$OUT/$SIDE/times.tsv")
-  if [ -n "$c1" ]; then
-    # recorded, not judged
-    restore_into chain0-next "$lob" -B "$bk/chain-c00" -d "$(date -d "@$c1" +%d-%m-%Y:%H:%M:%S)" \
-      >"$OUT/$SIDE/log/restore-chain0-next.log" 2>&1
-    rc=$?
-    restore_end chain0-next
-    printf 'chain0-next\t%s\t-\t-1\n' "$rc" >>"$OUT/$SIDE/recovery.tsv"
-  fi
+  [ -z "$c1" ] || record_probe chain0-next - "$lob" -B "$bk/chain-c00" -d "$(date -d "@$c1" +%d-%m-%Y:%H:%M:%S)"
 }

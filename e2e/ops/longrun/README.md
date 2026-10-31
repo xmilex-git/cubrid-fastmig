@@ -100,13 +100,16 @@ newer than the PITR stop: the first smoke asserted in `log_recovery.c:531` that 
 |---|---|---|
 | `latest` | `-B` newest chain `-l <its last level>`, up to the end of the log | `check/end.out` |
 | `pitr` | `-B` the mark's chain `-l <its last level before the mark>` `-d <mark>`, then the lob-base copy of the mark put back | `check/pitr-snapshot.out` |
-| `chain0-bktime` | `-B chain-c00 -d backuptime` | `check/baseline.out` (nothing wrote before it) |
+| `chain0-bktime` | `-B chain-c00 -d backuptime` | recorded; when it restores, `check/baseline.out` (nothing wrote before it) |
 | `before-move` | `-B chain-c00 -d <move − 60 s>` | refused with "… must be after the time … of the specified backup" (and no other failure) |
 | `chain0-next` | `-B chain-c00 -d <cycle 1's backup>` (level 0, replays cycle 1's archives) | recorded only (§ Restorable range) |
 
 Each restore directory also gets the side's `<db>_keys` and its `java`, `java_static` directories: restoredb does not
-restore them, and the server needs them where its volumes are. `before-move` and `chain0-next` run after the error
-lines are counted (their refusals are error lines by design); asserts and cores are counted after them. Each restore
+restore them, and the server needs them where its volumes are. `chain0-bktime`, `before-move` and `chain0-next` (the
+range probes) run after the error lines and cores are counted: a refusal is an error line by design, and a restore
+that needs an archive `log_max_archives` already deleted asks for it, reads EOF and aborts with `LOG FATAL ERROR:
+log_fetch_from_archive` and a core (smoke with 3 kept archives, 2026-10-31); their cores are kept as `range_cores` in
+faults.tsv. Asserts are counted after them. Each restore
 into an empty directory first logs `-551 Unable to locate volume information path file <probe>/db/<db>_vinf` (the
 file it is about to write): those lines are left out of the error lines and kept as `restore_fresh_dir` in faults.tsv.
 
@@ -120,9 +123,10 @@ back after the PITR restore. The other probes restore states whose files still e
 A restore starts at a backup, and the first backup of either side is taken right after the move (chain-c00): no
 backup holds the DB before the move, so the restorable range starts at chain-c00's backup time. `before-move` shows
 the engine refusing a time before that backup ("must be after the time … of the specified backup",
-`logpb_check_stop_at_time`); any DB refuses so, it is not a property of the migration. How far forward a level 0 still
-reaches is bounded by the archives `log_max_archives` keeps: `chain0-next` replays the archives of cycle 1, deleted
-once MAX_ARCHIVES newer ones exist. The measured rc of both is the documented range (docs/ops-verification.md "Long run").
+`logpb_check_stop_at_time`); any DB refuses so, it is not a property of the migration. The range also ends where the archives end: even
+`chain0-bktime` (`-d backuptime`) needs the archive written during its online backup, so once MAX_ARCHIVES newer
+archives exist the first chain no longer restores at all; `chain0-next` replays cycle 1's archives as well. Their rc
+records where the range starts at the end of the run. The measured rc of both is the documented range (docs/ops-verification.md "Long run").
 
 ## Fail-before probe
 
@@ -185,5 +189,5 @@ FASTMIG_LONGRUN_PITR_CYCLE=1 FASTMIG_LONGRUN_STAT_SECONDS=5 FASTMIG_LONGRUN_MIN_
 Archives deleted under the probes: `FASTMIG_LONGRUN_PATHS=114-dev FASTMIG_LONGRUN_CYCLES=3 FASTMIG_LONGRUN_ROUNDS=6
 FASTMIG_LONGRUN_KILL_EVERY=2 FASTMIG_LONGRUN_PITR_CYCLE=3 FASTMIG_LONGRUN_MAX_ARCHIVES=3` (other settings as above).
 The sides create more archives than 3, so the engine deletes some; the PITR (chain-c02 level 0 to cycle 3's mark) and
-`latest` read only the archives after their backup and must pass, while `chain0-next` (level 0 of cycle 0 to cycle 1)
-may fail for want of deleted ones.
+`latest` read only the archives after their backup and must pass, while `chain0-bktime` and `chain0-next` (the first
+chain) abort for want of deleted ones (recorded, with their cores as `range_cores`).
