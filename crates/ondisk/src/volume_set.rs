@@ -175,6 +175,24 @@ impl VolumeSet {
         v.file.read_exact_at(buf, off)
     }
 
+    /// Reads `buf.len() / io_pagesize` consecutive pages from `first` with one read: an extent of
+    /// [`crate::page_extents`] (workspace#596).
+    pub fn read_pages_into(&self, first: Vpid, buf: &mut [u8]) -> io::Result<()> {
+        let n = buf.len() / self.io_pagesize;
+        if n == 0 || !buf.len().is_multiple_of(self.io_pagesize) {
+            return Err(invalid(format!(
+                "{} B is not a whole number of pages",
+                buf.len()
+            )));
+        }
+        self.offset(Vpid::new(
+            first.volid,
+            first.pageid.saturating_add(n as i32 - 1),
+        ))?;
+        let (v, off) = self.offset(first)?;
+        v.file.read_exact_at(buf, off)
+    }
+
     /// Reads page `vpid` into a new buffer.
     pub fn read_page(&self, vpid: Vpid) -> io::Result<Box<[u8]>> {
         let mut buf = vec![0u8; self.io_pagesize].into_boxed_slice();

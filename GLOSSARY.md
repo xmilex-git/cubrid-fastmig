@@ -272,6 +272,10 @@ _Avoid_: 예약 공간, 여유 공간
 migrate가 시작할 때 정하는, 실행이 받을 섹터의 목록. 엔진 섹터 예약 순서를 재현해 얻고, clone 볼륨 위의 목록 섹터는 시작할 때 공유를 푼다. 실행 중 목록에 없는 섹터를 받으면(목록 밖 섹터) 그때 공유를 풀고, 그마저 실패하면 페이지를 쓰기 전에 실패한다([ADR 0013](docs/adr/0013-target-grows-like-engine-auto-extension.md), [workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
 _Avoid_: 예약 섹터(엔진 STAB 예약과 섞인다), 사전 할당 섹터
 
+**물리 순서 extent (extent)**:
+한 볼륨에서 이어진 페이지 구간으로, 한 번의 읽기로 읽는다. 읽을 페이지(여러 클래스의 힙 페이지, 여러 B-tree의 리프)를 볼륨·페이지 순으로 정렬하고, 1 MiB 이하의 틈은 함께 읽으며, 최대 4 MiB까지 묶는다. 워커는 extent를 순서대로 가져가므로 디스크는 앞으로만 읽는다. 클래스별·키 순서로 페이지 하나씩 읽으면 HDD가 짧은 구간 사이를 seek한다([workspace#596](https://github.com/xmilex-git/workspace/issues/596)).
+_Avoid_: 청크, 블록(엔진·파일시스템 용어와 섞인다)
+
 **인덱스 묶음 (index batch)**:
 임시 디스크 한도 안에 spill 상한이 들어가도록 나눈 인덱스들의 무리. 묶음마다 그 인덱스들의 클래스 힙을 한 번 스캔하고, 인덱스를 짓고, spill 파일을 지운 뒤 다음 묶음으로 간다. 묶음 수만큼 힙을 다시 읽는다. 한도가 없으면 모든 인덱스가 한 묶음이다. 검증기도 같은 규칙으로 묶음을 나눈다: 첫 묶음의 스캔이 모든 힙을 읽어 힙 검사를 하고, 다음 묶음부터는 그 인덱스들의 키만 다시 읽어 비교한다([workspace#553](https://github.com/xmilex-git/workspace/issues/553)).
 _Avoid_: 그룹, 배치 작업

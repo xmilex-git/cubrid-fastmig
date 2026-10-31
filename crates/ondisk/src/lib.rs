@@ -26,6 +26,7 @@ pub mod lsa;
 pub mod overflow_part;
 pub mod page;
 pub mod page_batch;
+pub mod page_extents;
 pub mod partition_stream;
 pub mod preallocate;
 pub mod record;

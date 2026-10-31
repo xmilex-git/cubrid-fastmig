@@ -284,6 +284,19 @@ pub struct LeafCounts {
     pub objects_past_record: i64,
 }
 
+impl LeafCounts {
+    /// One leaf record of `n` objects (overflow OID chain included) as `records`, `objects`, `wide_records` and
+    /// `objects_past_record` count it, `per_record` from [`objects_per_record`].
+    pub fn add_record(&mut self, n: usize, per_record: usize) {
+        self.records += 1;
+        self.objects += n as i64;
+        if n > per_record {
+            self.wide_records += 1;
+            self.objects_past_record += (n - per_record) as i64;
+        }
+    }
+}
+
 impl std::ops::AddAssign for LeafCounts {
     fn add_assign(&mut self, o: Self) {
         self.keys += o.keys;
@@ -934,18 +947,38 @@ struct LeafCursor {
 /// The leaf records of leaf `v` of `t` as [`LeafPairs`] counts them (`records`, `objects`, `wide_records`,
 /// `objects_past_record`; a fence record is no record), read on its own and checked for nothing: the leaves of every
 /// tree split over the workers (workspace#526, `run::index_key_groups`). A page or record that does not read counts
-/// nothing; the verifier reports it.
+/// nothing; the verifier reports it. The overflow OID pages its records chain to are read one by one.
 pub fn leaf_counts(t: &IndexTree, v: Vpid) -> LeafCounts {
     let mut c = LeafCounts::default();
     let Ok(p) = t.db.vols.read_page(v) else {
         return c;
     };
-    let Some(s) = slotted(&p) else {
-        return c;
+    let unique = t.root.is_unique();
+    let per_record = objects_per_record(t);
+    leaf_records(t, &p, &mut |inline, first| {
+        let chained = chain_objects(first, &|o| {
+            t.db.vols
+                .read_page(o)
+                .ok()
+                .and_then(|op| ovf_page(&op, unique))
+        });
+        c.add_record(inline + chained, per_record);
+    });
+    c
+}
+
+/// Objects a rebuilt leaf record takes (`max_oidlen_inpage / object_fixed_size`): past it, a record is wide.
+pub fn objects_per_record(t: &IndexTree) -> usize {
+    max_oidlen_inpage(db_pagesize(t.db.vols.io_pagesize())) / object_fixed_size(t.root.is_unique())
+}
+
+/// Each non-fence record of leaf page `p` of `t`: the objects it holds in the leaf and its first overflow OID page.
+/// A page or record that does not read gives nothing.
+pub fn leaf_records(t: &IndexTree, p: &[u8], each: &mut dyn FnMut(usize, Option<Vpid>)) {
+    let Some(s) = slotted(p) else {
+        return;
     };
     let unique = t.root.is_unique();
-    let per_record =
-        max_oidlen_inpage(db_pagesize(t.db.vols.io_pagesize())) / object_fixed_size(unique);
     for slot in 1..s.num_slots() {
         let Some((_, rec)) = s.record(slot) else {
             continue;
@@ -956,42 +989,53 @@ pub fn leaf_counts(t: &IndexTree, v: Vpid) -> LeafCounts {
         if r.is_fence() {
             continue;
         }
-        let mut n = 1 + r.others.len();
-        let mut next = r.ovf_oids;
-        let mut hops = 0;
-        while let Some(o) = next.filter(|o| !o.is_null()) {
-            hops += 1;
-            let Some(op) = (hops <= 1 << 20)
-                .then(|| t.db.vols.read_page(o).ok())
-                .flatten()
-            else {
-                break;
-            };
-            let Some(os) = slotted(&op) else {
-                break;
-            };
-            let Some(hdr) = os.record(0).and_then(|r| OvfHeader::read(r.1).ok()) else {
-                break;
-            };
-            let objs = os.record(1).map_or(&[][..], |r| r.1);
-            let mut q = 0;
-            while q < objs.len() {
-                match read_object(objs, q, unique) {
-                    Ok((_, nq)) => {
-                        n += 1;
-                        q = nq;
-                    }
-                    Err(_) => break,
-                }
+        each(1 + r.others.len(), r.ovf_oids);
+    }
+}
+
+/// What one overflow OID page gives a chain walk: its objects and the next page.
+#[derive(Clone, Copy)]
+pub struct OvfPage {
+    pub objects: usize,
+    pub next: Vpid,
+}
+
+/// Overflow OID page `p` of a tree (`unique` as its root says); `None` where it is not slotted or has no header,
+/// which ends the chain there.
+pub fn ovf_page(p: &[u8], unique: bool) -> Option<OvfPage> {
+    let s = slotted(p)?;
+    let hdr = s.record(0).and_then(|r| OvfHeader::read(r.1).ok())?;
+    let objs = s.record(1).map_or(&[][..], |r| r.1);
+    let mut objects = 0;
+    let mut q = 0;
+    while q < objs.len() {
+        match read_object(objs, q, unique) {
+            Ok((_, nq)) => {
+                objects += 1;
+                q = nq;
             }
-            next = Some(hdr.next);
-        }
-        c.records += 1;
-        c.objects += n as i64;
-        if n > per_record {
-            c.wide_records += 1;
-            c.objects_past_record += (n - per_record) as i64;
+            Err(_) => break,
         }
     }
-    c
+    Some(OvfPage {
+        objects,
+        next: hdr.next,
+    })
+}
+
+/// Objects of the overflow OID chain from `first`, each page from `page` (`None`: a page that does not read or
+/// parse ends the chain); 2^20 hops end a cycle.
+pub fn chain_objects(first: Option<Vpid>, page: &dyn Fn(Vpid) -> Option<OvfPage>) -> usize {
+    let mut n = 0;
+    let mut next = first;
+    let mut hops = 0;
+    while let Some(o) = next.filter(|o| !o.is_null()) {
+        hops += 1;
+        let Some(op) = (hops <= 1 << 20).then(|| page(o)).flatten() else {
+            break;
+        };
+        n += op.objects;
+        next = Some(op.next);
+    }
+    n
 }

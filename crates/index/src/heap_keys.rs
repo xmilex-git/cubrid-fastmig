@@ -95,8 +95,21 @@ pub fn page_keys_sized(
     emit: &mut dyn FnMut(usize, Oid, RowKey),
     sized: &mut dyn FnMut(usize, usize),
 ) -> Result<(), BuildError> {
-    let page_oid = Oid::new(vpid.volid, vpid.pageid, 0);
     vols.read_page_into(vpid, buf)?;
+    page_bytes_keys_sized(vols, ck, buf, vpid, emit, sized)
+}
+
+/// [`page_keys_sized`] on page `vpid` already read into `buf` (one page of an extent, workspace#596); `vols` still
+/// serves the NEWHOME and overflow pages a row moved to.
+pub fn page_bytes_keys_sized(
+    vols: &VolumeSet,
+    ck: &ClassKeys,
+    buf: &[u8],
+    vpid: Vpid,
+    emit: &mut dyn FnMut(usize, Oid, RowKey),
+    sized: &mut dyn FnMut(usize, usize),
+) -> Result<(), BuildError> {
+    let page_oid = Oid::new(vpid.volid, vpid.pageid, 0);
     if page::ptype(buf) != Some(PageType::Heap) {
         return Err(bad(page_oid, "not a heap page"));
     }

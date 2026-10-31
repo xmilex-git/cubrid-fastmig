@@ -1,5 +1,6 @@
 //! Counts what an index rebuild's heap scan would turn into spill records: per index the bytes its (key, OID) pairs
-//! take (`temp_disk::spill_record_bytes`), from one read of the owner classes' heaps, keeping no keys.
+//! take (`temp_disk::spill_record_bytes`), from one read of the owner classes' heaps in physical order (extents,
+//! workspace#596), keeping no keys.
 //!
 //! Input: the volumes (the target after page treatment, or a source read only; an 11.4 source passes a
 //! re-encoder per re-encoded class so its records are counted as the target will hold them), the index
@@ -15,18 +16,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use fastmig_ondisk::btree::{max_keylen_inpage, ovf_key};
 use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::heap_rewrite::{Growth, ReEncode};
+use fastmig_ondisk::page_extents::extents;
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, db_pagesize};
 
 use crate::build_error::BuildError;
-use crate::heap_keys::{ClassKeys, page_keys_sized, record_keys};
+use crate::heap_keys::{ClassKeys, page_bytes_keys_sized, record_keys};
 use crate::heap_scan::RowKey;
 use crate::index_def::IndexDef;
 use crate::job_pool::run_jobs;
 use crate::temp_disk::spill_record_bytes;
-
-/// Heap pages per counting job: enough to keep a job's setup negligible, small enough to spread a large heap.
-const UNIT_PAGES: usize = 256;
 
 /// What the pairs of one index and owner class come to: the input of the temp disk figures (`bytes`) and of the
 /// target space bound of the new B-trees (workspace#526).
@@ -155,56 +154,67 @@ pub fn pair_bytes_and_growth<'c>(
     skip: &HashSet<Oid>,
 ) -> Result<(Vec<PairBytes>, HashMap<Oid, Growth>), BuildError> {
     let mut classes = owner_classes(defs)?;
-    let mut units = Vec::new();
+    let mut pages = Vec::new();
     for (i, c) in classes.iter_mut().enumerate() {
         if let Some(r) = re_encode(c.keys.class_oid) {
             c.keys.re_encode = Some(r);
         }
-        let pages: Vec<_> = FileTable::read(vols, c.keys.hfid.vfid)?
-            .user_pages_by_sector()
-            .into_iter()
-            .flat_map(|(_, p)| p)
-            .collect();
-        for chunk in pages.chunks(UNIT_PAGES) {
-            units.push((i, chunk.to_vec()));
-        }
+        pages.extend(
+            FileTable::read(vols, c.keys.hfid.vfid)?
+                .user_pages()
+                .into_iter()
+                .map(|v| (v, i)),
+        );
     }
-    units.sort_by_key(|(_, p)| std::cmp::Reverse(p.len()));
     let io_pagesize = vols.io_pagesize();
+    // every owner heap in physical order, not class by class: the heaps interleave in a volume (workspace#596)
+    let units = extents(pages, io_pagesize);
     let db = db_pagesize(io_pagesize);
     let usable = Growth::usable(io_pagesize);
-    let counted = run_jobs(workers, units, |(c, pages)| {
-        let mut buf = vec![0u8; io_pagesize];
-        let mut stats = vec![PairStats::default(); classes[c].keys.indexes_len()];
-        let mut grown = Growth::default();
-        for vpid in pages {
-            page_keys_sized(
-                vols,
-                &classes[c].keys,
-                &mut buf,
-                vpid,
-                &mut |ix, oid, key| {
-                    if let RowKey::Key(k) = key
-                        && !skip.contains(&oid)
-                    {
-                        stats[ix].add_key(k.len(), db);
+    let counted = run_jobs(workers, units, |e| {
+        e.read(vols, |buf| {
+            let buf = buf?;
+            // per class met in this extent: (class, per-index stats, growth); an extent holds few classes
+            let mut tally: Vec<(usize, Vec<PairStats>, Growth)> = Vec::new();
+            for (vpid, page, &c) in e.listed(buf, io_pagesize) {
+                let t = match tally.iter().position(|(k, ..)| *k == c) {
+                    Some(t) => t,
+                    None => {
+                        let n = classes[c].keys.indexes_len();
+                        tally.push((c, vec![PairStats::default(); n], Growth::default()));
+                        tally.len() - 1
                     }
-                },
-                &mut |before, after| grown.add(before, after, usable),
-            )?;
-        }
-        Ok::<_, BuildError>((c, stats, grown))
+                };
+                let (_, stats, grown) = &mut tally[t];
+                page_bytes_keys_sized(
+                    vols,
+                    &classes[c].keys,
+                    page,
+                    vpid,
+                    &mut |ix, oid, key| {
+                        if let RowKey::Key(k) = key
+                            && !skip.contains(&oid)
+                        {
+                            stats[ix].add_key(k.len(), db);
+                        }
+                    },
+                    &mut |before, after| grown.add(before, after, usable),
+                )?;
+            }
+            Ok::<_, BuildError>(tally)
+        })
     });
     let mut out: Vec<PairBytes> = defs.iter().map(|_| PairBytes::new()).collect();
     let mut growth: HashMap<Oid, Growth> = HashMap::new();
     for r in counted {
-        let (c, stats, grown) = r?;
-        add(&mut out, &classes[c], stats);
-        if classes[c].keys.re_encode.is_some() {
-            growth
-                .entry(classes[c].keys.class_oid)
-                .or_default()
-                .merge(&grown);
+        for (c, stats, grown) in r? {
+            add(&mut out, &classes[c], stats);
+            if classes[c].keys.re_encode.is_some() {
+                growth
+                    .entry(classes[c].keys.class_oid)
+                    .or_default()
+                    .merge(&grown);
+            }
         }
     }
     Ok((out, growth))
