@@ -9,7 +9,10 @@ privileges. Ticket: T40 [workspace#595](https://github.com/xmilex-git/workspace/
 test (AGENTS.md § Build and check).
 
 Pass: every query exits without an error on both sides, every query's output is the same bytes on both sides, and the
-server error logs of both sides hold no `ERROR ***` line, no assert and no new core. A query whose output differs is
+server error logs of both sides hold no `ERROR ***` line, no assert and no new core. The engine's `-1066 Session expired` lines
+(session.c) are counted apart as `session_expired` and do not fail the run: a pre-existing engine defect, one line per
+csql session that ran a join with a GROUP BY sort, seen on a source never migrated with 11.4.6 and develop alike
+([#597](https://github.com/xmilex-git/workspace/issues/597); ../sides.sh `side_faults`). A query whose output differs is
 judged by running it on the source DB with the source engine (a safe copy of the pristine, basedb/safe_copy.sh): the
 side that matches the source is right, the other side gets a defect ticket.
 
@@ -106,7 +109,7 @@ Over the baseline DB (basedb/README.md), every source version:
 <out>/<side>/log/<step>.log       the step's own output
 <out>/<side>/server-log/          the install's log files written while the side ran
 <out>/parity/<name>.diff          only for a query whose outputs differ
-<out>/server-log-summary.tsv      side  error_lines  assert_lines  cores  pl_drops
+<out>/server-log-summary.tsv      side  error_lines  assert_lines  cores  pl_drops  session_expired
 ```
 
 `run_paths.sh` adds `<out root>/paths.tsv` (`id`, exit code, queries, queries the same).
