@@ -26,10 +26,14 @@ SRC_INST=$(realpath "${FASTMIG_HA_SOURCE_INSTALL:?FASTMIG_HA_SOURCE_INSTALL requ
 TGT_INST=$(realpath "${FASTMIG_HA_TARGET_INSTALL:?FASTMIG_HA_TARGET_INSTALL required}")
 ROUNDS=${FASTMIG_HA_ROUNDS:-1}
 W=${FASTMIG_HA_WORKERS:-4}
+# migrated: the source pair moved node by node through cubrid-fastmig; official: the pair the manual's HA upgrade builds
+SIDE=${FASTMIG_HA_SIDE:-migrated}
+case "$SIDE" in migrated | official) ;; *) echo "FASTMIG_HA_SIDE must be migrated or official" >&2; exit 2 ;; esac
 HA=$(dirname "$(realpath "$0")")
 BASEDB=$(realpath "$HA/../../../basedb")
 . "$HA/pair.sh"
 . "$HA/ha_conf.sh"
+. "$HA/official_pair.sh"
 
 [ ! -e "$OUT" ] || { echo "$OUT exists" >&2; exit 2; }
 mkdir -p "$OUT/log" "$OUT/check"
@@ -38,7 +42,7 @@ vinf=$(ls "$PRISTINE"/*_vinf 2>/dev/null | head -1)
 [ -n "$vinf" ] || { echo "no *_vinf in $PRISTINE" >&2; exit 2; }
 DB=$(basename "$vinf" _vinf)
 RUN_ID=$(date +%Y%m%dT%H%M%S)-$$
-{ echo "db=$DB pristine=$PRISTINE rounds=$ROUNDS workers=$W bin=$BIN"
+{ echo "side=$SIDE db=$DB pristine=$PRISTINE rounds=$ROUNDS workers=$W bin=$BIN"
   echo "bin_sha256=$(sha256sum "$BIN" | cut -d' ' -f1) source_install=$SRC_INST target_install=$TGT_INST"
   echo "source_rel=$(LD_LIBRARY_PATH="$SRC_INST/lib" "$SRC_INST/bin/cubrid_rel" | grep -o 'CUBRID [^ ]* ([^)]*)') target_rel=$(LD_LIBRARY_PATH="$TGT_INST/lib" "$TGT_INST/bin/cubrid_rel" | grep -o 'CUBRID [^ ]* ([^)]*)')"
   echo "pre: $(date -Is) load=$(cut -d' ' -f1-3 /proc/loadavg) home=[$(df -h /home | awk 'NR == 2 { print $4 " avail" }')]"
@@ -78,11 +82,11 @@ wait_mode() {
   return 1
 }
 
-# sql <i> <src|tgt> <file>: csql (CS mode, as dba) of one file on node i; exit 1 when the output holds an ERROR
-# (csql -i goes on after a failed statement and exits 0, workspace#555)
+# sql <i> <src|tgt> <file> [csql options]: csql (CS mode, as dba, plain output -t like T36) of one file on node i; exit 1
+# when the output holds an ERROR (csql -i goes on after a failed statement and exits 0, workspace#555)
 sql() {
   local i=$1 e out rc; e=$("${2}_env" "$i")
-  out=$(node_sh "$i" ${e} "csql -u dba -i '$3' $DB@localhost" 2>&1); rc=$?
+  out=$(node_sh "$i" ${e} "csql -u dba -t ${*:4} -i '$3' $DB@localhost" 2>&1); rc=$?
   printf '%s\n' "$out"
   [ "$rc" = 0 ] && ! grep -qE '^[[:space:]]*ERROR' <<<"$out"
 }
@@ -107,7 +111,8 @@ sync_mark() {
 checks() {
   local i
   [ -n "${FASTMIG_HA_CHECKS:-}" ] || { echo "FASTMIG_HA_CHECKS unset: no checks"; return 0; }
-  for i in 0 1; do sql "$i" "$2" "$FASTMIG_HA_CHECKS" >"$OUT/check/$1-${H[i]}.out" || return 1; done
+  # -N: no column headers, as T36 runs checks.sql (217b108)
+  for i in 0 1; do sql "$i" "$2" "$FASTMIG_HA_CHECKS" -N >"$OUT/check/$1-${H[i]}.out" || return 1; done
   diff "$OUT/check/$1-${H[0]}.out" "$OUT/check/$1-${H[1]}.out" >"$OUT/check/$1.diff"
   return 0
 }
@@ -119,7 +124,19 @@ dml() {
   for r in $(seq "$ROUNDS"); do for f in $FASTMIG_HA_DML; do echo "round $r $f"; sql "$1" "$2" "$f" || return 1; done; done
 }
 
-# apply_info <i> <src|tgt>: the slave's db_ha_apply_info rows (what migrate carries over, README "Open questions")
+# wait_pl <i>: the server reports started before its PL server (JVM) accepts calls; checks.sql calls a Java SP, so wait
+# up to 60 s for the one every baseline DB has (T36 217b108 `start`)
+wait_pl() {
+  local e n; e=$(tgt_env "$1")
+  for n in $(seq 30); do
+    node_sh "$1" ${e} "csql -u dba -t -c \"SELECT dba.fm_hello('ready') FROM db_root\" $DB@localhost" 2>&1 |
+      grep -q 'hello ready' && return 0
+    sleep 2
+  done
+  return 1
+}
+
+# apply_info <i> <src|tgt>: the db_ha_apply_info rows of node i (migrate empties them on the target, README)
 apply_info() {
   local e; e=$("${2}_env" "$1")
   node_sh "$1" ${e} "csql -u dba -c 'SELECT db_name, db_creation_time, copied_log_path, committed_lsa_pageid, committed_lsa_offset, required_lsa_pageid, required_lsa_offset, append_lsa_pageid, eof_lsa_pageid FROM db_ha_apply_info' $DB@localhost"
@@ -130,12 +147,14 @@ stage() {
   local i d
   for i in 0 1; do
     d=$(nd "$i"); mkdir -p "$d/tgt-dbs"
-    cp -a --reflink=auto "$SRC_INST" "$d/src-install" && cp -a --reflink=auto "$TGT_INST" "$d/tgt-install" || return 1
+    cp -a --reflink=auto "$TGT_INST" "$d/tgt-install" || return 1
+    : >"$d/tgt-dbs/databases.txt"
+    [ "$SIDE" = migrated ] || continue
+    cp -a --reflink=auto "$SRC_INST" "$d/src-install" || return 1
     # both nodes start from the same pristine, as a slave restored from the master's backup would (same db_creation)
     bash "$BASEDB/safe_copy.sh" "$PRISTINE" "$d/src" || return 1
     ha_hosts "$d/src/databases.txt" "${H[0]}" "${H[1]}"
     ha_conf "$d/src-install" "$DB" "${H[0]}" "${H[1]}"
-    : >"$d/tgt-dbs/databases.txt"
   done
 }
 # the DML and checks files are copied into the run dir: only it is mounted in the nodes
@@ -151,13 +170,14 @@ stage_sql || exit 1
 step pair-up 0 pair_up "$RUN_ID" "$OUT" || { pair_down; exit 1; }
 trap 'pair_down' EXIT
 
+printf 'CREATE TABLE fm590_sync (token VARCHAR(64) PRIMARY KEY);\nCOMMIT;\n' >"$OUT/log/sync-table.sql"
+if [ "$SIDE" = migrated ]; then
 # the master stays to_be_active until the slave joins (run-02), so both start before the modes are read
 step src-hb-start-master 0 hb 0 src start
 step src-hb-start-slave 0 hb 1 src start
 step src-mode-master 0 wait_mode 0 src active
 step src-mode-slave 0 wait_mode 1 src standby
 step src-hb-status 0 hb 0 src status
-printf 'CREATE TABLE fm590_sync (token VARCHAR(64) PRIMARY KEY);\nCOMMIT;\n' >"$OUT/log/sync-table.sql"
 step src-sync-table 0 sql 0 src "$OUT/log/sync-table.sql"
 # The source pair writes only the replicated marker: T36's round.sql and checks.sql are written for the develop
 # target and fail on 11.4 (run-03: non-updatable view, numeric coercion), so they run on the target pair only.
@@ -191,6 +211,13 @@ step migrate-slave 0 migrate_node 1
 step db-creation-same 0 bash -c 'diff <(grep "^log" "$1/fastmig/source-fingerprint" | cut -f4) \
   <(grep "^log" "$2/fastmig/source-fingerprint" | cut -f4)' _ "$(nd 0)/tgt" "$(nd 1)/tgt"
 [ "$FAIL" = 0 ] || { echo "migration failed: see steps.tsv" >&2; exit 1; }
+else
+  # the unload the official side loads: the baseline's (basedb/README.md), as T36 does
+  LABEL=$(basename "$(dirname "$(dirname "$PRISTINE")")")
+  REF=${FASTMIG_HA_SOURCE_UNLOAD:-$(dirname "$(dirname "$PRISTINE")")/unload/$(basename "$PRISTINE")/$DB}
+  step official-pair 0 official_pair "$REF" "$LABEL"
+  [ "$FAIL" = 0 ] || { echo "official pair failed: see steps.tsv" >&2; exit 1; }
+fi
 
 # ---- 3. target pair: configure, start, replicate ---------------------------------------------------------------------
 target_conf() {
@@ -199,7 +226,7 @@ target_conf() {
     d=$(nd "$i")
     ha_hosts "$d/tgt-dbs/databases.txt" "${H[0]}" "${H[1]}"
     ha_conf "$d/tgt-install" "$DB" "${H[0]}" "${H[1]}"
-    [ "${FASTMIG_HA_SAME_COPY_LOG_PATH:-0}" = 1 ] || continue
+    [ "$SIDE" = migrated ] && [ "${FASTMIG_HA_SAME_COPY_LOG_PATH:-0}" = 1 ] || continue
     # an operator who keeps CUBRID_DATABASES: the target copies the peer's log to the path the source pair used, so the
     # db_ha_apply_info row migrate carried over matches (db_name, copied_log_path). The source pair's copied logs are
     # moved aside, so the copied log there is the new master's only.
@@ -213,7 +240,11 @@ step tgt-hb-start-master 0 hb 0 tgt start
 step tgt-hb-start-slave 0 hb 1 tgt start
 step tgt-mode-master 0 wait_mode 0 tgt active
 step tgt-mode-slave 0 wait_mode 1 tgt standby
+step tgt-pl-master 0 wait_pl 0
+step tgt-pl-slave 0 wait_pl 1
 step tgt-hb-status 0 hb 0 tgt status
+# the official pair starts without the marker table: created on the master, replicated as DDL
+[ "$SIDE" = migrated ] || step tgt-sync-table 0 sql 0 tgt "$OUT/log/sync-table.sql"
 step tgt-apply-info-start 0 apply_info 1 tgt
 step tgt-sync-start 0 sync_mark 0 1 tgt tgt-start
 step tgt-dml 0 dml 0 tgt
@@ -226,6 +257,7 @@ step fo-mode-new-master 0 wait_mode 1 tgt active
 step fo-dml 0 dml 1 tgt
 step fo-hb-start-old-master 0 hb 0 tgt start
 step fo-mode-old-master 0 wait_mode 0 tgt standby
+step fo-pl-old-master 0 wait_pl 0
 step fo-sync 0 sync_mark 1 0 tgt failover
 step fo-checks 0 checks failover tgt
 

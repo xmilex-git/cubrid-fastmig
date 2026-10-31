@@ -27,10 +27,16 @@ this host do not make a pair. The nodes are two rootless podman containers of th
 
 ```sh
 FASTMIG_HA_SOURCE_INSTALL=~/release/CUBRID-11.4.6.1963 FASTMIG_HA_TARGET_INSTALL=~/optdebug/CUBRID-fastmig-dev \
-FASTMIG_HA_DML=<T36 e2e/ops dml/round.sql> FASTMIG_HA_CHECKS=<T36 e2e/ops checks.sql (CS mode)> \
+FASTMIG_HA_DML="<ops>/dml/round.sql <ops>/dml/round_synonym.sql <ops>/dml/round_plcsql.sql" FASTMIG_HA_CHECKS=<ops>/checks.sql \
+FASTMIG_HA_SIDE=migrated \
   taskset -c 0-15 bash e2e/ops/ha/run.sh target/release/cubrid-fastmig ~/fastmig-basedb/11.4/pristine/clean \
   <workspace>/.git_ignored_dir/scratch/590/run-NN
+# the same with FASTMIG_HA_SIDE=official into run-MM, then
+bash e2e/ops/ha/parity.sh <...>/run-NN <...>/run-MM
 ```
+
+`<ops>` is T36's `e2e/ops` (workspace#588, 217b108 or later): the DML round files of the source label (synonyms from
+11.2, PL/CSQL from 11.4) and `checks.sql`, run with `-N` like T36. One side per run keeps at most three DB copies.
 
 The script deletes nothing: remove `run-NN` by its literal path afterwards (it holds two installs and up to three DBs
 of the baseline size).
@@ -85,7 +91,12 @@ gives a rebuilt slave. Both nodes have rows: the master's applier of the slave's
   `cub_server`, fails to start ("PL server can not be started", -113; run-01). With the short path it starts (run-02).
 - The source pair's copied logs (`<CUBRID_DATABASES>/<db>_<host>`) stay in the source `CUBRID_DATABASES`.
 
-## Not yet in run.sh
+## Official pair (FASTMIG_HA_SIDE=official, official_pair.sh)
 
-- The official pair for parity (G11 (1)): the manual's HA upgrade (cubrid-manual `upgrade.rst` "HA 환경에서 DB
-  마이그레이션"): unloaddb/loaddb on the master, backupdb there, restoredb on the slave, HA conf, start.
+The manual's HA upgrade (cubrid-manual `upgrade.rst` "HA 환경에서 DB 마이그레이션", C1-C9), in place of steps 1 and 2:
+on the master `createdb` with the source's volume and log sizes, `loadjava` of the baseline's Java class, `loaddb` of
+the baseline's unload (as T36's official side), `backupdb -S`; on the slave `restoredb -u` of that backup into the
+slave's `databases.txt` paths (both nodes see the whole run dir, so a plain restore would write the master's files).
+The marker table is created once the pair runs. The source's LOB files are copied to each node's `/fm590-private`
+(`pair.sh`): one absolute path for the locators, a different directory per node, as on two hosts. Steps 3-5 are the
+migrated side's. `parity.sh` compares every `check/` file of the two runs; pass = all same.

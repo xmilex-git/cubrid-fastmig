@@ -9,6 +9,8 @@
 # Paths: the run directory is bind-mounted at its own host path, so a DB's _vinf, databases.txt and volume headers name
 # the same paths inside the node and on the host, where cubrid-fastmig reads the stopped DB. CUBRID runs as the
 # container's root, which is this user on the host (rootless), so the host reads every file the node writes.
+# Each node also gets <run dir>/<host>/private at /fm590-private: one absolute path, a different directory per node, as
+# the same path on two hosts is (the official pair's LOB files, official_pair.sh).
 # Cores: core_pattern is host-global and resolved inside the crashing process's mount namespace; /data/core is bound at
 # the same path, so a node's core lands where the host's cores do.
 
@@ -27,9 +29,11 @@ pair_up() {
   prefix=$(podman network inspect "$HA_NET" --format '{{range .Subnets}}{{.Subnet}}{{end}}' | cut -d. -f1-3)
   local -a hosts=(--add-host "${HA_HOSTS[0]}:$prefix.11" --add-host "${HA_HOSTS[1]}:$prefix.12")
   for i in 0 1; do
+    mkdir -p "$dir/${HA_HOSTS[i]}/private" || return 1
     podman run -d --name "${HA_NODES[i]}" --hostname "${HA_HOSTS[i]}" --network "$HA_NET" --ip "$prefix.1$((i + 1))" \
       "${hosts[@]}" --ipc=private --cgroupns=private --shm-size=4g --ulimit core=-1 \
-      -v "$dir:$dir:rw" -v "$(readlink -f /data/core):/data/core:rw" -e TZ=Asia/Seoul -e LC_ALL=en_US \
+      -v "$dir:$dir:rw" -v "$dir/${HA_HOSTS[i]}/private:/fm590-private:rw" \
+      -v "$(readlink -f /data/core):/data/core:rw" -e TZ=Asia/Seoul -e LC_ALL=en_US \
       --entrypoint /bin/bash "$HA_IMAGE" -c 'while :; do sleep 3600 & wait $!; done' >/dev/null || return 1
   done
 }
