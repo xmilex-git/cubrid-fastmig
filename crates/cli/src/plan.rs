@@ -23,6 +23,7 @@ use fastmig_plan::{Plan, PlanInputs};
 
 use crate::args::{CliError, Parsed, parse};
 use crate::limits::{self, Limits};
+use crate::storage_kind_detect::RunStorage;
 use crate::{plan_report, resource_estimate, target_space, verify, volume_dirs};
 
 const HELP: &str = "\
@@ -156,6 +157,11 @@ impl OpenSource {
             vols,
         })
     }
+
+    /// Every source volume path (the storage kind of the source is judged by all of them, workspace#561).
+    pub fn volume_paths(&self) -> Vec<PathBuf> {
+        self.vols.volumes().iter().map(|v| v.path.clone()).collect()
+    }
 }
 
 /// Reads the header, in the layout of the release that wrote it, through the locked handle `f` (the header lies in
@@ -223,7 +229,9 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         }
         r => r?,
     };
-    let mem = Limits::from(&p, &o.target_dir)?.memory_limit_bytes;
+    let limits = Limits::from(&p, &o.target_dir)?;
+    let mem = limits.memory_limit_bytes;
+    let storage = RunStorage::detect(&s.volume_paths(), &o.target_dir, &limits.spill_dir);
     let est = match resource_estimate::estimate(
         &s.vols,
         plan.version_pair,
@@ -259,17 +267,25 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         }
         Err(e) => Err(e),
     };
+    let storage_json = storage.json();
     match (&space, p.switch("--json")) {
         (Ok((t, est)), true) => print!(
             "{}",
-            plan_report::json(&plan, Ok((t, est.json(mem).as_str())))
+            plan_report::json(&plan, Ok((t, est.json(mem).as_str())), &storage_json)
         ),
         (Ok((t, est)), false) => {
             print!("{}", plan_report::table(&plan, Ok(t)));
+            print!("{}", storage.table());
             print!("{}", est.table(mem));
         }
-        (Err(e), true) => print!("{}", plan_report::json(&plan, Err(e.as_str()))),
-        (Err(e), false) => print!("{}", plan_report::table(&plan, Err(e.as_str()))),
+        (Err(e), true) => print!(
+            "{}",
+            plan_report::json(&plan, Err(e.as_str()), &storage_json)
+        ),
+        (Err(e), false) => {
+            print!("{}", plan_report::table(&plan, Err(e.as_str())));
+            print!("{}", storage.table());
+        }
     }
     Ok(u8::from(!plan.refusals.is_empty()))
 }

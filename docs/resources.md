@@ -379,3 +379,53 @@ counters, `TEMP_DISK`).
 
 `report.json` records `temp_disk.limit_bytes`, whether it batched, and `peak_bytes`, the most spill bytes on disk
 at any moment of the run (the build and, with `--verify`, the verifier).
+
+## Storage kinds (workspace#561)
+
+`plan` and `migrate` judge three places on their own: the source volumes, the target directory and `--spill-dir`
+(the temp side), and show them as `storage: source <kind> (<disks>), target …, temp …` (plan.json `"storage"`).
+The kind comes from sysfs (`crates/cli/src/storage_kind_detect.rs`, GLOSSARY "저장 장치 종류"):
+
+| kind | rule |
+|---|---|
+| hdd | `queue/rotational` = 1 |
+| nvme | not rotational, device name `nvme*` |
+| sata-ssd | not rotational, any other block device with a `queue/` |
+| unknown | no block device behind the path (`st_dev` major 0: btrfs, ZFS, overlay, tmpfs, NFS) or sysfs unreadable; shown as a failed detection |
+
+A partition counts as its disk; device-mapper and md as their slaves. Several devices resolve to one kind in the
+order hdd > unknown > sata-ssd > nvme (one device known to be slow is enough). btrfs and ZFS device lists are not
+followed. unknown takes the hdd rates for the estimate and no device I/O concurrency limit (1번 세션 2026-10-31).
+
+Each phase reads and writes on the devices below; its device throughput (`DeviceThroughput`, `bottleneck.rs`) is the
+slowest of the listed kinds, read and write apart (`DeviceThroughput::of`: the one-stream sequential rows of the table
+below for SATA SSD and HDD; NVMe keeps the fsync rate of workspace#560). Page treatment and the index build work on the target volumes
+(`VolumeSet::open` of the target in `migrate`), not on the source.
+
+| phase | read | write |
+|---|---|---|
+| precheck, open-sources, volume-copy | source | target |
+| volume-paths, page-treatment, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, register | target | target |
+| index-build | target, temp | target, temp |
+| verifier | source, target, temp | temp |
+| pair count (the start estimate's first measure, `Progress::observe`) | source | source |
+
+### Device table (fio)
+
+`docs/storage_kinds.fio` on each device of the dev host, one after the other with nothing else of the run on it
+(2026-10-31, CPUs 16-31, 1-minute load ≤ 4 at each start; a 4 GiB file, O_DIRECT, iodepth 1 per thread):
+
+| job | NVMe (990 PRO) | SATA SSD (MZ7L33T8) | HDD (ST12000NM000J) |
+|---|---|---|---|
+| sequential write 1 MiB, MB/s | 2416 | 464 | 229 |
+| sequential read 1 MiB, MB/s | 2714 | 546 | 231 |
+| 4 sequential read streams 256 KiB, MB/s | 3141 | 561 | 53 |
+| 16 sequential read streams 256 KiB, MB/s | 3141 | 563 | 57 |
+| random read 16 KiB, 1 / 4 / 16 threads, IOPS | 19432 / 72020 / 180307 | 6880 / 20267 / 31586 | 184 / 382 / 585 |
+| random read 16 KiB, 16 threads, p99 µs | 136 | 970 | 108527 |
+| buffered write + fdatasync 4 KiB / 16 KiB, IOPS | 196 / 195 | 15880 / 11176 | 65 / 63 |
+
+On the HDD concurrent sequential streams lose three quarters of one stream's rate (seeks between the streams), while
+random reads still gain from a queue (NCQ). The SATA SSD's fdatasync is 80 times the NVMe's: its write cache is
+power-loss protected, the 990 PRO flushes.
+The per-kind, per-phase migrate measurements follow when they are measured.

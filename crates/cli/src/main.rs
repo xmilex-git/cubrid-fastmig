@@ -20,6 +20,7 @@ mod progress_args;
 mod resource_estimate;
 mod set_comparison;
 mod source_fingerprint;
+mod storage_kind_detect;
 mod target_space;
 mod temp_disk_choice;
 mod template_extract;

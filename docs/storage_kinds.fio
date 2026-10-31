@@ -1,0 +1,78 @@
+# What one storage kind gives per resource: the device table of docs/resources.md § Storage kinds (workspace#561).
+# Run on the filesystem to measure, one device at a time, nothing else writing to it:
+#   DIR=<dir on the device> fio --output-format=json --output=<out.json> docs/storage_kinds.fio
+#   rm <dir>/storage_kinds.fio.dat
+# fio is a measuring aid only; cubrid-fastmig does not run or need it.
+# Shapes follow the tool's I/O: workers are threads issuing one request each (numjobs, iodepth 1); the copy engine
+# reads 8 MiB chunks in 256 KiB blocks, so concurrent sequential streams are measured too.
+# Range: one 4 GiB file (above the ~2 GB DB of workspace#561), so random reads and stream offsets seek across 4 GiB
+# like reads of the volumes do; a 1 GiB range short-strokes an HDD and overstates its random read rate.
+
+[global]
+filename=${DIR}/storage_kinds.fio.dat
+size=4G
+direct=1
+ioengine=libaio
+iodepth=1
+thread
+group_reporting
+stonewall
+
+[seq_write_1m]
+rw=write
+bs=1M
+end_fsync=1
+
+[seq_read_1m]
+rw=read
+bs=1M
+
+[seq_read_256k_4_streams]
+rw=read
+bs=256k
+numjobs=4
+size=1G
+offset_increment=1G
+
+[seq_read_256k_16_streams]
+rw=read
+bs=256k
+numjobs=16
+size=256M
+offset_increment=256M
+
+[rand_read_16k_1]
+rw=randread
+bs=16k
+runtime=15
+time_based
+
+[rand_read_16k_4]
+rw=randread
+bs=16k
+numjobs=4
+runtime=15
+time_based
+
+[rand_read_16k_16]
+rw=randread
+bs=16k
+numjobs=16
+runtime=15
+time_based
+
+[fdatasync_write_4k]
+rw=randwrite
+bs=4k
+direct=0
+fdatasync=1
+runtime=15
+time_based
+
+[fdatasync_write_16k]
+rw=randwrite
+bs=16k
+direct=0
+fdatasync=1
+runtime=15
+time_based

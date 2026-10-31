@@ -224,6 +224,10 @@ _Avoid_: 쓰레기 파일, 누수 파일
 `--workers`로 정하는, 도구가 한꺼번에 쓰는 스레드 수의 상한. 볼륨 처리·카탈로그 재생성·인덱스 빌드·검증기가 나눠 쓴다.
 _Avoid_: 병렬도, 스레드 수
 
+**저장 장치 종류 (storage kind)**:
+한 디렉터리가 놓인 블록 장치의 부류: nvme, sata-ssd, hdd, 또는 판별 실패인 unknown. sysfs로 정한다 — 회전 장치(`queue/rotational` = 1)는 hdd, 이름이 `nvme`로 시작하면 nvme, 나머지 비회전 장치는 sata-ssd. 파티션은 그 디스크로, device-mapper·md는 그 아래 장치 중 가장 느린 것으로 본다. 블록 장치를 찾지 못한 경로(`st_dev` major 0인 btrfs·ZFS·overlay·tmpfs·NFS)는 unknown이고, `plan`에 판별 실패로 보이며 기본값은 보수적으로 고른다. 여러 장치가 섞이면 hdd > unknown > sata-ssd > nvme 순으로 하나를 고른다. 출발 볼륨, 도착 디렉터리, `--spill-dir`(temp)을 따로 판별해 `plan`에 보이고, 기본 처리량과 I/O 동시성이 이것을 따른다([workspace#561](https://github.com/xmilex-git/workspace/issues/561)).
+_Avoid_: 디스크 타입, 매체
+
 **메모리 상한 (memory limit)**:
 `--mem`으로 정하는, 도구가 키·정렬·merge 버퍼 등에 쓰는 메모리의 상한. 모든 단계가 하나를 나눠 쓴다([ADR 0012](docs/adr/0012-one-memory-limit-with-spill.md)).
 _Avoid_: 버퍼 크기, sort buffer
@@ -275,7 +279,7 @@ _Avoid_: 로그(엔진 로그와 섞인다), 진행 로그
 _Avoid_: resource(공간·메모리 예산 `resource_estimate`·plan.json `resources`와 섞인다), 병목 종류, 리소스 타입
 
 **장치 처리량 (device throughput)**:
-한 단계가 읽고 쓰는 장치가 낼 수 있는 초당 바이트(읽기·쓰기 따로). 병목 자원 판정에서 단계의 바이트 속도를 이것과 견준다. 지금은 dev 호스트 NVMe 값 하나이고, 장치 종류별 표는 workspace#561이 넣는다.
+한 단계가 읽고 쓰는 장치가 낼 수 있는 초당 바이트(읽기·쓰기 따로). 병목 자원 판정에서 단계의 바이트 속도를 이것과 견준다. 저장 장치 종류마다 하나씩 두고(unknown은 hdd 값), 단계마다 읽는 장치와 쓰는 장치 중 가장 느린 값을 쓴다(docs/resources.md § Storage kinds, workspace#561).
 _Avoid_: 대역폭(측정값과 섞인다)
 
 **관측 (observation)**:
