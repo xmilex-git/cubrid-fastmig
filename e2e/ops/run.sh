@@ -15,7 +15,7 @@ BIN=$(realpath "${1:?cubrid-fastmig binary}")
 PRISTINE=$(realpath "${2:?pristine dir}")
 TV=${3:?target version}
 OUT=${4:?out dir}
-ROUNDS=${5:-${FASTMIG_OPS_ROUNDS:-3}}
+ROUNDS=${5:-${FASTMIG_OPS_ROUNDS:-6}}   # 6: README § Rounds
 INST=$(realpath "${FASTMIG_OPS_INSTALL:?FASTMIG_OPS_INSTALL required}")
 PORT=${FASTMIG_OPS_PORT:?FASTMIG_OPS_PORT required}
 CTL=${FASTMIG_OPS_SERVER_CTL:?FASTMIG_OPS_SERVER_CTL required}
@@ -46,13 +46,15 @@ case "$LABEL" in 11.4 | develop) ROUND_FILES+=("$OPS/dml/round_plcsql.sql") ;; e
 export CUBRID=$INST CUBRID_TMP=$HOME/.fastmig-ops-tmp
 export PATH=$INST/bin:$PATH LD_LIBRARY_PATH=$INST/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 mkdir -p "$CUBRID_TMP"
-printf '[service]\nservice=server\n[common]\ncubrid_port_id=%s\ndata_buffer_size=512M\nstored_procedure=yes\n' \
+# auto_restart_server=no: the master would revive the server the kill9-recovery step kills and hold the DB before the
+# runner's own start
+printf '[service]\nservice=server\n[common]\ncubrid_port_id=%s\ndata_buffer_size=512M\nstored_procedure=yes\nauto_restart_server=no\n' \
   "$PORT" >"$INST/conf/cubrid.conf"
 
 FAIL=0
 SIDE=""   # the side the steps run on: migrated | official
 UP=0      # 1 while this side's server runs (checks then use csql -C, else -S)
-SERVER_PIDS=()
+
 
 # step <name> <expected rc> <cmd...>: runs and times one step of $SIDE, log in <side>/log/<name>.log
 step() {
@@ -81,7 +83,7 @@ sql_file() {
 check() {
   local name=$1 f=$OUT/$SIDE/check/$1.out was=$UP rc
   [ "$was" = 1 ] || start || return 1
-  sql_file -C "$OPS/checks.sql" >"$f" && ! grep -q 'INDEX!=HEAP' "$f"
+  sql_file -C "$OPS/checks.sql" -N >"$f" && ! grep -q "INDEX!=HEAP" "$f"
   rc=$?
   [ "$was" = 1 ] || stop || return 1
   return $rc
@@ -98,7 +100,18 @@ server_pid() {   # the cub_server of $DB whose environment is this side's CUBRID
     tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -qx "CUBRID_DATABASES=$CUBRID_DATABASES" && echo "$p"
   done
 }
-start() { bash "$CTL" start "$DB" && UP=1 && SERVER_PIDS+=($(server_pid)); }
+# the server reports started before its PL server (JVM) accepts calls; an SP call in that gap fails with "Can't connect
+# PL server", so start waits up to 60 s for the Java SP every baseline DB has
+start() {
+  bash "$CTL" start "$DB" || return 1
+  UP=1
+  local i
+  for ((i = 0; i < 30; i++)); do
+    csql -C -u dba -t -c "SELECT dba.fm_hello('ready') FROM db_root" "$DB" 2>&1 | grep -q 'hello ready' && return 0
+    sleep 2
+  done
+  echo "PL server not ready after 60 s"; return 1
+}
 stop() { bash "$CTL" stop "$DB" && UP=0; }
 # after a side: SIGTERM to the cub_master on the claimed port and to any cub_pl left by the kill -9, matched by this
 # install's CUBRID= in their environment (never `cubrid service stop` on the shared host: cubrid-server-control P4)
@@ -114,6 +127,13 @@ kill9_restart() {   # kill -9 of this side's server, then a start: the restart r
   [ -n "$p" ] || { echo "no cub_server of $DB"; return 1; }
   echo "kill -9 $p"; kill -9 "$p"
   timeout 60 bash -c "while kill -0 $p 2>/dev/null; do sleep 1; done" || return 1
+  # what else of this side still runs (the server's cub_pl outlives it): listed, then killed as a crash would leave it
+  local q
+  for q in $(pgrep -x cub_pl); do
+    tr '\0' '\n' <"/proc/$q/environ" 2>/dev/null | grep -qx "CUBRID_DATABASES=$CUBRID_DATABASES" || continue
+    echo "left after the kill: $q $(cat /proc/$q/comm), kill -9"; kill -9 "$q"
+    timeout 60 bash -c "while kill -0 $q 2>/dev/null; do sleep 1; done" || return 1
+  done
   UP=0; start
 }
 dml_rounds() {   # dml_rounds <n>: n DML rounds, every file of this source
@@ -133,7 +153,7 @@ prepare_migrated() {
   printf '%s\t%s\tlocalhost\t%s\tfile:%s\n' "$DB" "$src" "$src" "${FASTMIG_OPS_LOB_BASE:-$src/lob}" >"$OUT/migrated/src-dbs/databases.txt"
   "$BIN" migrate "$DB" --dest "$SIDE_DB" --target-version "$TV" --volumes-in-first-dir \
     --source-databases-txt "$OUT/migrated/src-dbs/databases.txt" --target-databases-txt "$CUBRID_DATABASES/databases.txt" \
-    --workers "$W" --verify --progress plain || return 1
+    --workers "$W" --verify --progress plain ${FASTMIG_OPS_MIGRATE_ARGS:-} || return 1
   grep -q "^$DB[[:space:]]" "$CUBRID_DATABASES/databases.txt" || { echo "target not registered"; return 1; }
   local f
   for f in deferred-indexes recompile-plcsql update-statistics; do
@@ -161,15 +181,18 @@ prepare_official() {
   logsz=$(( $(stat -c %s "$PRISTINE/${DB}_lgat") / 1048576 ))
   (cd "$SIDE_DB" && cubrid createdb --db-volume-size="${vol0}M" --log-volume-size="${logsz}M" \
     --file-path="$SIDE_DB" --log-path="$SIDE_DB" "$DB" en_US.utf8) || return 1
-  # the source's LOB files go under this side's lob-base: 11.4 and develop unloads name them relative to it. Older
-  # unloads name them by an absolute path under the registered baseline, whose files a LOB UPDATE of the scenario would
-  # delete, so their locators are pointed at this side's copy (only the path prefix changes)
-  cp -a --reflink=always "$PRISTINE/lob/." "$SIDE_DB/lob/" || return 1
+  # the source's LOB files: a reflink copy outside this side's lob-base, every locator of the unload pointed at it by an
+  # absolute path (only the path prefix changes; the unload itself is only read). 11.4 and develop unloads name the
+  # files relative to the lob-base, but a copy under develop's lob-base is lost: develop removes its top-level ces_*
+  # directories at every boot (CBRD-23700), loaddb's SA boot included, and keeps the relative locator. 10.2..11.3
+  # unloads name them under the registered baseline, whose files a LOB UPDATE of the scenario would delete.
+  local lob_src=$OUT/official/lob-src
+  cp -a --reflink=always "$PRISTINE/lob" "$lob_src" || return 1
+  objects=$OUT/official/objects
   case "$LABEL" in
-    11.4 | develop) ;;
+    11.4 | develop) sed "s#\(\^E'[BC][0-9]*\)|file:\([^/]\)#\1|file:$lob_src/\2#g" "${REF}_objects" >"$objects" || return 1 ;;
     *) base=${FASTMIG_OPS_LOB_BASE:?a $LABEL source needs FASTMIG_OPS_LOB_BASE}
-       objects=$OUT/official/objects
-       sed "s|file:${base%/}/|file:$SIDE_DB/lob/|g" "${REF}_objects" >"$objects" || return 1 ;;
+       sed "s#|file:${base%/}/#|file:$lob_src/#g" "${REF}_objects" >"$objects" || return 1 ;;
   esac
   [ ! -f "$PRISTINE/java/FmHello.class" ] || loadjava "$DB" "$PRISTINE/java/FmHello.class" || return 1
   opts=(-S -u dba -s "${REF}_schema" -d "$objects")
@@ -178,7 +201,7 @@ prepare_official() {
   [ "$LABEL" != 10.2 ] || opts+=(--no-user-specified-name)
   (cd "$OUT/official" && cubrid loaddb "${opts[@]}" "$DB") || return 1
   # loaddb reports a failed row or statement on its output and still exits 0
-  ! grep -qiE 'error|fail' "$OUT/official/${DB}_loaddb.log" 2>/dev/null
+  ! grep -qE '[1-9][0-9]* object\(s\) failed|ERROR|[Ee]rror:' "$OUT/official/${DB}_loaddb.log"
 }
 
 # run_side <side>: prepare, then the scenario steps with their checks; leaves the side's DB deleted
@@ -189,6 +212,8 @@ run_side() {
   mkdir -p "$OUT/$SIDE/log" "$OUT/$SIDE/check" "$OUT/$SIDE/dbs" "$OUT/$SIDE/src-dbs" "$OUT/$SIDE/backup" "$SIDE_DB"
   : >"$CUBRID_DATABASES/databases.txt"
   touch "$OUT/$SIDE/start-marker"
+  # the install's logs only grow (cubrid_utility.log keeps every run): their sizes now, so the side keeps what it adds
+  find "$INST/log" -type f -printf '%s\t%p\n' >"$OUT/$SIDE/log-sizes"
   step prepare 0 "prepare_$SIDE" || return 1
   step server-start 0 start || return 1
   if [ "$SIDE" = official ] && [ "${FASTMIG_OPS_BREAK:-}" = official-extra-row ]; then
@@ -211,16 +236,20 @@ run_side() {
   printf '%s\t%s\t%s\n' "$SIDE" "$a0" "$(last_archive)" >>"$OUT/archives.tsv"
   scenario_step restoredb cubrid restoredb -B "$OUT/$SIDE/backup" "$DB"
   step deletedb 0 cubrid deletedb -d "$DB"
-  # server error log lines, asserts, cores of this side's servers (core_pattern core.%e.%p.%h.%t)
-  local logs errs asserts cores=0 p cp
-  logs=$(find "$INST/log" -type f -newer "$OUT/$SIDE/start-marker" 2>/dev/null)
+  # server error log lines; asserts in those logs and in the steps' own output (a server that asserts while it starts
+  # prints it to the start output); cores of any process of this side: a core under core_pattern written while the
+  # side ran whose memory holds this side's CUBRID_DATABASES (servers and SA utilities alike, whatever their pid)
+  local errs asserts cores=0 c cdir f old
   mkdir -p "$OUT/$SIDE/server-log"
-  [ -z "$logs" ] || cp $logs "$OUT/$SIDE/server-log/"
-  errs=$(cat /dev/null $logs | grep -c 'ERROR \*\*\*')
-  asserts=$(cat /dev/null $logs | grep -ci 'assert')
-  cp=$(dirname "$(cat /proc/sys/kernel/core_pattern)")
-  for p in "${SERVER_PIDS[@]}"; do
-    cores=$((cores + $(find "$cp" -maxdepth 1 -name "core.*.$p.*" -newer "$OUT/$SIDE/start-marker" 2>/dev/null | wc -l)))
+  for f in $(find "$INST/log" -type f -newer "$OUT/$SIDE/start-marker" 2>/dev/null); do
+    old=$(awk -F'\t' -v p="$f" '$2 == p { print $1 }' "$OUT/$SIDE/log-sizes")
+    tail -c +$(( ${old:-0} + 1 )) "$f" >"$OUT/$SIDE/server-log/$(basename "$f")"
+  done
+  errs=$(cat /dev/null "$OUT/$SIDE"/server-log/* | grep -c 'ERROR \*\*\*')
+  asserts=$(cat /dev/null "$OUT/$SIDE"/server-log/* "$OUT/$SIDE"/log/*.log | grep -c 'Assertion .* failed')
+  cdir=$(dirname "$(cat /proc/sys/kernel/core_pattern)")
+  for c in $(find "$cdir" -maxdepth 1 -name 'core.*' -newer "$OUT/$SIDE/start-marker" 2>/dev/null); do
+    grep -aqF "CUBRID_DATABASES=$CUBRID_DATABASES" "$c" && { cores=$((cores + 1)); echo "$SIDE $c" >>"$OUT/cores.txt"; }
   done
   printf '%s\t%s\t%s\t%s\n' "$SIDE" "$errs" "$asserts" "$cores" >>"$OUT/server-log-summary.tsv"
   [ "$errs$asserts$cores" = 000 ] || { FAIL=1; echo "$SIDE: server error lines $errs, asserts $asserts, cores $cores" >&2; }

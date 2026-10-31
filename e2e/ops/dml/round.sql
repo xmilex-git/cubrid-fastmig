@@ -4,9 +4,10 @@
 -- Objects: basedb/10_schema.sql, 30_objects.sql, 31_dba_objects.sql, 46_partition_fx.sql. Synonyms and PL/CSQL are in
 -- round_synonym.sql and round_plcsql.sql (sources that have them). Source: G11 workspace#587 (3).
 
--- orders: 2000 new rows (trigger trg_orders_ai -> audit_log AUTO_INCREMENT), their items, invoices from the serial
+-- orders: 2000 new rows of customers 1001..5000 (the round deletes the oldest customer), the trigger trg_orders_ai ->
+-- audit_log AUTO_INCREMENT, their items, invoices from the serial
 INSERT INTO app_owner.orders (id, customer_id, ordered_on, status, total, memo)
-  SELECT m.mx + s.n, MOD((m.mx + s.n) * 7, 5000) + 1, ADDDATE(DATE '2025-01-01', MOD(m.mx + s.n, 300)), 'N',
+  SELECT m.mx + s.n, MOD((m.mx + s.n) * 7, 4000) + 1001, ADDDATE(DATE '2025-01-01', MOD(m.mx + s.n, 300)), 'N',
          MOD((m.mx + s.n) * 101, 1000000) / 100.0, CASE WHEN MOD(s.n, 500) = 0 THEN REPEAT('r', 3000) END
   FROM (SELECT MAX(id) mx FROM app_owner.orders) m, app_owner.seq_n s WHERE s.n <= 2000;
 INSERT INTO app_owner.order_item (order_id, line_no, product_id, qty, unit_price)
@@ -21,7 +22,8 @@ UPDATE app_owner.orders SET status = 'P', total = total + 1 WHERE MOD(id, 13) = 
 DELETE FROM app_owner.orders WHERE id < (SELECT MIN(id) FROM app_owner.orders) + 200;
 
 -- customer: 50 AUTO_INCREMENT rows keyed by code, half of the earlier ones deleted; the oldest customer goes with its
--- orders (ON DELETE CASCADE); collation utf8_en_ci name, SET, JSON, NCHAR, BIT, desc index columns
+-- orders (ON DELETE CASCADE); collation utf8_en_ci name, SET, JSON, NCHAR, BIT, desc index columns. Updates keyed on id
+-- skip the round rows (code R%): their AUTO_INCREMENT ids differ between the sides after a restart loses a cache block
 INSERT INTO app_owner.customer (code, name, name_n, region, credit, born, profile)
   SELECT 'R' || LPAD(m.mx + s.n, 7, '0'), 'Round ' || (m.mx + s.n), N'라운드' || s.n, ELT(MOD(s.n, 4) + 1, 'N', 'S', 'E', 'W'),
          s.n, ADDDATE(DATE '1990-01-01', s.n), JSON_OBJECT('r', m.mx + s.n)
@@ -30,15 +32,20 @@ INSERT INTO app_owner.customer (code, name, name_n, region, credit, born, profil
 DELETE FROM app_owner.customer WHERE code LIKE 'R%' AND MOD(CAST(SUBSTR(code, 2) AS INT), 2) = 0
   AND CAST(SUBSTR(code, 2) AS INT) <= (SELECT MAX(CAST(SUBSTR(code, 2) AS INT)) FROM app_owner.customer WHERE code LIKE 'R%') - 50;
 DELETE FROM app_owner.customer WHERE id = (SELECT MIN(id) FROM app_owner.customer);
-UPDATE app_owner.customer SET credit = credit + 1, born = ADDDATE(born, 1), name = UPPER(name) WHERE MOD(id, 7) = 0;
-UPDATE app_owner.customer SET tags = {'vip', 'r'}, flags = X'FF', grade = N'Z' WHERE MOD(id, 10) = 5;
-UPDATE app_owner.customer SET profile = JSON_SET(profile, '$.tier', 9), name_n = name_n || N'가' WHERE MOD(id, 10) = 3 AND CHAR_LENGTH(name_n) < 40;
-
--- product: the price through the WITH CHECK OPTION view, one LOB row rewritten in turn (trigger trg_product_bu fires)
-UPDATE app_owner.v_active_product SET price = price + 0.01 WHERE id <= 50;
-UPDATE app_owner.product SET image = BIT_TO_BLOB(X'89504E470D0A1A0A' || X'00000001'),
-                             manual = CHAR_TO_CLOB(REPEAT('round ', 300) || id)
-  WHERE id = MOD((SELECT COUNT(*) FROM app_owner.orders), 20) + 1;
+UPDATE app_owner.customer SET credit = credit + 1, born = ADDDATE(born, 1), name = UPPER(name) WHERE MOD(id, 7) = 0 AND code NOT LIKE 'R%';
+UPDATE app_owner.customer SET tags = {'vip', 'r'}, flags = X'FF', grade = N'Z' WHERE MOD(id, 10) = 5 AND code NOT LIKE 'R%';
+UPDATE app_owner.customer SET profile = JSON_SET(profile, '$.tier', 9), name_n = name_n || N'가' WHERE MOD(id, 10) = 3 AND CHAR_LENGTH(name_n) < 40 AND code NOT LIKE 'R%';
+-- product: price (the view v_active_product is not updatable here: develop refuses an update through a view over a
+-- REUSE_OID class, and product is one; checks.sql reads the view); the BEFORE UPDATE trigger trg_product_bu fires.
+UPDATE app_owner.product SET price = price + 0.01 WHERE id <= 50 AND active = 1;
+-- LOBs: 5 new rows with a BLOB and a CLOB, the round products of two rounds ago deleted with their LOB files. No UPDATE
+-- of a LOB column: on develop 682b080b2 a LOB written by an UPDATE of a table with a BEFORE UPDATE trigger keeps a
+-- top-level ces_* locator, and the next boot deletes that directory (CBRD-23700), on a fresh DB as well (workspace#588).
+INSERT INTO app_owner.product (id, sku, title, price, weight, active, spec, image, manual)
+  SELECT m.mx + s.n, 'R-' || LPAD(m.mx + s.n, 8, '0'), 'Round product ' || (m.mx + s.n), s.n, s.n / 10.0, 0,
+         JSON_OBJECT('r', m.mx + s.n), BIT_TO_BLOB(X'89504E470D0A1A0A' || X'00000001'), CHAR_TO_CLOB(REPEAT('round ', 300) || s.n)
+  FROM (SELECT GREATEST(MAX(id), 100000) mx FROM app_owner.product) m, app_owner.seq_n s WHERE s.n <= 5;
+DELETE FROM app_owner.product WHERE id > 100000 AND id <= (SELECT MAX(id) FROM app_owner.product) - 10;
 UPDATE app_owner.product SET spec = JSON_SET(spec, '$.w', id * 2) WHERE MOD(id, 9) = 0;
 
 -- partitions: RANGE event_log, the big write of the round (every payload rotated by one character); HASH and LIST

@@ -1,57 +1,58 @@
 -- Checks after every step of the operations scenario (e2e/ops/README.md), run as dba with csql -t on either side.
--- Per table: row count and a CRC32 sum over every column but the values a serial or AUTO_INCREMENT generates (intended
--- differences between the two sides, docs/intended-differences.md: compared as counts and order only). Per index: the
--- count read through that index against the heap count of the same predicate; the runner fails on "INDEX!=HEAP".
+-- Per table: row count and a CRC32 sum (BIGINT: an INT sum overflows) over every column but the values a serial or
+-- AUTO_INCREMENT generates (intended differences between the two sides, docs/intended-differences.md: compared as
+-- counts and order only). Per index: the count read through that index against the heap count of the same predicate;
+-- the runner fails on "INDEX!=HEAP".
 -- Source: G11 workspace#587 (1); T36 workspace#588.
 
 -- tables
-SELECT 'customer', COUNT(*), SUM(CRC32(CONCAT_WS('|', CASE WHEN code LIKE 'R%' THEN '-' ELSE id END, code, name, name_n,
+SELECT 'customer', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', CASE WHEN code LIKE 'R%' THEN NULL ELSE id END, code, name, name_n,
   grade, region, credit, score, ratio, born, created, tz_at, ltz_at, HEX(flags), profile, note))),
   SUM(CASE WHEN tags IS NULL THEN 0 ELSE 1 END) FROM app_owner.customer;
-SELECT 'product', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, sku, title, price, weight, active, spec,
+SELECT 'product', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, sku, title, price, weight, active, spec,
   MD5(HEX(BLOB_TO_BIT(image))), MD5(CLOB_TO_CHAR(manual))))) FROM app_owner.product;
-SELECT 'orders', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, customer_id, ordered_on, status, total, MD5(memo)))) FROM app_owner.orders;
-SELECT 'order_item', COUNT(*), SUM(CRC32(CONCAT_WS('|', order_id, line_no, product_id, qty, unit_price))) FROM app_owner.order_item;
-SELECT 'invoice', COUNT(*), SUM(CRC32(CONCAT_WS('|', order_id, amount))) FROM app_owner.invoice;
-SELECT 'audit_log', COUNT(*), SUM(CRC32(CONCAT_WS('|', tbl, ref_id, act))) FROM app_owner.audit_log;
+SELECT 'orders', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, customer_id, ordered_on, status, total, MD5(memo)))) FROM app_owner.orders;
+SELECT 'order_item', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', order_id, line_no, product_id, qty, unit_price))) FROM app_owner.order_item;
+SELECT 'invoice', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', order_id, amount))) FROM app_owner.invoice;
+SELECT 'audit_log', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', tbl, ref_id, act))) FROM app_owner.audit_log;
 -- order: AUTO_INCREMENT ids follow the insert order of the orders behind them
 SELECT 'audit_log_order', COUNT(*) FROM (SELECT id, LAG(id) OVER (ORDER BY ref_id) p FROM app_owner.audit_log
   WHERE tbl = 'orders') t WHERE p > id;
 SELECT 'invoice_order', COUNT(*) FROM (SELECT inv_no, LAG(inv_no) OVER (ORDER BY order_id) p FROM app_owner.invoice) t
   WHERE p > inv_no;
-SELECT 'event_log', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, ev_date, kind, MD5(payload)))) FROM app_owner.event_log;
-SELECT 'session_hash', COUNT(*), SUM(CRC32(CONCAT_WS('|', user_id, token, last_seen))) FROM app_owner.session_hash;
-SELECT 'region_list', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, code, label))) FROM app_owner.region_list;
-SELECT 'doc_big', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, MD5(body)))) FROM app_owner.doc_big;
-SELECT 'g5_expr', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, email, amount, deleted))) FROM app_owner.g5_expr;
-SELECT 'g5_fx', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, name, a, b, c, d, code))) FROM app_owner.g5_fx;
-SELECT 'seq_n', COUNT(*), SUM(n) FROM app_owner.seq_n;
-SELECT 'part_ascii', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, c))) FROM app_owner.part_ascii;
-SELECT 'part_hex', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, c))) FROM app_owner.part_hex;
-SELECT 'part_conv', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, c))) FROM app_owner.part_conv;
-SELECT 'part_inet', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, ip))) FROM app_owner.part_inet;
-SELECT 'part_char_const', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, c))) FROM app_owner.part_char_const;
-SELECT 'part_num_const', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, v))) FROM app_owner.part_num_const;
-SELECT 'part_num_hash', COUNT(*), SUM(CRC32(CONCAT_WS('|', k, amt))) FROM app_owner.part_num_hash;
-SELECT 'app_settings', COUNT(*), SUM(CRC32(CONCAT_WS('|', k, v))) FROM dba.app_settings;
-SELECT 'ko_text', COUNT(*), SUM(CRC32(CONCAT_WS('|', id, txt))) FROM dba.ko_text;
+SELECT 'event_log', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, ev_date, kind, MD5(payload)))) FROM app_owner.event_log;
+SELECT 'session_hash', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', user_id, token, last_seen))) FROM app_owner.session_hash;
+SELECT 'region_list', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, code, label))) FROM app_owner.region_list;
+SELECT 'doc_big', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, MD5(body)))) FROM app_owner.doc_big;
+SELECT 'g5_expr', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, email, amount, deleted))) FROM app_owner.g5_expr;
+SELECT 'g5_fx', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, name, a, b, c, d, code))) FROM app_owner.g5_fx;
+SELECT 'seq_n', COUNT(*), SUM(CAST(0 AS BIGINT) + n) FROM app_owner.seq_n;
+SELECT 'part_ascii', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, c))) FROM app_owner.part_ascii;
+SELECT 'part_hex', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, c))) FROM app_owner.part_hex;
+SELECT 'part_conv', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, c))) FROM app_owner.part_conv;
+SELECT 'part_inet', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, ip))) FROM app_owner.part_inet;
+SELECT 'part_char_const', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, c))) FROM app_owner.part_char_const;
+SELECT 'part_num_const', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, v))) FROM app_owner.part_num_const;
+SELECT 'part_num_hash', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', k, amt))) FROM app_owner.part_num_hash;
+SELECT 'app_settings', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', k, v))) FROM dba.app_settings;
+SELECT 'ko_text', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, txt))) FROM dba.ko_text;
 -- rows per partition
-SELECT 'partitions', COUNT(*), SUM(CRC32(CONCAT_WS('|', class_name, partition_name))) FROM db_partition;
+SELECT 'partitions', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', class_name, partition_name))) FROM db_partition;
 SELECT 'event_log_p2024', COUNT(*) FROM app_owner.event_log__p__p2024;
 SELECT 'region_list_p_ns', COUNT(*) FROM app_owner.region_list__p__p_ns;
 SELECT 'part_hex_p0', COUNT(*) FROM app_owner.part_hex__p__p0;
 SELECT 'part_inet_p0', COUNT(*) FROM app_owner.part_inet__p__p0;
 
 -- catalog: classes, indexes, triggers, serials (name only), stored procedures, users, grants
-SELECT 'classes', COUNT(*), SUM(CRC32(CONCAT_WS('|', owner_name, class_name, class_type))) FROM db_class
+SELECT 'classes', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', owner_name, class_name, class_type))) FROM db_class
   WHERE is_system_class = 'NO';
-SELECT 'indexes', COUNT(*), SUM(CRC32(CONCAT_WS('|', class_name, index_name, is_unique, is_primary_key, key_count)))
+SELECT 'indexes', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', class_name, index_name, is_unique, is_primary_key, key_count)))
   FROM db_index WHERE class_name IN (SELECT class_name FROM db_class WHERE is_system_class = 'NO');
-SELECT 'triggers', COUNT(*), SUM(CRC32(CONCAT_WS('|', name, target_class_name))) FROM db_trigger;
-SELECT 'serials', COUNT(*), SUM(CRC32(name)) FROM db_serial;
-SELECT 'stored_procs', COUNT(*), SUM(CRC32(CONCAT_WS('|', sp_name, sp_type, lang))) FROM db_stored_procedure;
-SELECT 'users', COUNT(*), SUM(CRC32(name)) FROM db_user;
-SELECT 'auths', COUNT(*), SUM(CRC32(CONCAT_WS('|', grantee_name, grantor_name, object_name, auth_type, is_grantable)))
+SELECT 'triggers', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', trigger_name, target_class_name))) FROM db_trigger;
+SELECT 'serials', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(name)) FROM db_serial;
+SELECT 'stored_procs', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', sp_name, sp_type, lang))) FROM db_stored_procedure;
+SELECT 'users', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(name)) FROM db_user;
+SELECT 'auths', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', grantee_name, grantor_name, object_name, auth_type, is_grantable)))
   FROM db_auth WHERE grantee_name <> 'DBA';
 -- what the SPs, views and synonyms return
 SELECT 'fm_hello', dba.fm_hello('ops') FROM db_root;
