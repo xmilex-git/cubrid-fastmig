@@ -214,11 +214,9 @@ prepare_official() {
   local schema=${REF}_schema
   if [ "$LABEL" = 10.2 ]; then
     # a 10.2 unload hands a partitioned table to its owner before its PARTITION BY, and develop/11.4 loaddb
-    # --no-user-specified-name then fails on it ("Unknown class dba.<t>": the server's lock-hint lookup has no
-    # unqualified-name fallback, workspace#516); every change_owner call moves to the end of a copy of the schema
+    # --no-user-specified-name then fails on it (workspace#516): that change_owner moves after the PARTITION BY
     schema=$OUT/official/schema
-    awk '/^call \[change_owner\]/ { owners = owners $0 "\n"; next } { print } END { printf "%s", owners }' \
-      "${REF}_schema" >"$schema" || return 1
+    awk -f "$OPS/official_102_schema.awk" "${REF}_schema" "${REF}_schema" >"$schema" || return 1
   fi
   opts=(-S -u dba -s "$schema" -d "$objects")
   [ ! -s "${REF}_indexes" ] || opts+=(-i "${REF}_indexes")

@@ -179,8 +179,10 @@ DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G12 5).
   partitioned table owned by a non-DBA user (`ALTER CLASS [event_log] PARTITION BY …`: `Unknown class "dba.event_log"`,
   schema rolled back; the server's lock-hint lookup has no unqualified-name fallback, engine defect measured in
   [workspace#516](https://github.com/xmilex-git/workspace/issues/516)). `prepare_official` loads a copy of a 10.2
-  schema with every `change_owner` call moved to its end; develop and 11.4.6 optdebug then load T1 10.2 clean with
-  209,973 objects and 0 failed, partitioned tables owned by APP_OWNER (workspace#589).
+  schema in which the `change_owner` call of each partitioned table follows its `PARTITION BY` statement
+  ([official_102_schema.awk](official_102_schema.awk)); the other calls stay in place, since a view whose tables still
+  belong to dba stores `[dba.<t>]`. develop and 11.4.6 optdebug then load T1 10.2 clean and dirty with 0 failed objects,
+  partitioned tables owned by APP_OWNER, both views on `[app_owner.*]` and readable (workspace#589).
 - **core_pattern's directory may be a symlink** (`/data/core` on the dev host): cores are found with `find -H`; before
   2026-10-31 the runner found none there (workspace#594), so the core counts of earlier runs are not evidence.
 
