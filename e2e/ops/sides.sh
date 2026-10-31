@@ -206,7 +206,16 @@ prepare_official() {
        sed "s#|file:${base%/}/#|file:$lob_src/#g" "${REF}_objects" >"$objects" || return 1 ;;
   esac
   [ ! -f "$PRISTINE/java/FmHello.class" ] || loadjava "$DB" "$PRISTINE/java/FmHello.class" || return 1
-  opts=(-S -u dba -s "${REF}_schema" -d "$objects")
+  local schema=${REF}_schema
+  if [ "$LABEL" = 10.2 ]; then
+    # a 10.2 unload hands a partitioned table to its owner before its PARTITION BY, and develop/11.4 loaddb
+    # --no-user-specified-name then fails on it ("Unknown class dba.<t>": the server's lock-hint lookup has no
+    # unqualified-name fallback, workspace#516); every change_owner call moves to the end of a copy of the schema
+    schema=$OUT/official/schema
+    awk '/^call \[change_owner\]/ { owners = owners $0 "\n"; next } { print } END { printf "%s", owners }' \
+      "${REF}_schema" >"$schema" || return 1
+  fi
+  opts=(-S -u dba -s "$schema" -d "$objects")
   [ ! -s "${REF}_indexes" ] || opts+=(-i "${REF}_indexes")
   [ ! -s "${REF}_trigger" ] || opts+=(--trigger-file "${REF}_trigger")
   [ "$LABEL" != 10.2 ] || opts+=(--no-user-specified-name)

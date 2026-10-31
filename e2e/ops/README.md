@@ -175,6 +175,12 @@ DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G12 5).
   migrated: one per csql session that ran a join with a GROUP BY sort (develop 682b080b2 and 11.4.6; T40
   [workspace#595](https://github.com/xmilex-git/workspace/issues/595)). `server-log-summary.tsv` counts them as
   `session_expired` and leaves them out of `error_lines`.
+- **10.2 official path**: 10.2 `unloaddb` → develop or 11.4 `loaddb --no-user-specified-name` fails at the first
+  partitioned table owned by a non-DBA user (`ALTER CLASS [event_log] PARTITION BY …`: `Unknown class "dba.event_log"`,
+  schema rolled back; the server's lock-hint lookup has no unqualified-name fallback, engine defect measured in
+  [workspace#516](https://github.com/xmilex-git/workspace/issues/516)). `prepare_official` loads a copy of a 10.2
+  schema with every `change_owner` call moved to its end; develop and 11.4.6 optdebug then load T1 10.2 clean with
+  209,973 objects and 0 failed, partitioned tables owned by APP_OWNER (workspace#589).
 - **core_pattern's directory may be a symlink** (`/data/core` on the dev host): cores are found with `find -H`; before
   2026-10-31 the runner found none there (workspace#594), so the core counts of earlier runs are not evidence.
 
