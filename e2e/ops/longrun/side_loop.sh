@@ -6,9 +6,10 @@
 # Input: bash e2e/ops/longrun/side_loop.sh <bin> <pristine dir> <target version> <side out dir> <migrated|official>
 #   <side out dir> is new (sides.sh ops_setup); run.sh passes <out>/<path>/<side>.
 # env: FASTMIG_OPS_INSTALL (this side's own install copy), FASTMIG_OPS_PORT, FASTMIG_OPS_SERVER_CTL (required);
-#   FASTMIG_LONGRUN_CYCLES (8), FASTMIG_LONGRUN_ROUNDS (20 per cycle), FASTMIG_LONGRUN_CYCLE_SECONDS (3600),
+#   FASTMIG_LONGRUN_CYCLES (8), FASTMIG_LONGRUN_ROUNDS (30 per cycle), FASTMIG_LONGRUN_CYCLE_SECONDS (3600),
 #   FASTMIG_LONGRUN_KILL_EVERY (4), FASTMIG_LONGRUN_PITR_CYCLE (CYCLES - 2, at least 1), FASTMIG_LONGRUN_MIN_ARCHIVES
 #   (50), FASTMIG_LONGRUN_MIN_CHECKPOINTS (100), FASTMIG_LONGRUN_STAT_SECONDS (60, the statdump window),
+#   FASTMIG_LONGRUN_MAX_ARCHIVES (40, log_max_archives),
 #   FASTMIG_LONGRUN_BREAK (pitr-extra-row), FASTMIG_OPS_WORKERS (4).
 # Output: <side out>/steps.tsv, <side out>/<side>/{hours.tsv,times.tsv,length.tsv,recovery.tsv,faults.tsv,rc,check/,
 #   log/,stat/,recovery/,server-log/,cores.txt}. Exit 0 pass, 1 fail, 2 bad arguments.
@@ -17,7 +18,7 @@ set -uo pipefail
 
 S=${5:?side}
 CYCLES=${FASTMIG_LONGRUN_CYCLES:-8}
-ROUNDS=${FASTMIG_LONGRUN_ROUNDS:-20}
+ROUNDS=${FASTMIG_LONGRUN_ROUNDS:-30}   # 30: about 0.33 archives a round (T36 measure) -> >= 50 archives in 8 cycles
 CYCLE_SECONDS=${FASTMIG_LONGRUN_CYCLE_SECONDS:-3600}
 KILL_EVERY=${FASTMIG_LONGRUN_KILL_EVERY:-4}
 PITR_CYCLE=${FASTMIG_LONGRUN_PITR_CYCLE:-$(( CYCLES > 2 ? CYCLES - 2 : 1 ))}
@@ -25,6 +26,7 @@ MIN_ARCHIVES=${FASTMIG_LONGRUN_MIN_ARCHIVES:-50}
 MIN_CHECKPOINTS=${FASTMIG_LONGRUN_MIN_CHECKPOINTS:-100}
 BREAK=${FASTMIG_LONGRUN_BREAK:-}
 STAT_SECONDS=${FASTMIG_LONGRUN_STAT_SECONDS:-60}
+MAX_ARCHIVES=${FASTMIG_LONGRUN_MAX_ARCHIVES:-40}
 HERE=$(dirname "$(realpath "$0")")
 OPS=$(realpath "$HERE/..")
 . "$OPS/sides.sh"
@@ -33,16 +35,17 @@ OPS=$(realpath "$HERE/..")
 
 case "$S" in migrated | official) ;; *) echo "side must be migrated or official" >&2; exit 2 ;; esac
 case "$BREAK" in "" | pitr-extra-row) ;; *) echo "unknown FASTMIG_LONGRUN_BREAK" >&2; exit 2 ;; esac
-for v in "$CYCLES" "$ROUNDS" "$CYCLE_SECONDS" "$KILL_EVERY" "$PITR_CYCLE" "$STAT_SECONDS"; do
+for v in "$CYCLES" "$ROUNDS" "$CYCLE_SECONDS" "$KILL_EVERY" "$PITR_CYCLE" "$STAT_SECONDS" "$MAX_ARCHIVES"; do
   [[ "$v" =~ ^[1-9][0-9]*$ ]] || { echo "cycles, rounds, seconds, kill period and PITR cycle are positive integers" >&2; exit 2; }
 done
 (( PITR_CYCLE <= CYCLES )) || { echo "PITR cycle $PITR_CYCLE beyond $CYCLES cycles" >&2; exit 2; }
 ops_setup "$1" "$2" "$3" "$4"
 round_files
-# checkpoint_interval 2min: about 30 checkpoints an hour; log_max_archives 24: the engine deletes archives without
-# regard to backups (log_page_buffer.c logpb_remove_archive_logs_exceed_limit), and 24 hold about 3 cycles of log,
-# more than the one cycle a PITR or the latest restore reads past its newest backup (README § Archives)
-printf 'checkpoint_interval=2min\nlog_max_archives=24\n' >>"$INST/conf/cubrid.conf"
+# checkpoint_interval 2min: about 30 checkpoints an hour. log_max_archives MAX_ARCHIVES: the engine deletes archives
+# beyond it without regard to backups (log_page_buffer.c logpb_remove_archive_logs_exceed_limit), so it must hold the
+# log a restore reads past the backup it starts from: the PITR reads from the chain's last backup before the mark
+# (level 0 or 1, restoredb -l) to the mark, at most two cycles (README § Archives)
+printf 'checkpoint_interval=2min\nlog_max_archives=%s\n' "$MAX_ARCHIVES" >>"$INST/conf/cubrid.conf"
 
 CHAIN=""      # backup chain directory the next level 1 or 2 goes to
 printf 'side\tstep\tseconds\trc\n' >"$OUT/steps.tsv"

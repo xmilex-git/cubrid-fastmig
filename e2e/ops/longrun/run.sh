@@ -37,14 +37,15 @@ mapfile -t ROWS < <(awk -F'\t' -v want="${FASTMIG_LONGRUN_PATHS:-}" 'NR > 1 && (
 # disk gate (README § Disk): per side the pristine, its growth, the archives log_max_archives keeps plus the active log
 # and two spare, every chain at twice the grown DB, and the one restored DB at a time of the end; all sides together under the
 # cap, and twice that free on /home
-cycles=${FASTMIG_LONGRUN_CYCLES:-8} rounds=${FASTMIG_LONGRUN_ROUNDS:-20} every=${FASTMIG_LONGRUN_KILL_EVERY:-4}
+cycles=${FASTMIG_LONGRUN_CYCLES:-8} rounds=${FASTMIG_LONGRUN_ROUNDS:-30} every=${FASTMIG_LONGRUN_KILL_EVERY:-4}
+kept=${FASTMIG_LONGRUN_MAX_ARCHIVES:-40}
 est=0
 for r in "${ROWS[@]}"; do
   IFS=$'\t' read -r id pr tv <<<"$r"
   p=$(du -smL "$ROOT/$pr" | cut -f1)
   lg=$(( $(stat -c %s "$(ls "$ROOT/$pr"/*_lgat | head -1)") / 1048576 ))
   grown=$(( p + cycles * rounds * GROWTH_MB ))
-  est=$(( est + 2 * (grown + 27 * lg + (cycles / every + 1) * 2 * grown + grown) ))
+  est=$(( est + 2 * (grown + (kept + 3) * lg + (cycles / every + 1) * 2 * grown + grown) ))
 done
 avail=$(df -m --output=avail /home | tail -1 | tr -d ' ')
 echo "size estimate ${est} MB for ${#ROWS[@]} paths x 2 sides; cap $(( CAP_GB * 1024 )) MB; /home avail ${avail} MB"
@@ -78,16 +79,43 @@ cleanup_script() {
 }
 mkdir -p "$OUT/cleanup"
 
-printf 'path\tside\tport\tpid\trc\n' >"$OUT/sides.tsv.run"
-i=0; PIDS=()
+# every install copy first: a failed copy then leaves no side running
 for r in "${ROWS[@]}"; do
-  IFS=$'\t' read -r id pr tv <<<"$r"
+  id=${r%%$'\t'*}
   mkdir -p "$OUT/$id"
   for s in migrated official; do
-    inst=$OUT/installs/$id-$s
-    cp -a --reflink=always "$BASE_INST" "$inst" || { echo "install copy failed" >&2; exit 1; }
+    cp -a --reflink=always "$BASE_INST" "$OUT/installs/$id-$s" || { echo "install copy failed" >&2; exit 1; }
     cleanup_script "$id" "$s"
-    FASTMIG_OPS_INSTALL=$inst FASTMIG_OPS_PORT=${PORTS[$i]} FASTMIG_LONGRUN_CLEANUP=$OUT/cleanup/$id-$s.sh \
+  done
+done
+
+# stop_run: on TERM or INT (a watcher's deadline, a Ctrl-C) the side processes stop first, with their csql and
+# restoredb children when run.sh leads its process group (setsid, as the worker starts it), then every cub_server,
+# cub_master and cub_pl of this run's installs (CUBRID=<out>/installs/ in their environment, as sides.sh stop_master
+# matches): a side left alone would go on to its end and start restored DBs on ports the watcher already released.
+stop_run() {
+  trap '' TERM INT
+  if [ "$(ps -o pgid= $$ | tr -d ' ')" = "$$" ]; then kill -TERM -- -$$; else kill -TERM "${PIDS[@]}"; fi 2>/dev/null
+  local p i
+  for ((i = 0; i < 30; i++)); do
+    for p in "${PIDS[@]}"; do kill -0 "$p" 2>/dev/null && break; done || break
+    sleep 1
+  done
+  for p in $(pgrep -x cub_server) $(pgrep -x cub_master) $(pgrep -x cub_pl); do
+    tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -q "^CUBRID=$OUT/installs/" && { echo "SIGTERM $p $(cat /proc/$p/comm)"; kill -TERM "$p"; }
+  done >>"$OUT/stop.log" 2>&1
+  echo "RESULT: FAILED (stopped by a signal at $(date -Is); see stop.log)" >"$OUT/result"
+  exit 1
+}
+PIDS=()
+trap stop_run TERM INT
+
+printf 'path\tside\tport\tpid\trc\n' >"$OUT/sides.tsv.run"
+i=0
+for r in "${ROWS[@]}"; do
+  IFS=$'\t' read -r id pr tv <<<"$r"
+  for s in migrated official; do
+    FASTMIG_OPS_INSTALL=$OUT/installs/$id-$s FASTMIG_OPS_PORT=${PORTS[$i]} FASTMIG_LONGRUN_CLEANUP=$OUT/cleanup/$id-$s.sh \
       bash "$HERE/side_loop.sh" "$BIN" "$ROOT/$pr" "$tv" "$OUT/$id/$s" "$s" >"$OUT/$id/$s.console" 2>&1 &
     PIDS+=($!)
     printf '%s\t%s\t%s\t%s\n' "$id" "$s" "${PORTS[$i]}" "$!" >>"$OUT/sides.tsv.run"

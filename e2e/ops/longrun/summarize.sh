@@ -17,13 +17,17 @@ for d in "$OUT"/*/; do
   [ -d "$d/migrated" ] || [ -d "$d/official" ] || continue
   echo "## $id"
   echo
-  echo "| side | state | cycles | rounds | checkpoints | archives (first..last) | failed steps | error lines | asserts | cores | PL drops | -1066 lines |"
-  echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
+  echo "| side | state | step now (age s) | cycles | rounds | checkpoints | archives (first..last) | failed steps | error lines | asserts | cores | PL drops | -1066 lines |"
+  echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
   for s in migrated official; do
     h=$d/$s/$s/hours.tsv
-    [ -f "$h" ] || { echo "| $s | not started ||||||||||"; continue; }
-    tail -n +2 "$h" | tail -1 | awk -F'\t' -v s="$s" -v st="$(cat "$d/$s/$s/rc" 2>/dev/null)" \
-      '{ printf "| %s | %s | %s | %s | %s | %s..%s (%s kept) | %s | %s | %s | %s | %s | %s |\n", s, (st == "running" ? "running" : "rc " st), $1, $3, $6, $9, $10, $11, $20, $15, $16, $17, $18, $19 }'
+    [ -f "$h" ] || { echo "| $s | not started |||||||||||"; continue; }
+    # the step a side is in: its newest step log; a running side whose step stays the same for 30 min is stalled
+    # (README § Watching)
+    l=$(ls -t "$d/$s/$s/log" | head -1)
+    age=$(( $(date +%s) - $(stat -c %Y "$d/$s/$s/log/$l") ))
+    tail -n +2 "$h" | tail -1 | awk -F'\t' -v s="$s" -v st="$(cat "$d/$s/$s/rc" 2>/dev/null)" -v now="${l%.log} ($age)" \
+      '{ printf "| %s | %s | %s | %s | %s | %s | %s..%s (%s kept) | %s | %s | %s | %s | %s | %s |\n", s, (st == "running" ? "running" : "rc " st), now, $1, $3, $6, $9, $10, $11, $20, $15, $16, $17, $18, $19 }'
   done
   echo
   if [ -f "$d/migrated/migrated/hours.tsv" ] && [ -f "$d/official/official/hours.tsv" ]; then

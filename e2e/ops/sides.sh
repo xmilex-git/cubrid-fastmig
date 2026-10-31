@@ -240,11 +240,12 @@ side_begin() {
 # side_faults: what this side added to the install's logs since side_begin, copied to <side>/server-log/ (refreshed on
 # every call), and prints "error_lines assert_lines cores pl_drops session_expired". Server error log lines; asserts in
 # those logs and in the steps' own output (a server that asserts while it starts prints it to the start output); cores
-# of any process of this side: a core under core_pattern written while the side ran whose memory holds this side's
-# CUBRID_DATABASES (servers and SA utilities alike, whatever their pid), listed in <side>/cores.txt. The long run calls
-# it every cycle. session_expired: the server's "-1066 Session expired" error lines (session.c), not counted as error
-# lines: an engine defect of develop and 11.4.6 alike, one line per csql session that ran a join with a GROUP BY sort,
-# on both sides and on a source never migrated (workspace#594 smoke, T40 workspace#595).
+# of any process of this side: a core under core_pattern written while the side ran whose memory holds a
+# CUBRID_DATABASES under the side's directory (its own and a restored DB's; servers and SA utilities alike), listed in
+# <side>/cores.txt. The long run calls it every cycle. session_expired: the server's "-1066 Session expired" error
+# lines (session.c), not counted as error lines: an engine defect of develop and 11.4.6 alike, one line per csql
+# session that ran a join with a GROUP BY sort, on both sides and on a source never migrated (workspace#594 smoke, T40
+# workspace#595).
 side_faults() {
   local errs asserts pl_drops expired cores=0 c cdir f old
   mkdir -p "$OUT/$SIDE/server-log"
@@ -261,7 +262,7 @@ side_faults() {
   : >"$OUT/$SIDE/cores.txt"
   # -H: core_pattern's directory may be a symlink (/data/core -> /bench/ssd/core on the dev host)
   for c in $(find -H "$cdir" -maxdepth 1 -name 'core.*' -newer "$OUT/$SIDE/start-marker" 2>/dev/null); do
-    grep -aqF "CUBRID_DATABASES=$CUBRID_DATABASES" "$c" && { cores=$((cores + 1)); echo "$SIDE $c" >>"$OUT/$SIDE/cores.txt"; }
+    grep -aqF "CUBRID_DATABASES=$OUT/$SIDE/" "$c" && { cores=$((cores + 1)); echo "$SIDE $c" >>"$OUT/$SIDE/cores.txt"; }
   done
   echo "$errs $asserts $cores $pl_drops $expired"
 }

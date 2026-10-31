@@ -35,13 +35,14 @@ migrated, row 1 official, row 2 migrated, row 2 official.
 | `FASTMIG_LONGRUN_BASEDB_ROOT` | `~/fastmig-basedb` | T1 baseline DBs (basedb/README.md) |
 | `FASTMIG_LONGRUN_PATHS` | all rows | ids of paths.tsv, space-separated |
 | `FASTMIG_LONGRUN_CYCLES` | `8` | cycles (≥ 8 hours at the default length) |
-| `FASTMIG_LONGRUN_ROUNDS` | `20` | DML rounds per cycle |
+| `FASTMIG_LONGRUN_ROUNDS` | `30` | DML rounds per cycle (about 0.33 archives a round, T36 measure: ≥ 50 archives in 8 cycles) |
 | `FASTMIG_LONGRUN_CYCLE_SECONDS` | `3600` | length of a cycle |
 | `FASTMIG_LONGRUN_KILL_EVERY` | `4` | every this many cycles: kill -9, vacuumdb, restart, a new backup chain |
 | `FASTMIG_LONGRUN_PITR_CYCLE` | cycles − 2 | the cycle whose end holds the PITR mark |
 | `FASTMIG_LONGRUN_MIN_ARCHIVES` | `50` | archives a side must create after the move |
 | `FASTMIG_LONGRUN_MIN_CHECKPOINTS` | `100` | checkpoints a side must complete, over all its server lifetimes |
 | `FASTMIG_LONGRUN_STAT_SECONDS` | `60` | window of the statdump in each snapshot (§ One side, Counters) |
+| `FASTMIG_LONGRUN_MAX_ARCHIVES` | `40` | `log_max_archives` of every side (§ One side, Archives) |
 | `FASTMIG_LONGRUN_CAP_GB` | `50` | disk cap of the size estimate (§ Disk) |
 | `FASTMIG_LONGRUN_GROWTH_MB` | `2` | MB one DML round adds to a side, for the estimate (§ Disk) |
 | `FASTMIG_LONGRUN_BREAK` | none | `pitr-extra-row`: § Fail-before probe |
@@ -53,7 +54,7 @@ Exit: `0` pass, `1` fail, `2` bad arguments, an existing `<out>`, a non-optdebug
 ## One side
 
 `side_loop.sh` prepares the side exactly as the T36 runner (`../sides.sh`: migrate `--verify` → finalize, or createdb →
-loaddb), with `checkpoint_interval=2min` and `log_max_archives=24` added to the conf, and starts the server. Then:
+loaddb), with `checkpoint_interval=2min` and `log_max_archives=MAX_ARCHIVES` added to the conf, and starts the server. Then:
 
 | When | Steps (`<side>/log/<step>.log`, rows of `<path>/<side>/steps.tsv`) |
 |---|---|
@@ -72,12 +73,18 @@ window. Checkpoints are the `Checkpoint finished` lines of the side's server err
 The `-1066 Session expired` lines are counted apart (`session_expired`), not as error lines (../README.md § Engine facts).
 
 **Backups.** Level 0 at cycle 0 and every `KILL_EVERY` cycles, each in a new chain directory
-`<side>/backup/chain-cNN`; between them level 1 (odd offset) and level 2 (even offset) into the current chain. One
-directory per chain because a level 0 overwrites the level-0 volume of its directory, which an earlier PITR needs.
+`<side>/backup/chain-cNN`; the next cycle adds a level 1 and the later ones a level 2 (since that level 1) to the
+current chain. Volume names are `<db>_bk<level>v<unit>` (file_io.c), so a later level 2 replaces an earlier one and the
+chain stays whole; one directory per chain because a level 0 would overwrite the level-0 volume an earlier PITR needs.
+restoredb reads only the level 0 unless `-l` is given (util_admin.c, logpb_restore), so the `latest` and `pitr` probes
+pass the level of the chain's last backup before their time.
 
 **Archives.** The engine deletes archives beyond `log_max_archives` without regard to backups
-(`logpb_remove_archive_logs_exceed_limit`). 24 archives hold about three cycles of log at the default rate; the latest
-restore and the PITR each read at most one cycle past their newest backup.
+(`logpb_remove_archive_logs_exceed_limit`), and a restore stops at a missing one (restoredb asks for it, reads EOF from
+the side's stdin and quits). A restore replays the archives from the backup it starts at: the PITR from the chain's
+last backup before the mark (default: cycle 5's level 1 to cycle 6's mark, one cycle), `latest` from the newest
+chain's last backup. 40 archives hold about five cycles at 8 a cycle, and 8 cycles still delete some. The smoke with
+`MAX_ARCHIVES=2` shows a PITR that passes while archives are being deleted (§ Smoke).
 
 ## End
 
@@ -91,11 +98,11 @@ newer than the PITR stop: the first smoke asserted in `log_recovery.c:531` that 
 
 | Probe | restoredb | Must equal |
 |---|---|---|
-| `latest` | `-B` newest chain, up to the end of the log | `check/end.out` |
-| `pitr` | `-B` the chain the mark lies in, `-d <mark>`, then the lob-base copy of the mark put back | `check/pitr-snapshot.out` |
+| `latest` | `-B` newest chain `-l <its last level>`, up to the end of the log | `check/end.out` |
+| `pitr` | `-B` the mark's chain `-l <its last level before the mark>` `-d <mark>`, then the lob-base copy of the mark put back | `check/pitr-snapshot.out` |
 | `chain0-bktime` | `-B chain-c00 -d backuptime` | `check/baseline.out` (nothing wrote before it) |
-| `before-move` | `-B chain-c00 -d <move − 60 s>` | must fail: the log chain begins at the move |
-| `chain0-next` | `-B chain-c00 -d <cycle 1's backup>` | recorded only (§ Restorable range) |
+| `before-move` | `-B chain-c00 -d <move − 60 s>` | refused with "… must be after the time … of the specified backup" (and no other failure) |
+| `chain0-next` | `-B chain-c00 -d <cycle 1's backup>` (level 0, replays cycle 1's archives) | recorded only (§ Restorable range) |
 
 Each restore directory also gets the side's `<db>_keys` and its `java`, `java_static` directories: restoredb does not
 restore them, and the server needs them where its volumes are. `before-move` and `chain0-next` run after the error
@@ -110,10 +117,12 @@ back after the PITR restore. The other probes restore states whose files still e
 
 ## Restorable range
 
-The migrated DB starts a new log chain at the move, and so does the official DB at its createdb: no restore reaches
-before the move (`before-move`). How far back a restore reaches after the move is bounded by the archives
-`log_max_archives` keeps, not by the backups: `chain0-next` needs the archives of cycle 1, which are deleted once 24
-newer ones exist. The measured rc of both is the documented range (docs/ops-verification.md "Long run").
+A restore starts at a backup, and the first backup of either side is taken right after the move (chain-c00): no
+backup holds the DB before the move, so the restorable range starts at chain-c00's backup time. `before-move` shows
+the engine refusing a time before that backup ("must be after the time … of the specified backup",
+`logpb_check_stop_at_time`); any DB refuses so, it is not a property of the migration. How far forward a level 0 still
+reaches is bounded by the archives `log_max_archives` keeps: `chain0-next` replays the archives of cycle 1, deleted
+once MAX_ARCHIVES newer ones exist. The measured rc of both is the documented range (docs/ops-verification.md "Long run").
 
 ## Fail-before probe
 
@@ -142,17 +151,23 @@ its snapshot. The PITR restore stops at the mark and lacks the row, so both side
 
 ## Watching
 
-`<out>/summary.md` is rewritten every minute while any side runs (its mtime is the liveness signal) and holds each
-side's last cycle row. A watcher polls with a bound longer than the whole run (cycles × cycle seconds + 2 h for
+`<out>/summary.md` is rewritten every minute while `run.sh` runs and holds each side's last cycle row and the step it
+is in now with that step's age (its newest step log). A running side whose step age passes 30 minutes is stalled (a
+cycle's longest quiet stretch is its end sleep, under 12 minutes; the dml step log grows every round). A watcher polls with a bound longer than the whole run (cycles × cycle seconds + 2 h for
 prepare and the end) until `<out>/result` exists, or the `run.sh` process is gone without it (failure), and reads
 `summary.md` each hour.
 
+Stopping: TERM or INT to `run.sh` stops the side processes (their whole process group when `run.sh` leads one, as
+under `setsid`), then every `cub_server`, `cub_master` and `cub_pl` whose environment holds `CUBRID=<out>/installs/`,
+and writes `RESULT: FAILED (stopped …)`; `stop.log` lists what it signalled. Otherwise a side would go on to its end
+and start restored DBs on ports already released.
+
 ## Disk
 
-Per side: `grown = pristine + cycles × rounds × GROWTH_MB`, plus `27 × active log` (24 kept archives, the active log
-and two spare), plus `(cycles / KILL_EVERY + 1) × 2 × grown` for the chains, plus `1 × grown` for the one restored DB of § End that exists at a time. Every side added up must stay under
+Per side: `grown = pristine + cycles × rounds × GROWTH_MB`, plus `(MAX_ARCHIVES + 3) × active log` (the kept
+archives, the active log and two spare), plus `(cycles / KILL_EVERY + 1) × 2 × grown` for the chains, plus `1 × grown` for the one restored DB of § End that exists at a time. Every side added up must stay under
 `FASTMIG_LONGRUN_CAP_GB`, and `/home` must have twice that free, or `run.sh` exits 2. T1 baseline (465 MB, 64 MB log),
-defaults: about 8 GB per side, 32 GB in all (cap 50 GB, map supervisor 2026-10-31). `GROWTH_MB` 2 is an upper estimate of a round's net rows (orders
+defaults: about 10.3 GB per side, 41 GB in all (cap 50 GB, map supervisor 2026-10-31). `GROWTH_MB` 2 is an upper estimate of a round's net rows (orders
 +1800, items +5400, audit +2000, event_log +1000 × 400 B, with indexes); `hours.tsv` `volume_mb` measures it.
 `deletedb -d` at a side's end removes its volumes, log and the backups its log lists; the older chains and the
 install copies stay in `<out>` for the caller to remove by literal
@@ -166,3 +181,9 @@ Two short cycles, the kill block and every end probe, under 10 minutes for the f
 FASTMIG_LONGRUN_CYCLES=2 FASTMIG_LONGRUN_ROUNDS=2 FASTMIG_LONGRUN_CYCLE_SECONDS=90 FASTMIG_LONGRUN_KILL_EVERY=2 \
 FASTMIG_LONGRUN_PITR_CYCLE=1 FASTMIG_LONGRUN_STAT_SECONDS=5 FASTMIG_LONGRUN_MIN_ARCHIVES=0 FASTMIG_LONGRUN_MIN_CHECKPOINTS=0 ... just ops-longrun <out>
 ```
+
+Archives deleted under the probes: `FASTMIG_LONGRUN_PATHS=114-dev FASTMIG_LONGRUN_CYCLES=3 FASTMIG_LONGRUN_ROUNDS=6
+FASTMIG_LONGRUN_KILL_EVERY=2 FASTMIG_LONGRUN_PITR_CYCLE=3 FASTMIG_LONGRUN_MAX_ARCHIVES=3` (other settings as above).
+The sides create more archives than 3, so the engine deletes some; the PITR (chain-c02 level 0 to cycle 3's mark) and
+`latest` read only the archives after their backup and must pass, while `chain0-next` (level 0 of cycle 0 to cycle 1)
+may fail for want of deleted ones.

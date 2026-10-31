@@ -38,14 +38,15 @@ pitr_mark() {
 }
 
 # backup_cycle <cycle>: online backup (-C, the server stays up). A cycle that is a multiple of KILL_EVERY (and cycle 0)
-# starts a new chain directory with a level 0; the others add level 1 (odd offset) or level 2 (even offset) to the
-# current chain. One directory per chain: a level 0 in the same directory would overwrite the older chain's volume
-# that a PITR to an earlier time still needs.
+# starts a new chain directory with a level 0; the next cycle adds a level 1 and the later ones level 2 (each since that
+# level 1, so a later level 2 replacing an earlier one in the directory keeps the chain whole: volume names are
+# <db>_bk<level>v<unit>, file_io.c). One directory per chain: a level 0 in the same directory would overwrite the older
+# chain's volume that a PITR to an earlier time still needs.
 backup_cycle() {
   local c=$1 level dir
   if (( c % KILL_EVERY == 0 )); then
     level=0; CHAIN=$(printf 'chain-c%02d' "$c")
-  elif (( c % KILL_EVERY % 2 == 1 )); then level=1
+  elif (( c % KILL_EVERY == 1 )); then level=1
   else level=2; fi
   dir=$OUT/$SIDE/backup/$CHAIN
   mkdir -p "$dir"

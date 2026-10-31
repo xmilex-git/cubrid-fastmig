@@ -55,14 +55,20 @@ restore_probe() {
 }
 
 times_field() { awk -F'\t' -v k="$1" -v n="$2" '$1 == k { v = $n } END { print v }' "$OUT/$SIDE/times.tsv"; }   # last row
+# level_before <chain> <epoch>: level of the chain's last backup taken before <epoch>, for restoredb -l (without -l
+# restoredb reads the level 0 only and replays every archive since it: util_admin.c level default 0, logpb_restore)
+level_before() {
+  awk -F'\t' -v c="$1" -v t="$2" '$1 == "backup" && $5 == c && $2 <= t { l = $4 } END { print l + 0 }' "$OUT/$SIDE/times.tsv"
+}
 
 # end_recovery and range_probes: the probes, each in its own directory:
-#   latest        newest chain, up to the end of the log            = check end
-#   pitr          the chain the mark lies in, -d <mark>, the LOB files copied at the mark = check pitr-snapshot
-#   chain0-bktime first chain (right after the migration), -d backuptime = check baseline (no write before it)
-#   before-move   first chain, -d one minute before the migration   must fail: the new log chain starts at the move
-#   chain0-next   first chain, -d the first cycle's end             recorded only: needs archives log_max_archives may
-#                                                                   have deleted (README § Restorable range)
+#   latest        newest chain at its last level (-l), up to the end of the log           = check end
+#   pitr          the mark's chain at its last level before the mark, -d <mark>, the LOB files copied at the mark
+#                                                                                         = check pitr-snapshot
+#   chain0-bktime first chain (right after the migration), level 0, -d backuptime         = check baseline
+#   before-move   first chain, level 0, -d one minute before its backup   must be refused for that reason
+#   chain0-next   first chain, level 0, -d the first cycle's backup time  recorded only: replays the archives of
+#                                                cycle 1, which log_max_archives may have deleted (§ Restorable range)
 end_recovery() {
   mkdir -p "$OUT/$SIDE/recovery"
   printf 'probe\trc\twant\tdiff_rc\n' >"$OUT/$SIDE/recovery.tsv"
@@ -70,10 +76,11 @@ end_recovery() {
   local bk=$OUT/$SIDE/backup lob latest pitr_at pitr_chain
   lob=$(lob_base)
   latest=$(times_field backup 5)
-  restore_probe latest 0 end "$lob" -B "$bk/$latest"
+  restore_probe latest 0 end "$lob" -B "$bk/$latest" -l "$(level_before "$latest" "$(date +%s)")"
   pitr_at=$(times_field pitr 4); pitr_chain=$(times_field pitr 5)
   if [ -n "$pitr_at" ]; then
-    restore_probe pitr 0 pitr-snapshot "$OUT/$SIDE/pitr-lob" -B "$bk/$pitr_chain" -d "$pitr_at"
+    restore_probe pitr 0 pitr-snapshot "$OUT/$SIDE/pitr-lob" -B "$bk/$pitr_chain" \
+      -l "$(level_before "$pitr_chain" "$(times_field pitr 2)")" -d "$pitr_at"
     [ -z "${FASTMIG_LONGRUN_CLEANUP:-}" ] || bash "$FASTMIG_LONGRUN_CLEANUP" pitr-lob
   else
     FAIL=1; echo "$SIDE: no PITR mark" >&2
@@ -88,6 +95,10 @@ range_probes() {
   lob=$(lob_base)
   moved=$(times_field moved 2)
   restore_probe before-move 1 - "$lob" -B "$bk/chain-c00" -d "$(date -d "@$(( moved - 60 ))" +%d-%m-%Y:%H:%M:%S)"
+  # refused for the right reason only: the time lies before the chain's level 0 (logpb_check_stop_at_time); any other
+  # failure (a missing archive, a wrong path) is not the evidence the README cites
+  grep -q "must be after the time" "$OUT/$SIDE/log/restore-before-move.log" ||
+    { FAIL=1; echo "$SIDE before-move: not refused as before its backup, see $SIDE/log/restore-before-move.log" >&2; }
   c1=$(awk -F'\t' '$1 == "backup" && $3 == 1 { print $2 }' "$OUT/$SIDE/times.tsv")
   if [ -n "$c1" ]; then
     # recorded, not judged
