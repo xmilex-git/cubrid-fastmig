@@ -16,7 +16,9 @@
 //! - a phase not yet begun takes its default seconds times its prior bottleneck's factor;
 //! - the running phase takes its default seconds left times a blend of that factor and its own seconds per default
 //!   second, weighted [`PRIOR_WEIGHT`] against the share done: the prior first, the phase's own observation as it
-//!   gets done. No moving average, no floor: a good prior is not overwritten by a noisy rate;
+//!   gets done. No moving average, no floor: a good prior is not overwritten by a noisy rate. A phase in parts does
+//!   this per part, each from its own active time and use: a bottleneck one part shows (a heap scan reading a disk)
+//!   is not applied to another (the tree build after it keeps the prior);
 //! - the run's ETA is always given, marked approximate by the caller.
 
 use std::sync::atomic::Ordering::Relaxed;
@@ -54,6 +56,7 @@ pub struct Estimate {
 pub struct Estimator {
     last: Option<(usize, Instant, f64)>,
     ema: f64,
+    parts: PartClock,
 }
 
 impl Default for Estimator {
@@ -61,6 +64,83 @@ impl Default for Estimator {
         Estimator {
             last: None,
             ema: 0.0,
+            parts: PartClock::default(),
+        }
+    }
+}
+
+/// Per part of the running phase, the seconds it was the active part and what the process used meanwhile: the
+/// active part is the one whose counter moved most (in default seconds) since the last tick, else the one before.
+/// A part's bottleneck and own pace come from its own time, so a disk-bound heap scan does not slow the CPU-bound
+/// tree build after it (workspace#560, 1번 세션 2026-10-31: hdd B ETA 1.46x at 60 s).
+#[derive(Default)]
+struct PartClock {
+    phase: Option<usize>,
+    at: Option<Instant>,
+    sample: Option<ProcSample>,
+    done: Vec<f64>,
+    active: usize,
+    secs: Vec<f64>,
+    used: Vec<Option<ProcSample>>,
+}
+
+impl PartClock {
+    fn tick(
+        &mut self,
+        p: &Progress,
+        cur: usize,
+        ph: &Phase,
+        now: Instant,
+        sample: Option<ProcSample>,
+    ) {
+        let n = ph.totals.len();
+        if self.phase != Some(cur) {
+            // from the phase's own start, so a part that ran before the first tick is counted
+            *self = PartClock {
+                phase: Some(cur),
+                at: ph.started.get().copied(),
+                sample: ph.sample_start.get().copied().flatten(),
+                done: vec![0.0; n],
+                active: 0,
+                secs: vec![0.0; n],
+                used: vec![Some(ProcSample::default()); n],
+            };
+        }
+        let done: Vec<f64> = (0..n).map(|k| part_secs(p, ph, k, ph.done_of(k))).collect();
+        let moved = (0..n)
+            .map(|k| (k, done[k] - self.done[k]))
+            .filter(|(_, d)| *d > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((k, _)) = moved {
+            self.active = k;
+        }
+        let k = self.active;
+        if let Some(at) = self.at {
+            self.secs[k] += now.duration_since(at).as_secs_f64();
+        }
+        self.used[k] = match (self.used[k], sample, self.sample) {
+            (Some(u), Some(s), Some(prev)) => {
+                let d = s.since(prev);
+                Some(ProcSample {
+                    cpu_s: u.cpu_s + d.cpu_s,
+                    read_bytes: u.read_bytes + d.read_bytes,
+                    write_bytes: u.write_bytes + d.write_bytes,
+                })
+            }
+            _ => None,
+        };
+        self.at = Some(now);
+        self.sample = sample;
+        self.done = done;
+    }
+
+    /// The bottleneck part `k` showed once it has been active [`MIN_SAMPLE_S`].
+    fn classified(&self, k: usize, ph: &Phase, workers: usize) -> Option<Bottleneck> {
+        match self.used[k] {
+            Some(u) if self.secs[k] >= MIN_SAMPLE_S => {
+                Bottleneck::classify(u, self.secs[k], workers, ph.device)
+            }
+            _ => None,
         }
     }
 }
@@ -93,26 +173,37 @@ impl Estimator {
         }
         self.last = Some((cur, now, done));
 
+        self.parts.tick(p, cur, ph, now, sample);
+
         let factors = speed_factors(p, now, sample);
         let el = elapsed(ph, now);
         let phase_eta = if ph.spec.unit == Unit::Step {
             (STEP.as_secs_f64() - el).max(0.0)
         } else {
-            // the bottleneck's factor at first, the phase's own seconds per default second as it gets done
-            let total = total_secs(p, ph);
-            let prior =
-                factors.of(classified(ph, now, sample, p.worker_limit).unwrap_or(ph.spec.prior));
-            let f = if total > 0.0 {
-                (done / total).min(1.0)
-            } else {
-                0.0
-            };
-            let k = if done > 0.0 {
-                (PRIOR_WEIGHT * prior + f * (el / done)) / (PRIOR_WEIGHT + f)
-            } else {
-                prior
-            };
-            (k * (total - done)).max(0.0)
+            // per part: its bottleneck's factor at first (the phase's prior until the part shows its own), its own
+            // seconds per default second as it gets done
+            (0..ph.totals.len())
+                .map(|k| {
+                    let total = part_secs(p, ph, k, ph.totals[k].load(Relaxed));
+                    let done = self.parts.done[k];
+                    let prior = factors.of(self
+                        .parts
+                        .classified(k, ph, p.worker_limit)
+                        .unwrap_or(ph.spec.prior));
+                    let f = if total > 0.0 {
+                        (done / total).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    let pace = if done > 0.0 {
+                        (PRIOR_WEIGHT * prior + f * (self.parts.secs[k] / done))
+                            / (PRIOR_WEIGHT + f)
+                    } else {
+                        prior
+                    };
+                    (pace * (total - done)).max(0.0)
+                })
+                .sum()
         };
         let pending: f64 = p.phases[cur + 1..]
             .iter()
@@ -178,14 +269,22 @@ pub(crate) fn classified(
 
 /// Seconds the defaults give phase `ph`'s parts at `amount(k)` each.
 fn default_secs(p: &Progress, ph: &Phase, amount: impl Fn(usize) -> u64) -> f64 {
-    ph.spec
-        .all_parts()
-        .enumerate()
-        .map(|(k, (_, r))| match r.with_workers(p.worker_limit) {
-            rate if rate > 0.0 => amount(k) as f64 / rate,
-            _ => 0.0,
-        })
+    (0..ph.totals.len())
+        .map(|k| part_secs(p, ph, k, amount(k)))
         .sum()
+}
+
+/// Seconds the defaults give `amount` of phase `ph`'s part `k`.
+fn part_secs(p: &Progress, ph: &Phase, k: usize, amount: u64) -> f64 {
+    match ph
+        .spec
+        .all_parts()
+        .nth(k)
+        .map(|(_, r)| r.with_workers(p.worker_limit))
+    {
+        Some(rate) if rate > 0.0 => amount as f64 / rate,
+        _ => 0.0,
+    }
 }
 
 /// The share of phase `ph` done, in default seconds (so both parts of a phase in two count); `None` with no total.
