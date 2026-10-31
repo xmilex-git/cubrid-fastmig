@@ -89,7 +89,7 @@ Run in this order by `build.sh` (user, mode in parentheses):
 
 | File | Makes | From |
 |---|---|---|
-| `00_users.sql` (dba) | users `app_owner`, `app_group`, `app_reader` (group member), user comments | T1 |
+| `00_users.sql` (dba) | users `app_owner`, `app_group`, `app_reader` (group member, password `fm_reader`), user comments | T1 |
 | `10_schema.sql` (app_owner) | tables of every common type, collations, PK/FK/UNIQUE/composite/DESC indexes, AUTO_INCREMENT, RANGE/HASH/LIST partitions, overflow table `doc_big`; function and filter indexes on `g5_expr`, `g5_fx`, `region_list` (`i_f1`, `i_f2`, `i_f4`, `i_f5`) | T1; G5 (workspace#486) |
 | `20_data.sql` (app_owner) | rows, all functions of `seq_n.n` so both versions load the same data; LOBs on 20 `product` rows | T1 |
 | `25_rows_multiplier.sql` (app_owner, k > 1 only) | (k − 1) × the T1 rows of `customer`, `orders`, `order_item`, `event_log`, ids from 1000001; runs before the triggers exist | speed-comparison baseline (workspace#484) |

@@ -43,6 +43,8 @@ pub enum Rewrite {
     LobAbsoluteLocator,
     /// Drop ` WITH DEDUPLICATE=<level>`, any level.
     DeduplicateLevel,
+    /// `call [set_password_encoded...]('<hash>')` → `('')`: develop salts an unsalted hash anew on every unload.
+    PasswordHash,
     /// The 10.2 print forms, one per function of [`crate::unload_rules_10_2`].
     OwnerQualifiedNames,
     ViewQueryOnePass,
@@ -254,6 +256,17 @@ const V11_4_TO_DEVELOP: &[Rule] = &[
         side: Side::Target,
         rewrite: Rewrite::LobClassDir,
     },
+    // CBRD-27432 (develop 2646be1cb, CUBRID/cubrid#8012): develop's `au_export_users` re-hashes a stored unsalted SHA2
+    // password with a new random salt on every unload, and the migrated row keeps the source's unsalted hash as the
+    // official loaddb path does, so the hash differs from the source's and between two runs. Only the hash is
+    // masked: the user and the call are still compared; that the password still logs in is shown by a login, not
+    // here (workspace#582).
+    Rule {
+        name: "password-hash",
+        files: &["schema", "schema_user"],
+        side: Side::Both,
+        rewrite: Rewrite::PasswordHash,
+    },
 ];
 
 /// Applies `rules` to one file's entries of one side; returns how many entries each rule changed. `owners` are the
@@ -296,6 +309,7 @@ pub fn normalize(
                     .iter_mut()
                     .filter_map(drop_deduplicate_level)
                     .count(),
+                Rewrite::PasswordHash => entries.iter_mut().filter_map(mask_password_hash).count(),
                 Rewrite::OwnerQualifiedNames => {
                     v10_2::owner_qualified_names(suffix, entries, owners)
                 }
@@ -428,6 +442,22 @@ fn drop_lob_class_dir(e: &mut Vec<u8>) -> Option<()> {
     for (from, to) in cuts.into_iter().rev() {
         e.drain(from..to);
     }
+    Some(())
+}
+
+/// Empties the quoted argument of a `call [set_password_encoded` or `call [set_password_encoded_sha1` entry (see rule
+/// password-hash). The hash is a prefix byte and hex digits, so it holds no quote.
+fn mask_password_hash(e: &mut Vec<u8>) -> Option<()> {
+    const HEAD: &[u8] = b"call [set_password_encoded";
+    if !e.starts_with(HEAD) {
+        return None;
+    }
+    let open = e.windows(2).position(|w| w == b"('")? + 2;
+    let close = open + e[open..].iter().position(|&b| b == b'\'')?;
+    if open == close {
+        return None;
+    }
+    e.drain(open..close);
     Some(())
 }
 
