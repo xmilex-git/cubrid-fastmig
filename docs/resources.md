@@ -221,7 +221,9 @@ Right after the incomplete marker, before the first byte of the target, `migrate
 The free-space check (with the temp limit when the spill directory is on the target filesystem) therefore needs
 the byte-copied volumes, the new log, the pages taken at the start, the deferred sectors and twice the rest of
 the reservation (`TargetSpace::needed`); `plan` prints it, refuses when the target filesystem has less, and writes
-it to `plan.json` as `target_space` (with `transfer_bytes`, `listed_sectors` and `short_sectors`).
+it to `plan.json` as `target_space` (with `transfer_bytes`, `listed_sectors` and `short_sectors`). When a refused
+plan's resource estimate fails (an index the plan refuses cannot be read for its key groups), `target_space` and
+`resources` are `null` and `estimate_error` says why; the rest of the plan is printed as usual (workspace#584).
 
 **Unreserved writes.** What the reservation bounds is written outside the space the run took: a process that fills
 the filesystem while the run writes can still take that space, and the run then stops on a full disk. `plan`

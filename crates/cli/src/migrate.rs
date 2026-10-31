@@ -480,7 +480,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &src,
         po,
         src_lob_base.as_deref(),
-        &plan_report::json(&plan, &target, &resources),
+        &plan_report::json(&plan, Ok((&target, resources.as_str()))),
     )?;
     rep.lap("open_sources");
 

@@ -224,7 +224,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         r => r?,
     };
     let mem = Limits::from(&p, &o.target_dir)?.memory_limit_bytes;
-    let mut est = match resource_estimate::estimate(
+    let est = match resource_estimate::estimate(
         &s.vols,
         plan.version_pair,
         plan.source_version,
@@ -233,36 +233,43 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         limits::physical_memory()?,
     ) {
         // the estimate encodes what the run writes, so a class the plan refused (a 10.2 stream with F_BENCHMARK,
-        // workspace#540) can stop it too: the refusals are the answer, exit 1 like migrate
-        Err(e) if !plan.refusals.is_empty() => {
-            println!(
-                "the plan refuses the migration:\n  {}\n(no resource estimate: {e})",
-                plan.refusals.join("\n  ")
-            );
-            return Ok(1);
-        }
-        r => r?,
+        // workspace#540; an LDML collation key, workspace#491) can stop it too: the rest of the plan is still
+        // printed, the estimate and the target space with why they are missing, exit 1 like migrate (workspace#584)
+        Err(e) if !plan.refusals.is_empty() => Err(e.to_string()),
+        r => Ok(r?),
     };
-    est.source_groups = verify::source_key_groups(&s, o.locate, est.workers)?;
-    if p.switch("--verify") {
-        let (bytes, pages) = verify::source_pair_bytes(&s, o.locate, est.workers)?;
-        est.verify_source = Some(bytes);
-        est.verify_heap_pages = Some(pages);
-    }
-    let t = target_space::bound(&plan, &est, &s.vols, new_log::file_bytes(&s.log))?;
     let mut plan = plan;
-    if t.needed() > plan.available_bytes {
-        plan.refusals.push(format!(
-            "the target filesystem has {} B free, the migration needs {} B before any temp disk",
-            plan.available_bytes,
-            t.needed()
-        ));
-    }
-    if p.switch("--json") {
-        print!("{}", plan_report::json(&plan, &t, &est.json(mem)));
-    } else {
-        print!("{}", plan_report::table(&plan, &t));
-        print!("{}", est.table(mem));
+    let space = match est {
+        Ok(mut est) => {
+            est.source_groups = verify::source_key_groups(&s, o.locate, est.workers)?;
+            if p.switch("--verify") {
+                let (bytes, pages) = verify::source_pair_bytes(&s, o.locate, est.workers)?;
+                est.verify_source = Some(bytes);
+                est.verify_heap_pages = Some(pages);
+            }
+            let t = target_space::bound(&plan, &est, &s.vols, new_log::file_bytes(&s.log))?;
+            if t.needed() > plan.available_bytes {
+                plan.refusals.push(format!(
+                    "the target filesystem has {} B free, the migration needs {} B before any temp disk",
+                    plan.available_bytes,
+                    t.needed()
+                ));
+            }
+            Ok((t, est))
+        }
+        Err(e) => Err(e),
+    };
+    match (&space, p.switch("--json")) {
+        (Ok((t, est)), true) => print!(
+            "{}",
+            plan_report::json(&plan, Ok((t, est.json(mem).as_str())))
+        ),
+        (Ok((t, est)), false) => {
+            print!("{}", plan_report::table(&plan, Ok(t)));
+            print!("{}", est.table(mem));
+        }
+        (Err(e), true) => print!("{}", plan_report::json(&plan, Err(e.as_str()))),
+        (Err(e), false) => print!("{}", plan_report::table(&plan, Err(e.as_str()))),
     }
     Ok(u8::from(!plan.refusals.is_empty()))
 }

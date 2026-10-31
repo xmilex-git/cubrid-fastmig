@@ -1,7 +1,9 @@
 //! The plan as `plan.json` and as the table `plan` prints.
 //!
-//! Input: a [`Plan`] and its [`TargetSpace`]. Output: JSON text (`plan --json`, `<dest>/fastmig/plan.json`) or a human-readable table.
-//! Source: decision G1 workspace#481 (plan prints a table, `--json` too; migrate leaves plan.json).
+//! Input: a [`Plan`] and its [`TargetSpace`], or why the target space was not estimated. Output: JSON text
+//! (`plan --json`, `<dest>/fastmig/plan.json`) or a human-readable table.
+//! Source: decision G1 workspace#481 (plan prints a table, `--json` too; migrate leaves plan.json), workspace#584 (a
+//! refused plan whose resource estimate failed still prints everything else).
 
 use fastmig_plan::version_pair::line_name;
 use fastmig_plan::{HeapTreatment, PageTreatment, Plan};
@@ -24,8 +26,29 @@ fn strings<'a>(v: impl IntoIterator<Item = &'a str>) -> String {
     format!("[{}]", v.join(", "))
 }
 
-/// `resources`: the resource table as JSON (`resource_estimate`), or `null` when it was not estimated.
-pub fn json(p: &Plan, t: &TargetSpace, resources: &str) -> String {
+/// `estimate`: the target space and the resource table as JSON (`resource_estimate`), or why they were not estimated;
+/// then `target_space` and `resources` are `null` and `estimate_error` holds the reason.
+pub fn json(p: &Plan, estimate: Result<(&TargetSpace, &str), &str>) -> String {
+    let (space, resources, error) = match estimate {
+        Ok((t, r)) => (
+            format!(
+                "{{\"copy_bytes\": {}, \"log_bytes\": {}, \"unshare\": {}, \"unshare_bytes\": {}, \"transfer_bytes\": {}, \"listed_sectors\": {}, \"short_sectors\": {}, \"reserved_bytes\": {}, \"needed_bytes\": {}, \"available_bytes\": {}}}",
+                t.copy_bytes,
+                t.log_bytes,
+                p.unshare,
+                t.unshare_bytes,
+                t.transfer_bytes,
+                t.sectors.len(),
+                t.short_sectors,
+                t.extra_bytes,
+                t.needed(),
+                p.available_bytes
+            ),
+            r.to_string(),
+            "null".to_string(),
+        ),
+        Err(e) => ("null".to_string(), "null".to_string(), json_str(e)),
+    };
     let vols: Vec<String> = p
         .volumes
         .iter()
@@ -68,7 +91,7 @@ pub fn json(p: &Plan, t: &TargetSpace, resources: &str) -> String {
         })
         .collect();
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {{\"copy_bytes\": {}, \"log_bytes\": {}, \"unshare\": {}, \"unshare_bytes\": {}, \"transfer_bytes\": {}, \"listed_sectors\": {}, \"short_sectors\": {}, \"reserved_bytes\": {}, \"needed_bytes\": {}, \"available_bytes\": {}}},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"classes\": [\n    {}\n  ]\n}}\n",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {space},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"estimate_error\": {error},\n  \"classes\": [\n    {}\n  ]\n}}\n",
         p.source_version.name(),
         line_name(p.version_pair.target),
         strings(p.refusals.iter().map(String::as_str)),
@@ -89,22 +112,13 @@ pub fn json(p: &Plan, t: &TargetSpace, resources: &str) -> String {
         p.java.bytes,
         p.java_static.files,
         p.java_static.bytes,
-        t.copy_bytes,
-        t.log_bytes,
-        p.unshare,
-        t.unshare_bytes,
-        t.transfer_bytes,
-        t.sectors.len(),
-        t.short_sectors,
-        t.extra_bytes,
-        t.needed(),
-        p.available_bytes,
         p.treated_pages,
         classes.join(",\n    ")
     )
 }
 
-pub fn table(p: &Plan, t: &TargetSpace) -> String {
+/// `t`: the target space, or why it was not estimated (then the table says so in its place).
+pub fn table(p: &Plan, t: Result<&TargetSpace, &str>) -> String {
     let mut s = format!(
         "version pair: {} -> {}\n",
         p.source_version.name(),
@@ -154,29 +168,34 @@ pub fn table(p: &Plan, t: &TargetSpace) -> String {
         p.lob.orphan_bytes(),
         p.lob.outside_base.len()
     ));
-    let mib = |b: u64| b.div_ceil(1 << 20);
-    s.push_str(&format!(
-        "target space taken at the start: {} MiB byte-copied volumes + {} MiB new log + {} MiB cloned pages unshared ({} sectors listed, {} short) + {} MiB reserved (upper bound of the rest, held until the end: needs {} MiB free); {} MiB free\n",
-        mib(t.copy_bytes),
-        mib(t.log_bytes),
-        mib(t.unshare_bytes),
-        t.sectors.len(),
-        t.short_sectors,
-        mib(t.extra_bytes),
-        mib(t.needed()),
-        mib(p.available_bytes)
-    ));
-    s.push_str(&format!(
-        "unreserved writes ≤ {} MiB: {}LOB and Java files are written outside the space taken at the start; keep that much free of other writers during the run\n",
-        mib(t.extra_bytes),
-        if p.unshare {
-            "sectors taken off the listed ones, a volume expansion, "
-        } else if p.volumes.iter().any(|v| v.copy_method == fastmig_plan::CopyMethod::Clone) {
-            "rewritten pages of the cloned volumes (this filesystem cannot unshare them at the start: not XFS), new B-trees, appended heap pages, "
-        } else {
-            "new B-trees, appended heap pages, "
+    match t {
+        Ok(t) => {
+            let mib = |b: u64| b.div_ceil(1 << 20);
+            s.push_str(&format!(
+                "target space taken at the start: {} MiB byte-copied volumes + {} MiB new log + {} MiB cloned pages unshared ({} sectors listed, {} short) + {} MiB reserved (upper bound of the rest, held until the end: needs {} MiB free); {} MiB free\n",
+                mib(t.copy_bytes),
+                mib(t.log_bytes),
+                mib(t.unshare_bytes),
+                t.sectors.len(),
+                t.short_sectors,
+                mib(t.extra_bytes),
+                mib(t.needed()),
+                mib(p.available_bytes)
+            ));
+            s.push_str(&format!(
+                "unreserved writes ≤ {} MiB: {}LOB and Java files are written outside the space taken at the start; keep that much free of other writers during the run\n",
+                mib(t.extra_bytes),
+                if p.unshare {
+                    "sectors taken off the listed ones, a volume expansion, "
+                } else if p.volumes.iter().any(|v| v.copy_method == fastmig_plan::CopyMethod::Clone) {
+                    "rewritten pages of the cloned volumes (this filesystem cannot unshare them at the start: not XFS), new B-trees, appended heap pages, "
+                } else {
+                    "new B-trees, appended heap pages, "
+                }
+            ));
         }
-    ));
+        Err(e) => s.push_str(&format!("target space and resources: not estimated: {e}\n")),
+    }
     s.push_str(&format!("warnings ({}):\n", p.warnings.len()));
     p.warnings
         .iter()
