@@ -1,4 +1,4 @@
-//! The storage kind of a directory's device: what the default rates and the I/O concurrency are chosen by.
+//! The storage kind of a directory's device: what the device throughput of a phase is chosen by (`bottleneck`).
 //!
 //! Input: none (the cli reads sysfs and picks one, `storage_kind_detect`). Output: [`StorageKind`].
 //! Source: workspace#561 (NVMe, SATA SSD and HDD measured with the same DB; rotational alone cannot tell NVMe from a
@@ -14,7 +14,7 @@ pub enum StorageKind {
     /// A non-rotational device that is not NVMe (SATA or SAS SSD).
     SataSsd,
     /// No block device found behind the path (btrfs and ZFS report an anonymous device, so do tmpfs and network
-    /// filesystems) or sysfs unreadable; its defaults are chosen conservatively (workspace#561).
+    /// filesystems) or sysfs unreadable; it takes the hdd device throughput (workspace#561).
     Unknown,
     /// A rotational device (`queue/rotational` = 1).
     Hdd,

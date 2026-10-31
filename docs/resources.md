@@ -395,7 +395,9 @@ The kind comes from sysfs (`crates/cli/src/storage_kind_detect.rs`, GLOSSARY "�
 
 A partition counts as its disk; device-mapper and md as their slaves. Several devices resolve to one kind in the
 order hdd > unknown > sata-ssd > nvme (one device known to be slow is enough). btrfs and ZFS device lists are not
-followed. unknown takes the hdd rates for the estimate and no device I/O concurrency limit (1번 세션 2026-10-31).
+followed; a loop device counts as sata-ssd (not rotational, no `nvme` name). unknown takes the hdd device throughput.
+So far the kind chooses only the device throughput of the bottleneck classification below; default rates and an I/O
+concurrency limit per kind are not in yet (workspace#561).
 
 Each phase reads and writes on the devices below; its device throughput (`DeviceThroughput`, `bottleneck.rs`) is the
 slowest of the listed kinds, read and write apart (`DeviceThroughput::of`: the one-stream sequential rows of the table

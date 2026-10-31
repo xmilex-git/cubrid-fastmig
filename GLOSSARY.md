@@ -225,7 +225,7 @@ _Avoid_: 쓰레기 파일, 누수 파일
 _Avoid_: 병렬도, 스레드 수
 
 **저장 장치 종류 (storage kind)**:
-한 디렉터리가 놓인 블록 장치의 부류: nvme, sata-ssd, hdd, 또는 판별 실패인 unknown. sysfs로 정한다 — 회전 장치(`queue/rotational` = 1)는 hdd, 이름이 `nvme`로 시작하면 nvme, 나머지 비회전 장치는 sata-ssd. 파티션은 그 디스크로, device-mapper·md는 그 아래 장치 중 가장 느린 것으로 본다. 블록 장치를 찾지 못한 경로(`st_dev` major 0인 btrfs·ZFS·overlay·tmpfs·NFS)는 unknown이고, `plan`에 판별 실패로 보이며 기본값은 보수적으로 고른다. 여러 장치가 섞이면 hdd > unknown > sata-ssd > nvme 순으로 하나를 고른다. 출발 볼륨, 도착 디렉터리, `--spill-dir`(temp)을 따로 판별해 `plan`에 보이고, 기본 처리량과 I/O 동시성이 이것을 따른다([workspace#561](https://github.com/xmilex-git/workspace/issues/561)).
+한 디렉터리가 놓인 블록 장치의 부류: nvme, sata-ssd, hdd, 또는 판별 실패인 unknown. sysfs로 정한다 — 회전 장치(`queue/rotational` = 1)는 hdd, 이름이 `nvme`로 시작하면 nvme, 나머지 비회전 장치는 sata-ssd(loop 장치도 sata-ssd로 판별된다). 파티션은 그 디스크로, device-mapper·md는 그 아래 장치 중 가장 느린 것으로 본다. 블록 장치를 찾지 못한 경로(`st_dev` major 0인 btrfs·ZFS·overlay·tmpfs·NFS)는 unknown이고, `plan`에 판별 실패로 보이며 hdd의 장치 처리량을 쓴다. 여러 장치가 섞이면 hdd > unknown > sata-ssd > nvme 순으로 하나를 고른다. 출발 볼륨, 도착 디렉터리, `--spill-dir`(temp)을 따로 판별해 `plan`에 보이고, 단계별 장치 처리량(병목 판정)이 이것을 따른다. 기본 처리량과 I/O 동시성 상한을 장치 종류별로 두는 것은 아직 없다([workspace#561](https://github.com/xmilex-git/workspace/issues/561)).
 _Avoid_: 디스크 타입, 매체
 
 **메모리 상한 (memory limit)**:

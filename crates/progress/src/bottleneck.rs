@@ -43,6 +43,9 @@ impl DeviceThroughput {
         read: 0.546e9,
         write: 0.464e9,
     };
+    /// shortcut: one stream; 4 or 16 concurrent sequential readers get 53-57 MB/s in all, so a phase of several workers
+    /// reading an HDD moves about a quarter of this and is not classified read-bound (< `BUSY`). Divide by the stream
+    /// count once round 1's per-phase device bytes (workspace#561) show such a phase.
     pub const HDD: DeviceThroughput = DeviceThroughput {
         read: 0.231e9,
         write: 0.229e9,
