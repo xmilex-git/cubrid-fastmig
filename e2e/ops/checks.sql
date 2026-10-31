@@ -6,8 +6,8 @@
 -- Source: G12 workspace#587 (1); T36 workspace#588.
 
 -- tables
-SELECT 'customer', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', CASE WHEN code LIKE 'R%' THEN NULL ELSE id END, code, name, name_n,
-  grade, region, credit, score, ratio, born, created, tz_at, ltz_at, HEX(flags), profile, note))),
+SELECT 'customer', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', CASE WHEN code LIKE 'R%' THEN NULL ELSE id END, code, name, HEX(name_n),
+  HEX(grade), region, credit, score, ratio, born, created, tz_at, ltz_at, HEX(flags), profile, note))),
   SUM(CASE WHEN tags IS NULL THEN 0 ELSE 1 END) FROM app_owner.customer;
 SELECT 'product', COUNT(*), SUM(CAST(0 AS BIGINT) + CRC32(CONCAT_WS('|', id, sku, title, price, weight, active, spec,
   MD5(HEX(BLOB_TO_BIT(image))), MD5(CLOB_TO_CHAR(manual))))) FROM app_owner.product;

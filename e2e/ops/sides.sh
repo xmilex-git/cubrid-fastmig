@@ -119,9 +119,14 @@ round_files() {
 # checks.sql after a scenario step into <side>/check/<step>.out; fails on an error or an index that differs from its heap.
 # Always in CS mode (the Java SP of checks.sql runs in the server's PL process): a stopped server is started around it.
 check() {
-  local name=$1 f=$OUT/$SIDE/check/$1.out was=$UP rc
+  local name=$1 f=$OUT/$SIDE/check/$1.out was=$UP rc checks=$OPS/checks.sql
+  # 11.4 names the trigger view db_trig; db_trigger there is the system class, without trigger_name (workspace#589)
+  if [ "$TV" = 11.4 ]; then
+    checks=$OUT/checks-11.4.sql
+    sed 's/ FROM db_trigger;$/ FROM db_trig;/' "$OPS/checks.sql" >"$checks" || return 1
+  fi
   [ "$was" = 1 ] || start || return 1
-  sql_file -C "$OPS/checks.sql" -N >"$f" && ! grep -q "INDEX!=HEAP" "$f"
+  sql_file -C "$checks" -N >"$f" && ! grep -q "INDEX!=HEAP" "$f"
   rc=$?
   [ "$was" = 1 ] || stop || return 1
   return $rc
