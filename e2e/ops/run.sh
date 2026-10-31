@@ -43,7 +43,9 @@ ROUND_FILES=("$OPS/dml/round.sql")
 case "$LABEL" in 11.2 | 11.3 | 11.4 | develop) ROUND_FILES+=("$OPS/dml/round_synonym.sql") ;; esac
 case "$LABEL" in 11.4 | develop) ROUND_FILES+=("$OPS/dml/round_plcsql.sql") ;; esac
 
-export CUBRID=$INST CUBRID_TMP=$HOME/.fastmig-ops-tmp
+# CUBRID_TMP per port: the PL server socket is $CUBRID_TMP/sp_<db>.sock (pl_comm.c), and two runs of the same DB on
+# other ports would take each other's socket (workspace#589 lanes in parallel)
+export CUBRID=$INST CUBRID_TMP=$HOME/.fastmig-ops-tmp/$PORT
 export PATH=$INST/bin:$PATH LD_LIBRARY_PATH=$INST/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 mkdir -p "$CUBRID_TMP"
 # auto_restart_server=no: the master would revive the server the kill9-recovery step kills and hold the DB before the
