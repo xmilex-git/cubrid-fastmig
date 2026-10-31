@@ -150,7 +150,7 @@ pub struct Plan {
     pub server_passwords: HashMap<Oid, Vec<u8>>,
     /// `<dest>/fastmig/recompile-plcsql.sql`.
     pub recompile_plcsql_sql: String,
-    /// `<dest>/fastmig/recompile-views.sql`; empty unless an older line moves to develop (workspace#599).
+    /// `<dest>/fastmig/recompile-views.sql`; empty unless an older line moves to a newer one (workspace#599, workspace#600).
     pub recompile_views_sql: String,
     /// User views with a statement in `recompile_views_sql`.
     pub recompiled_views: usize,
@@ -703,9 +703,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         let qualified = deferred_indexes(&mapped, line)?;
         let items: Vec<_> = qualified.iter().map(|(c, k)| (*c, k)).collect();
         deferred_sql = deferred_indexes_sql(&items, line).map_err(invalid)?;
-        // an older line derives some view columns with another domain than develop; develop re-checks each spec
-        // against the declared columns and stores its casts, as loaddb's ADD QUERY does (workspace#599)
-        if i.target_line == VersionLine::Develop && line != VersionLine::Develop {
+        // an older line derives some view columns with another domain than the target line (SUM over NUMERIC to
+        // develop, workspace#599; COUNT, INTEGER on 10.2, to 11.4, workspace#600); the target re-checks each spec
+        // against the declared columns and stores its casts, as loaddb's ADD QUERY does
+        if line != i.target_line {
             let views: Vec<(Vec<u8>, Vec<Vec<u8>>)> = mapped
                 .iter()
                 .filter(|c| c.class.class_type == ClassType::Vclass && !c.class.is_system_class())

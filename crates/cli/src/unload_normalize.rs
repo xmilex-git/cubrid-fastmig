@@ -110,6 +110,12 @@ pub fn rules(source: SourceVersion, target: VersionLine) -> Vec<&'static Rule> {
                     .filter(|r| r.name != "auto-increment-11-2"),
             )
             .chain(V11_2_TO_11_4)
+            // 11.4 stores the COUNT casts of a 10.2 view as develop stores its SUM casts (workspace#600)
+            .chain(
+                V11_4_TO_DEVELOP
+                    .iter()
+                    .filter(|r| r.name == "view-column-cast"),
+            )
             .collect(),
         // one line prints alike; a downgrade is out of scope (ADR 0003)
         _ => Vec::new(),

@@ -221,9 +221,10 @@ pub fn plcsql_routines(rows: &[crate::class_rows::Row]) -> Vec<(Vec<u8>, bool)> 
 }
 
 /// `recompile-views.sql`: `ALTER VCLASS [owner].[name] CHANGE QUERY <n> <spec>;` per query spec of every user view, so
-/// the develop engine checks each spec against the view's declared columns again and stores it with
+/// the target engine checks each spec against the view's declared columns again and stores it with
 /// `cast(<column> as <declared domain>)` where its own derivation of the column differs (SUM over NUMERIC(p,s): an
-/// older line derives numeric(38,s), develop numeric without precision). loaddb's `ADD QUERY` on the official path
+/// older line derives numeric(38,s), develop numeric without precision; COUNT: INTEGER on 10.2, BIGINT on 11.4,
+/// workspace#600). loaddb's `ADD QUERY` on the official path
 /// does the same; without it develop's executor finds an output value of another domain than the column
 /// (`qdata_check_output_column`). `CHANGE QUERY` keeps the columns, their comments, the view OID and its grants;
 /// `ALTER VIEW ... AS` would drop the columns and derive them anew. `views` are `(unique name owner.name, specs)`.

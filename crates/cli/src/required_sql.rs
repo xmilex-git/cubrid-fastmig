@@ -28,8 +28,8 @@ pub fn list(plan: &Plan) -> Vec<RequiredSql> {
         RequiredSql {
             file: "recompile-views.sql",
             objects: Some(plan.recompiled_views),
-            until_run: "a query of these views aborts a debug-build develop server (assert in \
-                        qdata_check_output_column); a release build does not check",
+            until_run: "a column of these views returns another domain than declared: a debug-build develop server \
+                        aborts on the query (assert in qdata_check_output_column), 11.4 returns the value uncast",
         },
         RequiredSql {
             file: "deferred-indexes.sql",

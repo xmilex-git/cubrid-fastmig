@@ -40,9 +40,10 @@ not reported as migration defects.
 (`csql -u dba <db> -i <dest>/fastmig/<file>`); a file with nothing to do is not listed (workspace#599):
 
 1. `recompile-plcsql.sql`: recompiles PL/CSQL routines, which run their copied compiled code until then.
-2. `recompile-views.sql` (a source before develop moving to develop): `ALTER VCLASS … CHANGE QUERY` per view spec,
-   so develop stores the column casts loaddb would. Until it runs, a query of such a view aborts a debug-build develop
-   server (assert in `qdata_check_output_column`).
+2. `recompile-views.sql` (a source line older than the target line: before develop to develop, 10.2 to 11.4):
+   `ALTER VCLASS … CHANGE QUERY` per view spec, so the target stores the column casts loaddb would. Until it runs, a
+   view column returns another domain than declared: a query of such a view aborts a debug-build develop server
+   (assert in `qdata_check_output_column`), 11.4 returns the value uncast (`COUNT` as BIGINT, workspace#600).
 3. `deferred-indexes.sql`: builds the function and filter indexes migrate did not build (ADR 0006).
 4. `update-statistics.sql`: `UPDATE STATISTICS ON ALL CLASSES;`.
 
