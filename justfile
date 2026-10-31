@@ -50,6 +50,10 @@ e2e PRISTINE TARGET_VERSION OUT: release
 ops PRISTINE TARGET_VERSION OUT *ROUNDS: release
     bash e2e/ops/run.sh target/release/cubrid-fastmig {{PRISTINE}} {{TARGET_VERSION}} {{OUT}} {{ROUNDS}}
 
+# Long run of the operations scenario, every path both sides at once (e2e/ops/longrun/README.md); needs FASTMIG_LONGRUN_INSTALL, FASTMIG_LONGRUN_PORTS, FASTMIG_OPS_SERVER_CTL.
+ops-longrun OUT: release
+    bash e2e/ops/longrun/run.sh target/release/cubrid-fastmig {{OUT}}
+
 # One lane of the T37 version matrix (e2e/ops-matrix/README.md); needs FASTMIG_OPS_INSTALL, FASTMIG_OPS_PORT, FASTMIG_OPS_SERVER_CTL.
 ops-matrix LANE OUT_ROOT *IDS: release
     bash e2e/ops-matrix/run_lane.sh target/release/cubrid-fastmig {{LANE}} {{OUT_ROOT}} {{IDS}}

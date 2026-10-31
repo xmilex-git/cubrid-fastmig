@@ -205,6 +205,22 @@ _Avoid_: 동등성, 정합성 체크
 조인·집계·서브쿼리·윈도우·문자열/날짜/JSON 함수·파티션 프루닝·다른 사용자 권한을 섞은 읽기 전용 고정 질의. 옮긴 쪽과 공식 경로 쪽에서 같은 질의의 출력을 바이트로 비교한다(parity). 결과 순서는 ORDER BY로 전부 고정하고 DOUBLE 집계는 자리를 맞춘다. 실행 계획은 기록만 하고 비교하지 않는다. TPC-H 22질의와 basedb 질의 30개, `e2e/ops/queries/`(T40 [workspace#595](https://github.com/xmilex-git/workspace/issues/595)).
 _Avoid_: 사용자 쿼리, 샘플 쿼리
 
+**긴 운영 (long run)**:
+옮긴 DB와 공식 경로 DB를 동시에 띄워 운영 시나리오를 밤새 이어 가는 검증. 서버는 kill -9 주기 사이 내내 켜져 있고, 끝에서 restore·PITR을 같은 측의 고정 질의 결과와 비교한다. `e2e/ops/longrun/`이 돌린다(T39 [workspace#594](https://github.com/xmilex-git/workspace/issues/594)).
+_Avoid_: soak, 내구 테스트
+
+**사이클 (cycle)**:
+긴 운영의 한 시간 단위: 정해진 수의 DML 라운드를 시간에 고르게 나눠 돌리고, 통계 갱신·온라인 백업·스냅샷 행을 남긴다. 내용은 라운드 수로만 정해지므로 두 측이 같은 행을 쓴다.
+_Avoid_: 시간대, 라운드(DML 한 번을 뜻한다)
+
+**백업 체인 (backup chain)**:
+레벨 0 백업 하나와 그 뒤 레벨 1·2 증분 백업을 한 디렉터리에 모은 것. 새 레벨 0은 새 디렉터리에 둔다: 같은 디렉터리의 레벨 0은 옛 체인을 덮어써 그 체인 시각으로의 PITR을 막는다.
+_Avoid_: 백업 세트
+
+**PITR 표시 (PITR mark)**:
+긴 운영 중 정한 한 시각(초 단위). 그 직후 쓰기 없이 고정 질의를 남기고, 끝에서 `restoredb -d <그 시각>`의 결과가 그것과 같아야 한다.
+_Avoid_: 복구 지점
+
 ## 볼륨 밖 자산
 
 **볼륨 밖 자산 (out-of-volume asset)**:

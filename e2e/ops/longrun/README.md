@@ -1,0 +1,168 @@
+# e2e/ops/longrun — long run of the operations scenario
+
+The T36 runner ([../README.md](../README.md)) runs the operations scenario for minutes. The **long run** (긴 운영,
+[GLOSSARY.md](../../../GLOSSARY.md)) keeps the migrated DB and the official-path DB up all night under the same paced
+DML and hourly operations, then restores and PITRs both at the end. Ticket: T39
+[workspace#594](https://github.com/xmilex-git/workspace/issues/594); decisions: G12
+[workspace#587](https://github.com/xmilex-git/workspace/issues/587); schedule approved by the map supervisor
+2026-10-31. Runtime check, not a unit test.
+
+Pass, per path: both sides exit 0 — every step as expected, at least `MIN_ARCHIVES` log archives created and
+`MIN_CHECKPOINTS` checkpoints, restore and PITR equal to the state they must reproduce, the restore to before the
+move refused, no error line, assert or core — and every check of the migrated side equals the official side's
+(parity). RSS and volume size per cycle are tabulated side by side (`summary.md`) and judged by the reader: same
+shape, not same numbers.
+
+## Run
+
+```sh
+FASTMIG_LONGRUN_INSTALL=~/optdebug/CUBRID-fastmig-dev FASTMIG_LONGRUN_PORTS="<p1> <p2> <p3> <p4>" \
+FASTMIG_OPS_SERVER_CTL=<workspace>/.agents/skills/cubrid-server-control/scripts/cubrid-server-ctl.sh \
+  taskset -c 0-15 just ops-longrun <out dir>
+# same as: bash e2e/ops/longrun/run.sh target/release/cubrid-fastmig <out dir>
+```
+
+The paths are the rows of [paths.tsv](paths.tsv) (T39: 11.4 clean → develop by the default clone path, develop →
+develop), each on two sides, so four servers run at once, each on its own reflink copy of the install
+(`<out>/installs/<path>-<side>`, its conf overwritten) and its own port. Ports go to the rows in order: row 1
+migrated, row 1 official, row 2 migrated, row 2 official.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FASTMIG_LONGRUN_INSTALL` | required | optdebug develop install (G12 6); only copied |
+| `FASTMIG_LONGRUN_PORTS` | required | two claimed `cubrid_port_id`s per path |
+| `FASTMIG_OPS_SERVER_CTL` | required | the workspace `cubrid-server-control` wrapper |
+| `FASTMIG_LONGRUN_BASEDB_ROOT` | `~/fastmig-basedb` | T1 baseline DBs (basedb/README.md) |
+| `FASTMIG_LONGRUN_PATHS` | all rows | ids of paths.tsv, space-separated |
+| `FASTMIG_LONGRUN_CYCLES` | `8` | cycles (≥ 8 hours at the default length) |
+| `FASTMIG_LONGRUN_ROUNDS` | `20` | DML rounds per cycle |
+| `FASTMIG_LONGRUN_CYCLE_SECONDS` | `3600` | length of a cycle |
+| `FASTMIG_LONGRUN_KILL_EVERY` | `4` | every this many cycles: kill -9, vacuumdb, restart, a new backup chain |
+| `FASTMIG_LONGRUN_PITR_CYCLE` | cycles − 2 | the cycle whose end holds the PITR mark |
+| `FASTMIG_LONGRUN_MIN_ARCHIVES` | `50` | archives a side must create after the move |
+| `FASTMIG_LONGRUN_MIN_CHECKPOINTS` | `100` | checkpoints a side must complete, over all its server lifetimes |
+| `FASTMIG_LONGRUN_STAT_SECONDS` | `60` | window of the statdump in each snapshot (§ One side, Counters) |
+| `FASTMIG_LONGRUN_CAP_GB` | `50` | disk cap of the size estimate (§ Disk) |
+| `FASTMIG_LONGRUN_GROWTH_MB` | `2` | MB one DML round adds to a side, for the estimate (§ Disk) |
+| `FASTMIG_LONGRUN_BREAK` | none | `pitr-extra-row`: § Fail-before probe |
+| `FASTMIG_OPS_WORKERS` | `4` | migrate worker limit |
+
+Exit: `0` pass, `1` fail, `2` bad arguments, an existing `<out>`, a non-optdebug or 11.4 install, or the disk gate.
+`<out>/result` is written last, first line `RESULT: OK` or `RESULT: FAILED`.
+
+## One side
+
+`side_loop.sh` prepares the side exactly as the T36 runner (`../sides.sh`: migrate `--verify` → finalize, or createdb →
+loaddb), with `checkpoint_interval=2min` and `log_max_archives=24` added to the conf, and starts the server. Then:
+
+| When | Steps (`<side>/log/<step>.log`, rows of `<path>/<side>/steps.tsv`) |
+|---|---|
+| start | `check-baseline`; `c00-backup` (level 0, chain `chain-c00`); snapshot row 0 |
+| every cycle `cNN` | `cNN-dml`: `ROUNDS` DML rounds spread over the first 80 % of the cycle, then `check-cNN-dml` · `cNN-statistics` (UPDATE STATISTICS) · `cNN-backup` (online `backupdb -C`) · `cNN-snapshot` (row of `hours.tsv`) · sleep to the cycle's end |
+| cycle `PITR_CYCLE` | after the DML: `cNN-pitr-mark`: the PITR mark, a reflink copy of the lob-base into `<side>/pitr-lob`, then `check-pitr-snapshot` |
+| cycle multiple of `KILL_EVERY` | before the backup: `cNN-kill9` (`kill -9` of the server and its `cub_pl`), `cNN-vacuumdb` (`-S`: its boot runs crash recovery, then vacuum), `cNN-compactdb` (first such cycle only), `cNN-start`, `check-cNN-restart` |
+| end | `check-end`, length check, server stop, § End, `deletedb -d` |
+
+The server is never stopped between kill -9 cycles: vacuum is the server's own (G12; map supervisor 2026-10-31), and
+the snapshot records its progress with the RSS.
+
+**Counters.** `cubrid statdump` counts from its own start (it prints zeros when run once), so the snapshot runs
+`statdump -i STAT_SECONDS -c` and keeps the second dump: `Num_vacuum_log_pages_vacuumed` and `..._to_vacuum` over that
+window. Checkpoints are the `Checkpoint finished` lines of the side's server error logs, over every server lifetime.
+The `-1066 Session expired` lines are counted apart (`session_expired`), not as error lines (../README.md § Engine facts).
+
+**Backups.** Level 0 at cycle 0 and every `KILL_EVERY` cycles, each in a new chain directory
+`<side>/backup/chain-cNN`; between them level 1 (odd offset) and level 2 (even offset) into the current chain. One
+directory per chain because a level 0 overwrites the level-0 volume of its directory, which an earlier PITR needs.
+
+**Archives.** The engine deletes archives beyond `log_max_archives` without regard to backups
+(`logpb_remove_archive_logs_exceed_limit`). 24 archives hold about three cycles of log at the default rate; the latest
+restore and the PITR each read at most one cycle past their newest backup.
+
+## End
+
+After `check-end` the server stops and `recovery.sh` restores. Each restore goes into its own empty directory
+`<side>/restore/<probe>` with its own databases.txt (`restoredb -u`), the side's active log and archives copied in
+and a copy of the lob-base, is started there for its checks, stopped and removed at once by its line of `<out>/cleanup/<path>-<side>.sh`, which
+`run.sh` writes before the run with every `rm -rf` path spelled out (house rule: literal paths only). The side's DB is
+not touched. A
+restore over the running directory or over an earlier restore keeps files the backup does not hold, with page LSAs
+newer than the PITR stop: the first smoke asserted in `log_recovery.c:531` that way (official side, 2026-10-31). Results in `<side>/recovery.tsv` (probe, rc, wanted rc, diff rc):
+
+| Probe | restoredb | Must equal |
+|---|---|---|
+| `latest` | `-B` newest chain, up to the end of the log | `check/end.out` |
+| `pitr` | `-B` the chain the mark lies in, `-d <mark>`, then the lob-base copy of the mark put back | `check/pitr-snapshot.out` |
+| `chain0-bktime` | `-B chain-c00 -d backuptime` | `check/baseline.out` (nothing wrote before it) |
+| `before-move` | `-B chain-c00 -d <move − 60 s>` | must fail: the log chain begins at the move |
+| `chain0-next` | `-B chain-c00 -d <cycle 1's backup>` | recorded only (§ Restorable range) |
+
+Each restore directory also gets the side's `<db>_keys` and its `java`, `java_static` directories: restoredb does not
+restore them, and the server needs them where its volumes are. `before-move` and `chain0-next` run after the error
+lines are counted (their refusals are error lines by design); asserts and cores are counted after them. Each restore
+into an empty directory first logs `-551 Unable to locate volume information path file <probe>/db/<db>_vinf` (the
+file it is about to write): those lines are left out of the error lines and kept as `restore_fresh_dir` in faults.tsv.
+
+**LOB files.** They live outside the volumes, the backups and the log, and a round deletes the files of the rows it
+deletes: a PITR to before such a DELETE restores rows whose files are gone ("External file ... was not found", measured
+in the smoke). An operator keeps a file copy of the lob-base for that; the runner copies it at the mark and puts it
+back after the PITR restore. The other probes restore states whose files still exist.
+
+## Restorable range
+
+The migrated DB starts a new log chain at the move, and so does the official DB at its createdb: no restore reaches
+before the move (`before-move`). How far back a restore reaches after the move is bounded by the archives
+`log_max_archives` keeps, not by the backups: `chain0-next` needs the archives of cycle 1, which are deleted once 24
+newer ones exist. The measured rc of both is the documented range (docs/ops-verification.md "Long run").
+
+## Fail-before probe
+
+`FASTMIG_LONGRUN_BREAK=pitr-extra-row` inserts one `region_list` row on both sides right after the PITR mark and before
+its snapshot. The PITR restore stops at the mark and lacks the row, so both sides must fail on `pitr`
+(`recovery/pitr.diff` the one row), while parity stays equal. Run it short (§ Smoke).
+
+## Output
+
+```
+<out>/meta.txt, sides.tsv, summary.md, result
+<out>/installs/<path>-<side>/            install copies (remove by literal path)
+<out>/cleanup/<path>-<side>.sh           the literal rm -rf lines of that side's restored DBs and pitr-lob (generated)
+<out>/<path>/<side>.console              the side process's stdout and stderr
+<out>/<path>/<side>/                     the side's out dir (sides.sh ops_setup); the side's own files one level down:
+<out>/<path>/<side>/steps.tsv            side step seconds rc
+<out>/<path>/<side>/<side>/hours.tsv     one row per cycle: rounds, server pid, RSS, checkpoints, vacuum counters,
+                                         archives (first, last, kept), volume, backup and free /home MB, faults so far
+<out>/<path>/<side>/<side>/times.tsv     moved, backup (cycle, level, chain) and pitr (mark) events
+<out>/<path>/<side>/<side>/{check,log,stat,recovery,server-log}/, length.tsv, recovery.tsv, faults.tsv, cores.txt, rc
+<out>/<path>/<side>/<side>/backup/chain-cNN/   backup chains (remove by literal path)
+<out>/<path>/<side>/<side>/pitr-lob/      the lob-base at the PITR mark; removed by its cleanup line after the PITR probe
+<out>/<path>/<side>/<side>/restore/<probe>/   a restored DB while its checks run; removed by its cleanup line
+<out>/<path>/parity/<check>.diff         migrated against official; empty = same (rows in <out>/<path>/parity.tsv)
+```
+
+## Watching
+
+`<out>/summary.md` is rewritten every minute while any side runs (its mtime is the liveness signal) and holds each
+side's last cycle row. A watcher polls with a bound longer than the whole run (cycles × cycle seconds + 2 h for
+prepare and the end) until `<out>/result` exists, or the `run.sh` process is gone without it (failure), and reads
+`summary.md` each hour.
+
+## Disk
+
+Per side: `grown = pristine + cycles × rounds × GROWTH_MB`, plus `27 × active log` (24 kept archives, the active log
+and two spare), plus `(cycles / KILL_EVERY + 1) × 2 × grown` for the chains, plus `1 × grown` for the one restored DB of § End that exists at a time. Every side added up must stay under
+`FASTMIG_LONGRUN_CAP_GB`, and `/home` must have twice that free, or `run.sh` exits 2. T1 baseline (465 MB, 64 MB log),
+defaults: about 8 GB per side, 32 GB in all (cap 50 GB, map supervisor 2026-10-31). `GROWTH_MB` 2 is an upper estimate of a round's net rows (orders
++1800, items +5400, audit +2000, event_log +1000 × 400 B, with indexes); `hours.tsv` `volume_mb` measures it.
+`deletedb -d` at a side's end removes its volumes, log and the backups its log lists; the older chains and the
+install copies stay in `<out>` for the caller to remove by literal
+path.
+
+## Smoke
+
+Two short cycles, the kill block and every end probe, under 10 minutes for the four sides:
+
+```sh
+FASTMIG_LONGRUN_CYCLES=2 FASTMIG_LONGRUN_ROUNDS=2 FASTMIG_LONGRUN_CYCLE_SECONDS=90 FASTMIG_LONGRUN_KILL_EVERY=2 \
+FASTMIG_LONGRUN_PITR_CYCLE=1 FASTMIG_LONGRUN_STAT_SECONDS=5 FASTMIG_LONGRUN_MIN_ARCHIVES=0 FASTMIG_LONGRUN_MIN_CHECKPOINTS=0 ... just ops-longrun <out>
+```
