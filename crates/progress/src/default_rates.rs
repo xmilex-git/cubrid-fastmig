@@ -85,7 +85,7 @@ pub const FSYNC_BYTES_HDD: DefaultRate = DefaultRate {
 
 /// The writes a run waits for, as a share of the target's write probe (`write_probe` in the cli, GLOSSARY "쓰기 실측"):
 /// the clone ranges' fdatasync (open-sources' second part) per byte of the ranges, the durable-sync pass per byte the run
-/// wrote after them (workspace#606). Fitted on the large DBs, cold, 16 workers (workspace#606 matrix of c76a9b5, 4 runs
+/// wrote after them (workspace#606). Fitted on the large DBs, cold, 16 workers (workspace#606 matrix of 1ebdc76, 4 runs
 /// per device): the ranges' sync over the probe ran 0.61-0.74 on the HDD and 0.98-1.11 on the SATA SSD; the pass 0.87-1.0
 /// (11.4 source) and 1.34-1.46 (develop source, part of its writes flushed before the pass) on the HDD, 1.04-1.31 on the
 /// SATA SSD, 1.43-1.65 on NVMe. The probe itself ran 165-182 MB/s, 244-394 MB/s and 2.2-2.5 GB/s there. Judged on new

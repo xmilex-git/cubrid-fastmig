@@ -476,7 +476,7 @@ ETA +55..+150% until the fsync ran (rootless podman with `/sys/block` and `/sys/
 workers). So migrate measures the target instead (`crates/cli/src/write_probe.rs`, GLOSSARY "쓰기 실측"): at the start
 of the precheck, `O_DIRECT` 1 MiB blocks into an `O_TMPFILE` file in the target directory for 1 s or 512 MiB, then one
 `fdatasync`; the rate is the bytes over the whole time. The fdatasync waits for the drive's write cache, so the rate is
-the medium's. The clone ranges and the fsync take 0.55 and 0.95 of it (`default_rates::*_OF_WRITE_PROBE`); the
+the medium's. The clone ranges and the fsync take 0.7 and 1.0 of it (`default_rates::*_OF_WRITE_PROBE`, refitted in 87ce6cc); the
 byte copy keeps its source kind's default, or the precheck's source read rate when that is faster (the precheck is
 often CPU-bound, so that rate is only a floor). A probe that cannot run leaves the kind's defaults. plan.json shows it
 as `storage.target_write_probe`. Only an unknown target is probed: a known kind keeps its defaults (workspace#606 plan
@@ -489,7 +489,7 @@ SATA SSD).
 | SATA SSD (MZ7L33T8) | 266 / 500 / 483 MB/s | 1.0 | 464 MB/s |
 | HDD (ST12000NM000J, write cache on) | 219 / 221 / 190 MB/s | 1.02-1.27 | 229 MB/s |
 
-With the probe (1d51157), the large DBs, cold, CPUs 16-31, two runs per cell, every run rc 0 (workspace#603; start =
+With the probe (807b508 before its two fixes, never merged as such), the large DBs, cold, CPUs 16-31, two runs per cell, every run rc 0 (workspace#603; start =
 start estimate / actual, worst = the worst ETA error of the 2 s progress lines from 10 s on and after the precheck):
 
 | cell | detected: start, worst | unknown (container): start, worst | unknown before: start, worst |
@@ -505,6 +505,15 @@ The probe there: NVMe 2.34-2.52 GB/s in 0.21-0.23 s, HDD 178-182 MB/s in 1.17-1.
 same detected or not: the durable-sync counter moves only when one file's fsync returns, so a 536 MB volume's ~8 s
 fsync on the HDD inflates the ETA by up to +29% (workspace#606); and in B the index build reads the HDD heaps
 (read-bound, 43.5 s) under a cpu prior, so its first two samples run −20..−31%.
+
+Since then (cubrid-fastmig b5b5a4d, workspace#606): durable-sync and open-sources' fdatasync count on one scale
+(`fastmig_copy::sync_progress`: the clean share at once, the dirty share as `/proc/meminfo` Dirty + Writeback fall;
+counter idle at most 1.0 s on the HDD, was 12-16 s); durable-sync's amount is the bytes written after the clone
+ranges; only an unknown target is probed; the bottleneck rule lets reads outweigh a CPU share under `SATURATED`
+(the SATA SSD's pair count, § bottleneck in `bottleneck.rs`); `FSYNC_BYTES_SATA_SSD` is 290 MB/s. Final runs:
+workspace#606 comments 6559416355 (unknown cells), 6560906702 and 6561140293 (detected cells). Left open: the B HDD
+index build's first samples (workspace#607); the SATA SSD under an unknown kind (one probe stream, start 1.19, −18.2%
+at 25 s) and the index build's tail on SATA and NVMe (keys at 85-95% with 4-5 s left) (workspace#608).
 
 A byte phase also corrects the write factor when its defaults were far off: an ended phase counts once it ran
 `MIN_SAMPLE_S` or its defaults gave it that long, and a phase with a storage prior keeps it while it moved bytes at
