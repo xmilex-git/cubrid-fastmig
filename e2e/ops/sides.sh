@@ -167,14 +167,14 @@ last_archive() {   # number of the newest log archive of this side, -1 when none
   ls "$SIDE_DB" 2>/dev/null | sed -n "s/^${DB}_lgar\([0-9][0-9]*\)\$/\1/p" | sort -n | tail -1 | awk '{ n = $1 + 0 } END { print NR ? n : -1 }'
 }
 
-# prepare_migrated: reflink copy -> migrate --verify -> the SQL migrate leaves for the user (as e2e/run.sh)
+# prepare_migrated: reflink copy -> migrate --check -> the SQL migrate leaves for the user (as e2e/run.sh)
 prepare_migrated() {
   local src=$OUT/migrated/source
   cp -a --reflink=always "$PRISTINE" "$src" || return 1
   printf '%s\t%s\tlocalhost\t%s\tfile:%s\n' "$DB" "$src" "$src" "${FASTMIG_OPS_LOB_BASE:-$src/lob}" >"$OUT/migrated/src-dbs/databases.txt"
-  "$BIN" migrate "$DB" --dest "$SIDE_DB" --target-version "$TV" --volumes-in-first-dir \
+  "$BIN" migrate "$DB" -F "$SIDE_DB" --target-version "$TV" --volumes-in-first-dir \
     --source-databases-txt "$OUT/migrated/src-dbs/databases.txt" --target-databases-txt "$CUBRID_DATABASES/databases.txt" \
-    --workers "$W" --verify --progress plain || return 1
+    -t "$W" --check --progress plain || return 1
   grep -q "^$DB[[:space:]]" "$CUBRID_DATABASES/databases.txt" || { echo "target not registered"; return 1; }
   local f
   for f in recompile-plcsql recompile-views deferred-indexes update-statistics; do

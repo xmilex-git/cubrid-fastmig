@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One fixture of the old-source edge cases through both paths, each checked on develop (workspace#554):
-#   fastmig:  plan -> migrate --verify -> <f>4* checks -> post-migration-fixes.sql -> <f>4* checks again
+#   fastmig:  plan -> migrate --check -> <f>4* checks -> post-migration-fixes.sql -> <f>4* checks again
 #   official: source unloaddb -> develop loaddb -u dba (10.2: --no-user-specified-name) -> <f>4* checks
 #   bash run.sh <fixture: m|s|t|d> <label: 10.2|11.2|11.3> <source install> <develop install> <cubrid-fastmig bin> <out dir>
 # The develop install should be an optdebug build (the checks then double as the assert smoke). Every step runs in
@@ -43,13 +43,13 @@ for f in "$here/$fx"[0-3]*.sql; do as_user "$sdb" "$f" "$out/source"; done
 
 # fastmig path: the source is this run's own DB, so its _vinf already names its own directory
 use "$dev" "$out/db-src"
-"$bin" plan "$sdb" --dest "$out/fastmig/plan-dest" --target-databases-txt "$out/db-fm/databases.txt" \
+"$bin" plan "$sdb" -F "$out/fastmig/plan-dest" --target-databases-txt "$out/db-fm/databases.txt" \
   > "$out/fastmig/plan.out" 2>&1
 echo "plan rc=$?" >> "$out/fastmig/plan.out"
 if tail -1 "$out/fastmig/plan.out" | grep -q 'rc=0'; then
   touch "$out/db-fm/databases.txt"
-  "$bin" migrate "$sdb" --dest "$out/db-fm/$sdb" --target-databases-txt "$out/db-fm/databases.txt" --verify \
-    --workers 4 --progress none > "$out/fastmig/migrate.out" 2>&1
+  "$bin" migrate "$sdb" -F "$out/db-fm/$sdb" --target-databases-txt "$out/db-fm/databases.txt" --check \
+    -t 4 --progress none > "$out/fastmig/migrate.out" 2>&1
   echo "migrate rc=$?" >> "$out/fastmig/migrate.out"
   use "$dev" "$out/db-fm"
   if grep -q "^$sdb[[:space:]]" "$out/db-fm/databases.txt"; then

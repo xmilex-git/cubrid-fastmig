@@ -26,17 +26,17 @@ fastmig_tc_migrate_one() {
   ( cd "$d" && CUBRID_DATABASES="$FASTMIG_TC_SOURCE_DBS" "$CUBRID/bin/cubrid" unloaddb -S -O "$d/source-unload" "$db" ) \
     >"$d/source-unload.log" 2>&1
   r_su=$?
-  # --verify: the verifier runs on target and source, and only a target without migration defects is registered
-  # (ADR 0015); its report is <dest>/fastmig/verify.jsonl
-  "$FASTMIG_TC_BIN" migrate "$db" --dest "$d/volumes" --workers 4 --progress plain --verify \
+  # --check: the verifier runs on target and source, and only a target without migration defects is registered
+  # (ADR 0015); its report is <dest>/fastmig/check.jsonl
+  "$FASTMIG_TC_BIN" migrate "$db" -F "$d/volumes" -t 4 --progress plain --check \
     --source-databases-txt "$FASTMIG_TC_SOURCE_DBS/databases.txt" \
     --target-databases-txt "$FASTMIG_TC_TARGET_DBS/databases.txt" \
     >"$d/migrate.log" 2>&1
   r_mi=$?
   # 0 = the report's summary counts 0 migration defects, 1 = some, 2 = no report
   r_ve=2
-  if [ -f "$d/volumes/fastmig/verify.jsonl" ]; then
-    /usr/bin/grep -q '"kind":"summary","migration":0,' "$d/volumes/fastmig/verify.jsonl" && r_ve=0 || r_ve=1
+  if [ -f "$d/volumes/fastmig/check.jsonl" ]; then
+    /usr/bin/grep -q '"kind":"summary","migration":0,' "$d/volumes/fastmig/check.jsonl" && r_ve=0 || r_ve=1
   fi
   # csql -i goes on after a failed statement and exits 0, so an ERROR in its output fails the step (workspace#555)
   for f in recompile-plcsql.sql recompile-views.sql deferred-indexes.sql update-statistics.sql; do

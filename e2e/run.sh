@@ -92,7 +92,7 @@ printf '%s\t%s\tlocalhost\t%s\tfile:%s\n' "$DB" "$SRC" "$SRC" "${FASTMIG_E2E_LOB
 lob_digest() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum); }
 [ -z "${FASTMIG_E2E_LOB_BASE:-}" ] || step lob-base-before 0 lob_digest "$FASTMIG_E2E_LOB_BASE"
 find "$SRC" -maxdepth 1 -type f ! -name '*_lgar*' -exec cat {} + >/dev/null   # warm, as the baseline runs
-common=(--dest "$TGT" --target-version "$TV" --volumes-in-first-dir
+common=(-F "$TGT" --target-version "$TV" --volumes-in-first-dir
   --source-databases-txt "$OUT/src-dbs/databases.txt" --target-databases-txt "$OUT/dbs/databases.txt")
 
 # 2. plan: exit 1 = refused, the run ends here
@@ -100,14 +100,14 @@ step plan 0 "$BIN" plan "$DB" "${common[@]}" --json
 cp "$OUT/log/plan.log" "$OUT/plan.json"
 [ "$(awk '$1 == "plan" { print $3 }' "$OUT/steps.tsv")" = 0 ] || { echo "plan refused: see log/plan.log" >&2; exit 1; }
 
-# 3. migrate --verify (verify is opt-in, ADR 0015: verifies at its end and registers only a target with 0 migration defects)
-step migrate 0 "${T[@]}" "$BIN" migrate "$DB" "${common[@]}" --workers "$W" --verify --progress plain
+# 3. migrate --check (the check is opt-in, ADR 0015: runs at its end and registers only a target with 0 migration defects)
+step migrate 0 "${T[@]}" "$BIN" migrate "$DB" "${common[@]}" -t "$W" --check --progress plain
 [ -f "$TGT/fastmig/report.json" ] && cp "$TGT/fastmig/report.json" "$OUT/report.json"
 
-# 4. verify the target against the source, and the source alone
-step verify-target 0 "${T[@]}" "$BIN" verify "$TGT/$DB" --source "$SRC/$DB" --workers "$W" \
+# 4. check the target against the source, and the source alone
+step verify-target 0 "${T[@]}" "$BIN" check "$TGT/$DB" --source "$SRC/$DB" -t "$W" \
   --report "$OUT/verify-target.jsonl"
-step verify-source 0 "${T[@]}" "$BIN" verify "$SRC/$DB" --role source --workers "$W" --report "$OUT/verify-source.jsonl"
+step verify-source 0 "${T[@]}" "$BIN" check "$SRC/$DB" --role source -t "$W" --report "$OUT/verify-source.jsonl"
 registered=0
 grep -q "^$DB[[:space:]]" "$OUT/dbs/databases.txt" && registered=1
 
@@ -164,8 +164,8 @@ fi
 # 10. fail-before (#484 (6), (8)): break the target cumulatively; verify must exit 1 after each break
 if [ $registered = 1 ] && [ -n "${FASTMIG_E2E_BREAKER:-}" ]; then
   B=$FASTMIG_E2E_BREAKER
-  brk() { local name=$1; shift; step "break-$name" 0 "$@" && step "verify-broken-$name" 1 "$BIN" verify "$TGT/$DB" \
-    --workers "$W" --report "$OUT/verify-broken-$name.jsonl"; }
+  brk() { local name=$1; shift; step "break-$name" 0 "$@" && step "verify-broken-$name" 1 "$BIN" check "$TGT/$DB" \
+    -t "$W" --report "$OUT/verify-broken-$name.jsonl"; }
   brk leaf-next "$B" leaf-next "$TGT/$DB" "$TGT/${DB}_lgat" app_owner.orders pk_orders_id
   brk drop-entry "$B" drop-entry "$TGT/$DB" "$TGT/${DB}_lgat" app_owner.customer idx_customer_name
   brk drop-row "$B" drop-row "$TGT/$DB" "$TGT/${DB}_lgat" app_owner.customer

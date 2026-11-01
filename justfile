@@ -46,6 +46,10 @@ tc TC_ROOT TC_LIST INSTALL OUT: release
 e2e PRISTINE TARGET_VERSION OUT: release
     bash e2e/run.sh target/release/cubrid-fastmig {{PRISTINE}} {{TARGET_VERSION}} {{OUT}}
 
+# The command-line run (e2e/README.md § Command line): help and exit codes, old names, conf defaults, -i, -r, -d; same environment as e2e.
+e2e-cli PRISTINE OTHER_DEVICE_DIR OUT: release
+    bash e2e/cli/run.sh target/release/cubrid-fastmig {{PRISTINE}} {{OTHER_DEVICE_DIR}} {{OUT}}
+
 # Operations scenario on both sides with parity (e2e/ops/README.md); needs FASTMIG_OPS_INSTALL, FASTMIG_OPS_PORT, FASTMIG_OPS_SERVER_CTL.
 ops PRISTINE TARGET_VERSION OUT *ROUNDS: release
     bash e2e/ops/run.sh target/release/cubrid-fastmig {{PRISTINE}} {{TARGET_VERSION}} {{OUT}} {{ROUNDS}}

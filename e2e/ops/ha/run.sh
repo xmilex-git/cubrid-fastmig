@@ -196,10 +196,10 @@ step src-hb-stop-master 0 hb 0 src stop
 # One node at a time, finalize before the next: at most three DB copies exist at once (both sources and one target).
 migrate_node() {
   local i=$1 d; d=$(nd "$i")
-  local -a common=(--dest "$d/tgt" --target-version develop --volumes-in-first-dir
+  local -a common=(-F "$d/tgt" --target-version develop --volumes-in-first-dir
     --source-databases-txt "$d/src/databases.txt" --target-databases-txt "$d/tgt-dbs/databases.txt")
   "$BIN" plan "$DB" "${common[@]}" --json >"$OUT/log/plan-${H[i]}.json" || return 1
-  "$BIN" migrate "$DB" "${common[@]}" --workers "$W" --verify --progress plain || return 1
+  "$BIN" migrate "$DB" "${common[@]}" -t "$W" --check --progress plain || return 1
   # the SQL migrate leaves for the user (G5), SA in the node under the target install
   local f out; for f in recompile-plcsql recompile-views deferred-indexes update-statistics; do
     [ -f "$d/tgt/fastmig/$f.sql" ] || continue
