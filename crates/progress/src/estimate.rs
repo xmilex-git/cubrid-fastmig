@@ -10,7 +10,8 @@
 //! - a bottleneck's speed factor is measured time / default seconds over the work bound by it so far: the
 //!   observations made before the phases (the precheck's pair count) and every phase that has ended after running
 //!   [`MIN_SAMPLE_S`] or that its defaults gave as long (a running phase's counter may run ahead of its time; a
-//!   short phase is noise unless it ended far sooner than its defaults, workspace#603), each classified by what it used
+//!   short phase is noise unless it ended far sooner than its defaults, workspace#603, and not under [`MIN_ENDED_S`],
+//!   workspace#608), each classified by what it used
 //!   ([`crate::bottleneck`]). A host whose CPU work runs 1.5x slower than the defaults makes the remaining CPU-bound
 //!   phases 1.5x longer, and leaves the I/O-bound ones alone; a bottleneck nothing has been bound by yet keeps its
 //!   default (factor 1); work whose use shows no bottleneck moves no factor;
@@ -34,6 +35,10 @@ use crate::unit::Unit;
 
 /// Seconds a phase must run before its own rate is trusted.
 pub const MIN_SAMPLE_S: f64 = 2.0;
+/// An ended phase shorter than this moves no factor, however long its defaults gave it: a pass that finds its work
+/// already done (a durable-sync whose bytes the kernel wrote back before it began) ends in milliseconds and would read
+/// as a device many times its speed (workspace#608).
+pub const MIN_ENDED_S: f64 = 0.1;
 /// Time constant of the moving average, in seconds.
 const TAU_S: f64 = 3.0;
 /// A speed factor stays within these bounds.
@@ -352,7 +357,7 @@ pub(crate) fn speed_factors(
     // ended phases only: a running phase's counter may run ahead of its time and pull the factor with it. An ended
     // phase counts once it ran MIN_SAMPLE_S or its defaults gave it that long: one that ended far sooner than its
     // defaults (the byte phases at the hdd rates of an unknown device that is fast) is what shows them wrong
-    // (workspace#603)
+    // (workspace#603), unless it ended under MIN_ENDED_S (workspace#608)
     for ph in p
         .phases
         .iter()
@@ -361,6 +366,7 @@ pub(crate) fn speed_factors(
         let el = elapsed(ph, now);
         let pred = done_secs(p, ph);
         if pred > 0.0
+            && el >= MIN_ENDED_S
             && el.max(pred) >= MIN_SAMPLE_S
             && let Some(r) = used(ph, sample_now).and_then(|u| {
                 Bottleneck::classify_with_prior(u, el, p.worker_limit, ph.device, ph.spec.prior)
