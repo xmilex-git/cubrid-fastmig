@@ -68,10 +68,11 @@ use crate::replace_target::{self, ReplacedDatabase};
 use crate::required_sql;
 use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
-use crate::storage_kind_detect::RunStorage;
+use crate::storage_kind_detect::{RunStorage, one_point};
 use crate::target_space::{self, Reservation, TargetSpace};
 use crate::write_probe;
 use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
+use fastmig_index::extent_jobs::ExtentReads;
 use fastmig_index::spill_arena::SpillArena;
 use fastmig_index::temp_disk::TEMP_DISK;
 
@@ -364,6 +365,14 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     let cloned = (plan.volumes.iter()).any(|v| v.copy_method != CopyMethod::Copy);
     if cloned && 2 * rewritten < est.heap_pages() {
         phases[INDEX_BUILD].first_prior = Some(Bottleneck::Read);
+        // the read factor comes from the pair count, which reads an HDD in one stream; several workers' scans seek
+        // between their pages
+        if storage.source_extent_reads() == ExtentReads::OneStream && o.worker_limit > 1 {
+            phases[INDEX_BUILD].rate = one_point(
+                default_rates::INDEX_SCAN_PAGES.with_workers(o.worker_limit)
+                    / default_rates::SCAN_OF_ONE_STREAM_READ,
+            );
+        }
     }
     let progress = Progress::new(
         "migrate",

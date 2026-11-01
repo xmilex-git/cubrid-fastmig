@@ -183,7 +183,7 @@ impl RunStorage {
 
 /// A one-point default rate of a rate measured in this run: leaked once per run (a few bytes), as the default rate
 /// table holds `'static` points.
-fn one_point(rate: f64) -> DefaultRate {
+pub fn one_point(rate: f64) -> DefaultRate {
     DefaultRate {
         points: Box::leak(Box::new([(1, rate)])),
     }

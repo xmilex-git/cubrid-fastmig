@@ -101,6 +101,12 @@ pub const INDEX_SCAN_PAGES: DefaultRate = DefaultRate {
     points: &[(1, 2.45e3), (4, 10.35e3), (16, 43.5e3)],
 };
 
+/// How much slower an index build's scan of cold pages with several workers reads an HDD than the pair count's one
+/// stream in physical order (`ExtentReads::OneStream`, workspace#596), both against their cpu defaults: the large
+/// develop DB, cloned, 16 workers, the scan's slowdown over the pair count's 1.56 / 1.70 (workspace#606 plan B matrix,
+/// b-B-hdd-det; workspace#607). Judged on new cold runs, not on these. One worker reads in one stream too: not applied.
+pub const SCAN_OF_ONE_STREAM_READ: f64 = 1.63;
+
 /// Index build keys written to leaves (the index build's part 1: merge, leaves, upper levels): 73.0 M keys in
 /// the rest of the same runs, about 28.0 / 9.3 / 7.6 s at 1 / 4 / 16 workers.
 pub const TREE_BUILD_KEYS: DefaultRate = DefaultRate {
