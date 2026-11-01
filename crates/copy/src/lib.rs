@@ -16,6 +16,7 @@ pub mod out_of_volume_asset;
 pub mod own_blocks;
 pub mod register_db;
 pub mod source_lock;
+pub mod sync_progress;
 pub mod volinfo;
 pub mod volume_copy;
 pub mod volume_header_transform;

@@ -15,7 +15,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use fastmig_index::extent_jobs::ExtentReads;
-use fastmig_progress::{DefaultRate, DeviceThroughput, PhaseSpec, StorageKind, default_rates};
+use fastmig_progress::{
+    DefaultRate, DeviceThroughput, PhaseSpec, StorageKind, Unit, default_rates,
+};
 
 use crate::write_probe::WriteProbe;
 
@@ -101,38 +103,55 @@ impl RunStorage {
     }
 
     /// `specs` with the byte phases' default rates of the storage they run on (docs/resources.md § Storage kinds):
-    /// - the clone ranges and the fsync from the target's write probe when it ran (workspace#603), else from the
-    ///   target's kind;
-    /// - the byte copy (it writes into the page cache) from the source's kind, or `source_read` (bytes per second the
-    ///   precheck read the source at) when that is faster: the precheck is often CPU-bound, so its read rate is only
-    ///   a floor of what the source reads at (workspace#603);
+    /// - the writes waited for (open-sources' second part, its fdatasync, workspace#606; durable-sync) from the
+    ///   target's write probe when it ran (workspace#603), else from the target's kind;
+    /// - the byte copy into the page cache (volume-copy; open-sources' first part) from the source's kind, or
+    ///   `source_read` (bytes per second the precheck read the source at) when that is faster: the precheck is often
+    ///   CPU-bound, so its read rate is only a floor of what the source reads at (workspace#603);
     /// - unknown as hdd (workspace#561 round 1).
     pub fn phase_specs(&self, specs: &[PhaseSpec], source_read: Option<f64>) -> Vec<PhaseSpec> {
         use StorageKind::*;
         let (s, t) = (self.source.kind, self.target.kind);
         let probe = self.target_write.map(|w| w.rate());
+        // the byte copy into the page cache: volume-copy, and open-sources' first part
+        let copy = match s {
+            Hdd | Unknown => default_rates::COPY_BYTES_HDD,
+            _ => default_rates::COPY_BYTES,
+        };
+        let copy = match source_read {
+            Some(r) if r > copy.with_workers(1) => one_point(r),
+            _ => copy,
+        };
+        // the writes waited for: open-sources' second part (its fdatasync) and durable-sync
+        let (ranges_synced, fsync) = match (probe, t) {
+            (Some(w), _) => (
+                one_point(w * default_rates::CLONED_RANGE_OF_WRITE_PROBE),
+                one_point(w * default_rates::FSYNC_OF_WRITE_PROBE),
+            ),
+            (None, SataSsd) => (
+                default_rates::CLONED_RANGE_BYTES_SATA_SSD,
+                default_rates::FSYNC_BYTES_SATA_SSD,
+            ),
+            (None, Hdd | Unknown) => (
+                default_rates::CLONED_RANGE_BYTES_HDD,
+                default_rates::FSYNC_BYTES_HDD,
+            ),
+            (None, Nvme) => (
+                default_rates::CLONED_RANGE_BYTES,
+                default_rates::FSYNC_BYTES,
+            ),
+        };
         specs
             .iter()
-            .map(|&p| {
-                let rate = match (p.name, t, s) {
-                    ("open-sources", _, _) if probe.is_some() => {
-                        one_point(probe.unwrap_or(0.0) * default_rates::CLONED_RANGE_OF_WRITE_PROBE)
-                    }
-                    ("durable-sync", _, _) if probe.is_some() => {
-                        one_point(probe.unwrap_or(0.0) * default_rates::FSYNC_OF_WRITE_PROBE)
-                    }
-                    ("open-sources", SataSsd, _) => default_rates::CLONED_RANGE_BYTES_SATA_SSD,
-                    ("open-sources", Hdd | Unknown, _) => default_rates::CLONED_RANGE_BYTES_HDD,
-                    ("volume-copy", _, Hdd | Unknown) => default_rates::COPY_BYTES_HDD,
-                    ("durable-sync", SataSsd, _) => default_rates::FSYNC_BYTES_SATA_SSD,
-                    ("durable-sync", Hdd | Unknown, _) => default_rates::FSYNC_BYTES_HDD,
-                    _ => p.rate,
-                };
-                let rate = match (p.name, source_read) {
-                    ("volume-copy", Some(r)) if r > rate.with_workers(1) => one_point(r),
-                    _ => rate,
-                };
-                PhaseSpec { rate, ..p }
+            .map(|&p| match p.name {
+                "volume-copy" => PhaseSpec { rate: copy, ..p },
+                "open-sources" => PhaseSpec {
+                    rate: copy,
+                    more: Box::leak(Box::new([(Unit::Bytes, ranges_synced)])),
+                    ..p
+                },
+                "durable-sync" => PhaseSpec { rate: fsync, ..p },
+                _ => p,
             })
             .collect()
     }

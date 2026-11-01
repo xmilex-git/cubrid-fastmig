@@ -31,6 +31,7 @@ use fastmig_catalog::output_sql::UPDATE_STATISTICS_SQL;
 use fastmig_copy::byte_copy::{CopyRange, copy_range};
 use fastmig_copy::incomplete_marker::CREATED_PATHS;
 use fastmig_copy::out_of_volume_asset::{self, AssetOutcome};
+use fastmig_copy::sync_progress::SyncProgress;
 use fastmig_copy::volume_copy::{CHUNK_BYTES, IO_BUF_BYTES, clone_targets, preallocate_targets};
 use fastmig_copy::worker_pool;
 use fastmig_copy::{
@@ -126,10 +127,13 @@ const FLAGS: &[&str] = &[
 /// The run's phases, one per `Report::lap` in `migrate`, in order (GLOSSARY "phase").
 const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("precheck"),
-    PhaseSpec::work(
+    // the clone ranges written into the page cache, then made durable by one fdatasync per volume, counted as the
+    // device writes (workspace#606)
+    PhaseSpec::parts(
         "open-sources",
         Unit::Bytes,
-        default_rates::CLONED_RANGE_BYTES,
+        default_rates::COPY_BYTES,
+        &[(Unit::Bytes, default_rates::CLONED_RANGE_BYTES)],
         Bottleneck::Write,
     ),
     PhaseSpec::work(
@@ -500,6 +504,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         // the rewritten ranges: zeroing a range is one fallocate, not counted
         let pages: u64 = (target.unshare_ranges.iter()).map(|r| r.pages as u64).sum();
         rep.progress.set_total(OPEN_SOURCES, pages * io);
+        rep.progress.set_part_total(OPEN_SOURCES, 1, pages * io);
     }
     rep.lap("precheck");
 
@@ -1054,13 +1059,25 @@ fn take_cloned_ranges(
             )
         })
     })?;
-    // a delayed write error (ENOSPC included) shows here, before the first rewrite of these ranges
-    worker_pool::run(files.len(), worker_limit, |i| {
-        files[i].sync_data().map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("syncing {}: {e}", jobs[i].target.display()),
-            )
+    // a delayed write error (ENOSPC included) shows here, before the first rewrite of these ranges; the phase's
+    // second part counts the ranges' bytes as the device writes them (workspace#606)
+    let mut written = vec![0u64; files.len()];
+    for &(j, start, end, zero) in &tasks {
+        if !zero {
+            written[j] += end - start;
+        }
+    }
+    let synced = meter.part(1);
+    SyncProgress::run(&synced, written.iter().sum(), |progress| {
+        worker_pool::run(files.len(), worker_limit, |i| {
+            files[i].sync_data().map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("syncing {}: {e}", jobs[i].target.display()),
+                )
+            })?;
+            progress.file_synced(written[i]);
+            Ok(())
         })
     })
 }

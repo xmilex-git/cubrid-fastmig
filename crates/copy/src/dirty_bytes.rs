@@ -1,7 +1,7 @@
 //! Bytes the whole system still has to write to its devices: `Dirty` plus `Writeback` of `/proc/meminfo`.
 //!
 //! Input: none. Output: the byte count, or `None` when `/proc/meminfo` cannot be read or lacks the two lines.
-//! Used by `durable` to count the durable-sync phase as the devices write, whoever submitted the writes (the kernel's
+//! Used by `sync_progress` to count a sync pass as the devices write, whoever submitted the writes (the kernel's
 //! flusher writes the run's older dirty pages at the same time, workspace#606). System-wide, so other processes'
 //! writes mix in; the caller only lets its count grow. Every kernel the tool runs on has both lines (RHEL/Rocky 8's
 //! 4.18 too), and reading them needs no privilege.
