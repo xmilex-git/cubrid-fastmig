@@ -86,7 +86,9 @@ cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
   -r, --replace                  replace a database registered under <new-db> in the target databases.txt: its
                                  volumes, logs, _vinf, _dwb and line, and the paths of its fastmig record
                                  (<vol-path>/fastmig/created-paths), are removed before the writes; refused while its
-                                 server is up or when <dir> would still hold other files
+                                 server is up or when <dir> would still hold other files; as copydb -r, the old
+                                 database is gone before the migration writes, so a failed run leaves neither
+                                 the old database nor a new one
   -d, --delete-source            turns on --check; with 0 migration defects the source is deleted at the end as by
                                  finalize (ADR 0008), else it is kept and migrate exits 1
   --check                        run the check after the writes: structure checks as checkdb does, plus a comparison

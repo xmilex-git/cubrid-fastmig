@@ -45,7 +45,8 @@ cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]
   -i, --control-file <file>      target path per volume, copydb's format: `volid source_fullvolname dest_fullvolname`
                                  lines (volumes it does not list go to -F); not with -E
   -r, --replace                  replace a database registered under <new-db> in the target databases.txt: its
-                                 volumes, logs, _vinf, _dwb and line are removed first (refused while its server is up)
+                                 volumes, logs, _vinf, _dwb and line are removed first (refused while its server is up);
+                                 as copydb -r, a failed migrate then leaves neither the old database nor a new one
   --source-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --target-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --source-conf <file>           the source server's cubrid.conf: ignore_trailing_space=yes there turns on the
