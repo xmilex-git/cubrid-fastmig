@@ -7,7 +7,8 @@
 //! factor).
 //! Rule (workspace#560, 1번 세션 decisions 2026-10-30/31): CPU busy share = CPU seconds / (elapsed x workers); at or
 //! above [`BUSY`] the phase is CPU-bound. Otherwise it is bound by the storage side whose byte rate is the larger
-//! share of that device's throughput, if that share is at least [`BUSY`]. A phase that neither kept the CPUs busy nor
+//! share of that device's throughput, if that share is at least [`BUSY`]; a phase with a storage prior keeps it while
+//! that side's share is at least [`BUSY`] (workspace#603). A phase that neither kept the CPUs busy nor
 //! moved bytes near a device's throughput (a clone or unshare on XFS, a wait) is not classified.
 
 use crate::proc_sample::ProcSample;
@@ -120,6 +121,30 @@ impl Bottleneck {
             Some(Bottleneck::Read)
         } else {
             Some(Bottleneck::Write)
+        }
+    }
+
+    /// [`Bottleneck::classify`] of a phase whose prior is `prior`: a storage prior is kept while the phase moved
+    /// bytes on that side at [`BUSY`] of the device's throughput or more, however busy its CPUs were (a byte phase
+    /// with one worker keeps that worker busy copying; with 1 worker and an unknown device the clone ranges showed
+    /// cpu and left the fsync at the hdd rate, workspace#603).
+    pub fn classify_with_prior(
+        used: ProcSample,
+        elapsed_s: f64,
+        workers: usize,
+        device: DeviceThroughput,
+        prior: Bottleneck,
+    ) -> Option<Bottleneck> {
+        let s = elapsed_s.max(1e-9);
+        let share = match prior {
+            Bottleneck::Cpu => 0.0,
+            Bottleneck::Read => used.read_bytes as f64 / s / device.read,
+            Bottleneck::Write => used.write_bytes as f64 / s / device.write,
+        };
+        if share >= BUSY {
+            Some(prior)
+        } else {
+            Bottleneck::classify(used, elapsed_s, workers, device)
         }
     }
 }

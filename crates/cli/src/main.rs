@@ -39,6 +39,7 @@ mod unload_rules_before_11_4;
 mod unload_rules_official;
 mod volume_dirs;
 mod volume_targets;
+mod write_probe;
 
 use std::process::ExitCode;
 

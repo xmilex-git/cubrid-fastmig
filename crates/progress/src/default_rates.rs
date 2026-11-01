@@ -79,6 +79,14 @@ pub const FSYNC_BYTES_HDD: DefaultRate = DefaultRate {
     points: &[(1, 200e6)],
 };
 
+/// The byte phases that write the target, as a share of the target's write probe (`write_probe` in the cli, GLOSSARY
+/// "쓰기 실측"). The probe on the dev host (workspace#603, 3 runs each): NVMe 2.30-2.47 GB/s, SATA SSD 266-500 MB/s, HDD
+/// 190-221 MB/s. Over it, the clone ranges and the fsync of workspace#561 round 1 and #603: NVMe 0.74 and 1.3, SATA SSD
+/// 0.48-0.55 and 0.94, HDD 0.56-0.68 and 0.92-0.96; the lowest but for SATA's clone, so the estimate errs long (on NVMe
+/// by about 1 s; docs/resources.md § Write probe).
+pub const CLONED_RANGE_OF_WRITE_PROBE: f64 = 0.55;
+pub const FSYNC_OF_WRITE_PROBE: f64 = 0.95;
+
 /// Heap pages the index build's scan reads (its first part): the large 11.4 DB (111.4 k pages) in about 43.5 / 10.1 /
 /// 2.2 s and the large develop DB (105.0 k pages) in 44.9 / 10.9 / 2.9 s at 1 / 4 / 16 workers, read from the 2 s
 /// progress lines of workspace#560 pass 2 (CPUs 16-31); the rate is the mean of the two. Pages, not keys: a page

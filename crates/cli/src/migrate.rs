@@ -67,6 +67,7 @@ use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
 use crate::storage_kind_detect::RunStorage;
 use crate::target_space::{self, Reservation, TargetSpace};
+use crate::write_probe;
 use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
 use fastmig_index::spill_arena::SpillArena;
 use fastmig_index::temp_disk::TEMP_DISK;
@@ -272,7 +273,12 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     }
     // the reads inside precheck, timed on their own (workspace#526: what the space and temp figures cost)
     let mut pre: Vec<(&'static str, f64)> = Vec::new();
-    let storage = RunStorage::detect(&src.volume_paths(), &o.plan.target_dir, &o.limits.spill_dir);
+    let mut storage =
+        RunStorage::detect(&src.volume_paths(), &o.plan.target_dir, &o.limits.spill_dir);
+    // before the precheck's reads, so nothing else of the run is on the devices (workspace#603)
+    let t = Instant::now();
+    storage.target_write = write_probe::measure(&o.plan.target_dir);
+    pre.push(("precheck.write_probe", t.elapsed().as_secs_f64()));
     let t = Instant::now();
     let before = ProcSample::now();
     let mut est = resource_estimate::estimate(
@@ -286,8 +292,10 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         storage.source_extent_reads(),
         limits::physical_memory()?,
     )?;
-    pre.push(("precheck.pair_count", t.elapsed().as_secs_f64()));
+    let pair_count_s = t.elapsed().as_secs_f64();
+    pre.push(("precheck.pair_count", pair_count_s));
     let pair_count_used = ProcSample::now().zip(before).map(|(a, b)| a.since(b));
+    let source_read = pair_count_used.map(|u| u.read_bytes as f64 / pair_count_s.max(1e-6));
     pre.push(("precheck.appended_bound", est.appended_seconds));
     let t = Instant::now();
     est.source_groups = check::source_key_groups(
@@ -334,7 +342,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         phases[VERIFIER] = VERIFIER_OLDER_LINE;
     }
     // the byte phases at their storage kind's rates (workspace#561)
-    let phases = storage.phase_specs(&phases);
+    let phases = storage.phase_specs(&phases, source_read);
     let progress = Progress::new(
         "migrate",
         &phases,

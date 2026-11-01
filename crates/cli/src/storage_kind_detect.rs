@@ -15,7 +15,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use fastmig_index::extent_jobs::ExtentReads;
-use fastmig_progress::{DeviceThroughput, PhaseSpec, StorageKind, default_rates};
+use fastmig_progress::{DefaultRate, DeviceThroughput, PhaseSpec, StorageKind, default_rates};
+
+use crate::write_probe::WriteProbe;
 
 /// The storage kind of one directory and the whole disks it was judged by (empty when sysfs had none).
 #[derive(Clone, Debug)]
@@ -43,6 +45,8 @@ pub struct RunStorage {
     pub source: Detected,
     pub target: Detected,
     pub temp: Detected,
+    /// The target directory's write probe, taken by migrate (`None` in plan, or when the probe failed).
+    pub target_write: Option<WriteProbe>,
 }
 
 impl RunStorage {
@@ -65,6 +69,7 @@ impl RunStorage {
             source,
             target: storage_kind(target_dir),
             temp: storage_kind(spill_dir),
+            target_write: None,
         }
     }
 
@@ -95,22 +100,37 @@ impl RunStorage {
             .collect()
     }
 
-    /// `specs` with the byte phases' default rates of the storage they run on: the clone ranges and the fsync on the
-    /// target's kind, the byte copy on the source's (it writes into the page cache); unknown as hdd (docs/resources.md
-    /// § Storage kinds, workspace#561 round 1).
-    pub fn phase_specs(&self, specs: &[PhaseSpec]) -> Vec<PhaseSpec> {
+    /// `specs` with the byte phases' default rates of the storage they run on (docs/resources.md § Storage kinds):
+    /// - the clone ranges and the fsync from the target's write probe when it ran (workspace#603), else from the
+    ///   target's kind;
+    /// - the byte copy (it writes into the page cache) from the source's kind, or `source_read` (bytes per second the
+    ///   precheck read the source at) when that is faster: the precheck is often CPU-bound, so its read rate is only
+    ///   a floor of what the source reads at (workspace#603);
+    /// - unknown as hdd (workspace#561 round 1).
+    pub fn phase_specs(&self, specs: &[PhaseSpec], source_read: Option<f64>) -> Vec<PhaseSpec> {
         use StorageKind::*;
         let (s, t) = (self.source.kind, self.target.kind);
+        let probe = self.target_write.map(|w| w.rate());
         specs
             .iter()
             .map(|&p| {
                 let rate = match (p.name, t, s) {
+                    ("open-sources", _, _) if probe.is_some() => {
+                        one_point(probe.unwrap_or(0.0) * default_rates::CLONED_RANGE_OF_WRITE_PROBE)
+                    }
+                    ("durable-sync", _, _) if probe.is_some() => {
+                        one_point(probe.unwrap_or(0.0) * default_rates::FSYNC_OF_WRITE_PROBE)
+                    }
                     ("open-sources", SataSsd, _) => default_rates::CLONED_RANGE_BYTES_SATA_SSD,
                     ("open-sources", Hdd | Unknown, _) => default_rates::CLONED_RANGE_BYTES_HDD,
                     ("volume-copy", _, Hdd | Unknown) => default_rates::COPY_BYTES_HDD,
                     ("durable-sync", SataSsd, _) => default_rates::FSYNC_BYTES_SATA_SSD,
                     ("durable-sync", Hdd | Unknown, _) => default_rates::FSYNC_BYTES_HDD,
                     _ => p.rate,
+                };
+                let rate = match (p.name, source_read) {
+                    ("volume-copy", Some(r)) if r > rate.with_workers(1) => one_point(r),
+                    _ => rate,
                 };
                 PhaseSpec { rate, ..p }
             })
@@ -123,12 +143,29 @@ impl RunStorage {
     }
 
     pub fn json(&self) -> String {
+        let probe = match self.target_write {
+            Some(w) => format!(
+                "{{\"bytes\": {}, \"seconds\": {:.3}, \"bytes_per_s\": {:.0}}}",
+                w.bytes,
+                w.seconds,
+                w.rate()
+            ),
+            None => "null".to_string(),
+        };
         format!(
-            "{{\"source\": \"{}\", \"target\": \"{}\", \"temp\": \"{}\"}}",
+            "{{\"source\": \"{}\", \"target\": \"{}\", \"temp\": \"{}\", \"target_write_probe\": {probe}}}",
             self.source.kind.name(),
             self.target.kind.name(),
             self.temp.kind.name()
         )
+    }
+}
+
+/// A one-point default rate of a rate measured in this run: leaked once per run (a few bytes), as the default rate
+/// table holds `'static` points.
+fn one_point(rate: f64) -> DefaultRate {
+    DefaultRate {
+        points: Box::leak(Box::new([(1, rate)])),
     }
 }
 

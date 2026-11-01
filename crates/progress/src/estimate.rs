@@ -9,7 +9,8 @@
 //!   over those;
 //! - a bottleneck's speed factor is measured time / default seconds over the work bound by it so far: the
 //!   observations made before the phases (the precheck's pair count) and every phase that has ended after running
-//!   [`MIN_SAMPLE_S`] (a running phase's counter may run ahead of its time), each classified by what it used
+//!   [`MIN_SAMPLE_S`] or that its defaults gave as long (a running phase's counter may run ahead of its time; a
+//!   short phase is noise unless it ended far sooner than its defaults, workspace#603), each classified by what it used
 //!   ([`crate::bottleneck`]). A host whose CPU work runs 1.5x slower than the defaults makes the remaining CPU-bound
 //!   phases 1.5x longer, and leaves the I/O-bound ones alone; a bottleneck nothing has been bound by yet keeps its
 //!   default (factor 1); work whose use shows no bottleneck moves no factor;
@@ -138,7 +139,7 @@ impl PartClock {
     fn classified(&self, k: usize, ph: &Phase, workers: usize) -> Option<Bottleneck> {
         match self.used[k] {
             Some(u) if self.secs[k] >= MIN_SAMPLE_S => {
-                Bottleneck::classify(u, self.secs[k], workers, ph.device)
+                Bottleneck::classify_with_prior(u, self.secs[k], workers, ph.device, ph.spec.prior)
             }
             _ => None,
         }
@@ -262,7 +263,9 @@ pub(crate) fn classified(
 ) -> Option<Bottleneck> {
     let el = elapsed(ph, now);
     match used(ph, sample_now) {
-        Some(u) if el >= MIN_SAMPLE_S => Bottleneck::classify(u, el, workers, ph.device),
+        Some(u) if el >= MIN_SAMPLE_S => {
+            Bottleneck::classify_with_prior(u, el, workers, ph.device, ph.spec.prior)
+        }
         _ => None,
     }
 }
@@ -337,7 +340,10 @@ pub(crate) fn speed_factors(
             predicted[r as usize] += o.predicted_s;
         }
     }
-    // ended phases only: a running phase's counter may run ahead of its time and pull the factor with it
+    // ended phases only: a running phase's counter may run ahead of its time and pull the factor with it. An ended
+    // phase counts once it ran MIN_SAMPLE_S or its defaults gave it that long: one that ended far sooner than its
+    // defaults (the byte phases at the hdd rates of an unknown device that is fast) is what shows them wrong
+    // (workspace#603)
     for ph in p
         .phases
         .iter()
@@ -346,7 +352,10 @@ pub(crate) fn speed_factors(
         let el = elapsed(ph, now);
         let pred = done_secs(p, ph);
         if pred > 0.0
-            && let Some(r) = classified(ph, now, sample_now, p.worker_limit)
+            && el.max(pred) >= MIN_SAMPLE_S
+            && let Some(r) = used(ph, sample_now).and_then(|u| {
+                Bottleneck::classify_with_prior(u, el, p.worker_limit, ph.device, ph.spec.prior)
+            })
         {
             real[r as usize] += el;
             predicted[r as usize] += pred;
