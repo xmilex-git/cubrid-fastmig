@@ -6,6 +6,7 @@
 
 pub mod byte_copy;
 pub mod clone_file;
+pub mod dirty_bytes;
 pub mod durable;
 pub mod incomplete_marker;
 pub mod lob_manifest;
