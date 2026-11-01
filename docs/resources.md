@@ -100,6 +100,9 @@ Inside `--temp-mem-size` (one `MemoryLimit`, grants returned on drop):
   merged into one until the rest fit (`intermediate_merge::bound_open_runs`). Each shard of the final merge holds a worker permit
   and opens at most that many runs, so the merges running at once stay within the merge memory. The verifier does
   the same before its check-2 merges, and gives the merge memory back before its root heap scan.
+- the shards: an index splits into as many as the workers could run (one per 4096 entries), and before each shard a
+  build takes a freed permit for one more thread. The largest index begins first, while every permit is held; it no
+  longer builds its leaves alone after the other builds have ended (workspace#609).
 
 An intermediate merge frees each range of its inputs as soon as it is in a read buffer and takes its output's
 space only as it writes (`SpillCursor::consume`, `SpillOut`): the bytes on disk never exceed the runs before the
