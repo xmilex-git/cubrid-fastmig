@@ -1,7 +1,8 @@
-//! Write probe: the sustained write throughput of the target directory's device, measured at the start of a migrate.
-//! The byte phases that write the target (the clone ranges, the fsync) take their default rates from it instead of
-//! from the storage kind, so a device whose kind is unknown, or faster or slower than its kind, is estimated by what
-//! it does (workspace#603; the storage kind still picks the precheck's read order and is shown in the plan).
+//! Write probe: the sustained write throughput of the target directory's device, measured at the start of a migrate
+//! when the target's storage kind is unknown. The byte phases that write the target (the clone ranges, the fsync) then
+//! take their default rates from it instead of the hdd defaults, so an unknown device is estimated by what it does
+//! (workspace#603). A known kind keeps its own defaults and is not probed: one probe stream underrated the SATA SSD's
+//! writeback, and no one factor fit both the HDD and the SATA SSD (workspace#606 plan B).
 //!
 //! Input: the target directory (it need not exist yet: its nearest existing ancestor is written). Output:
 //! [`WriteProbe`], or `None` when the probe cannot run (no `O_TMPFILE` or `O_DIRECT` on that filesystem, no space,

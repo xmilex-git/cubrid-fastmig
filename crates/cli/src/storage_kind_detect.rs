@@ -47,7 +47,8 @@ pub struct RunStorage {
     pub source: Detected,
     pub target: Detected,
     pub temp: Detected,
-    /// The target directory's write probe, taken by migrate (`None` in plan, or when the probe failed).
+    /// The target directory's write probe, taken by migrate when the target's kind is unknown (`None` in plan, for a
+    /// known kind, or when the probe failed).
     pub target_write: Option<WriteProbe>,
 }
 
@@ -104,7 +105,7 @@ impl RunStorage {
 
     /// `specs` with the byte phases' default rates of the storage they run on (docs/resources.md § Storage kinds):
     /// - the writes waited for (open-sources' second part, its fdatasync, workspace#606; durable-sync) from the
-    ///   target's write probe when it ran (workspace#603), else from the target's kind;
+    ///   target's kind, or from its write probe when the kind is unknown and the probe ran (workspace#603, #606);
     /// - the byte copy into the page cache (volume-copy; open-sources' first part) from the source's kind, or
     ///   `source_read` (bytes per second the precheck read the source at) when that is faster: the precheck is often
     ///   CPU-bound, so its read rate is only a floor of what the source reads at (workspace#603);

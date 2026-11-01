@@ -400,7 +400,7 @@ order hdd > unknown > sata-ssd > nvme (one device known to be slow is enough). b
 followed; a loop device counts as sata-ssd (not rotational, no `nvme` name). unknown takes the hdd device throughput.
 The kind chooses the device throughput of the bottleneck classification below (an HDD's read with the worker count:
 231 MB/s for one worker down to 57 MB/s, the fio streams' total, at 4 and more) and the default rates of the byte
-phases (table below; in migrate the target's byte phases follow the write probe, § Write probe); unknown takes the hdd values. There is no I/O concurrency limit per kind: on the HDD 16 workers
+phases (table below; in migrate an unknown target's byte phases follow the write probe, § Write probe); unknown takes the hdd values. There is no I/O concurrency limit per kind: on the HDD 16 workers
 beat 1 on every path (round 1 below), and the HDD precheck reads in one stream (§ Precheck reads in physical order, workspace#596) (workspace#561).
 
 Each phase reads and writes on the devices below; its device throughput (`DeviceThroughput`, `bottleneck.rs`) is the
@@ -479,7 +479,9 @@ of the precheck, `O_DIRECT` 1 MiB blocks into an `O_TMPFILE` file in the target 
 the medium's. The clone ranges and the fsync take 0.55 and 0.95 of it (`default_rates::*_OF_WRITE_PROBE`); the
 byte copy keeps its source kind's default, or the precheck's source read rate when that is faster (the precheck is
 often CPU-bound, so that rate is only a floor). A probe that cannot run leaves the kind's defaults. plan.json shows it
-as `storage.target_write_probe`.
+as `storage.target_write_probe`. Only an unknown target is probed: a known kind keeps its defaults (workspace#606 plan
+B: one probe stream underrated the SATA SSD's writeback, start 1.27-1.48, and no one factor fit both the HDD and the
+SATA SSD).
 
 | device | probe, 3 runs | probe seconds | fio sequential write 1 MiB |
 |---|---|---|---|

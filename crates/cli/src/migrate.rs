@@ -53,7 +53,9 @@ use fastmig_ondisk::{Oid, SourceVersion, Vsid};
 use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
-use fastmig_progress::{Bottleneck, Meter, PhaseSpec, ProcSample, Progress, Unit, default_rates};
+use fastmig_progress::{
+    Bottleneck, Meter, PhaseSpec, ProcSample, Progress, StorageKind, Unit, default_rates,
+};
 use fastmig_verify::Role;
 
 use crate::args::{CliError, parse};
@@ -279,10 +281,13 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     let mut pre: Vec<(&'static str, f64)> = Vec::new();
     let mut storage =
         RunStorage::detect(&src.volume_paths(), &o.plan.target_dir, &o.limits.spill_dir);
-    // before the precheck's reads, so nothing else of the run is on the devices (workspace#603)
-    let t = Instant::now();
-    storage.target_write = write_probe::measure(&o.plan.target_dir);
-    pre.push(("precheck.write_probe", t.elapsed().as_secs_f64()));
+    // only when the target's kind is unknown: a known kind keeps its defaults (workspace#606 plan B); before the
+    // precheck's reads, so nothing else of the run is on the devices (workspace#603)
+    if storage.target.kind == StorageKind::Unknown {
+        let t = Instant::now();
+        storage.target_write = write_probe::measure(&o.plan.target_dir);
+        pre.push(("precheck.write_probe", t.elapsed().as_secs_f64()));
+    }
     let t = Instant::now();
     let before = ProcSample::now();
     let mut est = resource_estimate::estimate(
