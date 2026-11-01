@@ -5,7 +5,8 @@
 //! engine builds one at a time), workspace#503 (a pool of `--thread-count` threads takes the jobs largest first, no
 //! thread per index). Each build holds one permit for its serial steps and borrows free permits for its parallel
 //! ones (`WorkerLimit::try_acquire`), so builds never wait on each other's parallel steps; once fewer builds than
-//! workers remain, the large ones borrow the idle permits. Their keys are already in memory grants or spill files
+//! workers remain, the large ones borrow the idle permits before each sort run and each leaf shard, also once their
+//! parallel step has begun (workspace#609). Their keys are already in memory grants or spill files
 //! (`IndexRuns`); a build merges within one worker's merge memory per permit it holds (`intermediate_merge`).
 
 use crate::build::{BuiltIndex, IndexJob, build_index};

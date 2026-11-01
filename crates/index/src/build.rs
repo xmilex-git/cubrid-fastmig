@@ -31,6 +31,7 @@ use fastmig_progress::Meter;
 use std::cmp::Ordering;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering as AtOrd};
+use std::thread::Scope;
 use std::time::{Duration, Instant};
 
 /// Entries per extra shard: below this, splitting the leaves costs more than it saves.
@@ -54,30 +55,65 @@ pub struct PhaseTimes {
     pub workers: usize,
 }
 
-/// Runs `job(i)` for `i` in `0..n` on `threads` threads.
+/// Runs `job(i)` for `i` in `0..n` on the calling thread, which holds the build's own permit, and on one more thread
+/// per permit it borrows. A free permit is checked for before every job, so a build that began while every permit was
+/// taken spreads over the permits other builds give back as they end. Without that, the largest index, started first
+/// (LPT) when all builds hold a permit, built its leaves in one shard at about 1.6 M keys/s long after the others
+/// had ended (workspace#609). Returns the threads it ran on.
 fn parallel_for<E: Send>(
-    threads: usize,
+    limit: &WorkerLimit,
     n: usize,
     job: impl Fn(usize) -> Result<(), E> + Sync,
-) -> Result<(), E> {
-    let next = AtomicUsize::new(0);
-    let first_err = Mutex::new(None);
-    std::thread::scope(|s| {
-        for _ in 0..threads.min(n).max(1) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, AtOrd::Relaxed);
-                    if i >= n || first_err.lock().unwrap().is_some() {
-                        break;
-                    }
-                    if let Err(e) = job(i) {
-                        first_err.lock().unwrap().get_or_insert(e);
-                    }
+) -> Result<usize, E> {
+    let pool = BorrowingPool {
+        limit,
+        n,
+        next: AtomicUsize::new(0),
+        threads: AtomicUsize::new(1),
+        first_err: Mutex::new(None),
+        job,
+    };
+    std::thread::scope(|s| pool.work(s));
+    let threads = pool.threads.into_inner();
+    pool.first_err
+        .into_inner()
+        .unwrap()
+        .map_or(Ok(threads), Err)
+}
+
+/// The shared state of one `parallel_for`.
+struct BorrowingPool<'a, E, F> {
+    limit: &'a WorkerLimit,
+    n: usize,
+    next: AtomicUsize,
+    threads: AtomicUsize,
+    first_err: Mutex<Option<E>>,
+    job: F,
+}
+
+impl<E: Send, F: Fn(usize) -> Result<(), E> + Sync> BorrowingPool<'_, E, F> {
+    fn work<'s>(&'s self, s: &'s Scope<'s, '_>) {
+        loop {
+            let i = self.next.fetch_add(1, AtOrd::Relaxed);
+            if i >= self.n || self.first_err.lock().unwrap().is_some() {
+                break;
+            }
+            // more jobs left than threads running: borrow a free permit for one more thread
+            if self.n - i > self.threads.load(AtOrd::Relaxed) {
+                let permit = self.limit.try_acquire(1);
+                if permit.count == 1 {
+                    self.threads.fetch_add(1, AtOrd::Relaxed);
+                    s.spawn(move || {
+                        let _permit = permit;
+                        self.work(s);
+                    });
                 }
-            });
+            }
+            if let Err(e) = (self.job)(i) {
+                self.first_err.lock().unwrap().get_or_insert(e);
+            }
         }
-    });
-    first_err.into_inner().unwrap().map_or(Ok(()), Err)
+    }
 }
 
 /// One index to build: its root, shape, key order, runs, NULL-key rows, and where its pages go.
@@ -119,29 +155,25 @@ pub fn build_index(
     // holds a worker permit, so the shards running at once stay within the merge memory of the workers
     bound_open_runs(&mut runs, order, spill, merge_budget, None)?;
     // spilled runs are sorted already; the in-memory ones sort inside the grant they were collected under
-    let extra = worker_limit.try_acquire(runs.mem.len().saturating_sub(1));
-    let workers = 1 + extra.count;
-    {
+    let workers = {
         let slots: Vec<Mutex<&mut Run>> = runs.mem.iter_mut().map(Mutex::new).collect();
-        parallel_for::<()>(workers, slots.len(), |i| {
+        parallel_for::<()>(worker_limit, slots.len(), |i| {
             slots[i].lock().unwrap().sort(order);
             Ok(())
         })
-        .unwrap();
-    }
-    drop(extra);
+        .unwrap()
+    };
     let t_sort = t0.elapsed();
 
     let t1 = Instant::now();
-    let extra =
-        worker_limit.try_acquire((runs.entries() / MIN_ENTRIES_PER_SHARD).saturating_sub(1));
-    let shard_count = 1 + extra.count;
+    // as many shards as the whole limit runs, whatever is free now: threads join as other builds give permits back
+    let shard_count = (runs.entries() / MIN_ENTRIES_PER_SHARD).clamp(1, worker_limit.limit());
     let splitters = select_splitters(&runs, shard_count, order);
     let bounds = slice_runs(&runs, &splitters, order)?;
     let shard_total = splitters.len() + 1;
     let shards: Vec<Mutex<Option<ShardLeaves>>> =
         (0..shard_total).map(|_| Mutex::new(None)).collect();
-    parallel_for(shard_count, shard_total, |s| {
+    parallel_for(worker_limit, shard_total, |s| {
         let mut cursors = Vec::with_capacity(runs.mem.len() + runs.spilled.len());
         for (run, b) in runs.mem.iter().zip(&bounds.mem) {
             cursors.push(Cursor::Mem {
@@ -163,7 +195,6 @@ pub fn build_index(
         *shards[s].lock().unwrap() = Some(built);
         Ok::<(), BuildError>(())
     })?;
-    drop(extra);
     let shards: Vec<ShardLeaves> = shards
         .into_iter()
         .filter_map(|m| m.into_inner().unwrap())
