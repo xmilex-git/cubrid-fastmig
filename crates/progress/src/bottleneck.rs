@@ -6,10 +6,15 @@
 //! Output: [`Bottleneck`], or `None` when the use shows none (the phase then keeps its prior and moves no speed
 //! factor).
 //! Rule (workspace#560, 1번 세션 decisions 2026-10-30/31): CPU busy share = CPU seconds / (elapsed x workers); at or
-//! above [`BUSY`] the phase is CPU-bound. Otherwise it is bound by the storage side whose byte rate is the larger
-//! share of that device's throughput, if that share is at least [`BUSY`]; a phase with a storage prior keeps it while
-//! that side's share is at least [`BUSY`] (workspace#603). A phase that neither kept the CPUs busy nor
-//! moved bytes near a device's throughput (a clone or unshare on XFS, a wait) is not classified.
+//! above [`SATURATED`], or at or above [`BUSY`] and not below the read share, the phase is CPU-bound. Otherwise it is
+//! bound by the storage side whose byte rate is the larger share of that device's throughput, if that share is at
+//! least [`BUSY`]; a phase with a storage prior keeps it while that side's share is at least [`BUSY`] (workspace#603).
+//! A phase that neither kept the CPUs busy nor moved bytes near a device's throughput (a clone or unshare on XFS, a
+//! wait) is not classified.
+//! Only reads outweigh a CPU share under [`SATURATED`]: a read waits for the device, a write lands in the page cache
+//! (an index build on the HDD wrote at the device's whole throughput, CPU-bound all the same: as long as on NVMe).
+//! The pair count on the dev host SATA SSD kept the CPUs 0.59 busy while it read at 0.90 of the device and ran 1.6x
+//! its NVMe time on the same CPU work: as cpu it made the index build's start estimate 1.6x long (workspace#606).
 
 use crate::proc_sample::ProcSample;
 use crate::storage_kind::StorageKind;
@@ -23,6 +28,10 @@ pub enum Bottleneck {
 
 /// Share of the CPUs or of a device's throughput at or above which a phase counts as bound by it.
 pub const BUSY: f64 = 0.5;
+/// CPU busy share at or above which a phase is CPU-bound whatever its reads: an unknown device is taken at the hdd
+/// throughput, so a fast one shows read shares of 10 and more (the pair count on NVMe: 0.96 busy; on the SATA SSD,
+/// waiting on reads, 0.59; workspace#606).
+pub const SATURATED: f64 = 0.75;
 
 /// Bytes per second a phase's device reads and writes at its best: what its byte rate is compared with.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,7 +122,7 @@ impl Bottleneck {
         let busy = used.cpu_s / (s * workers.max(1) as f64);
         let read = used.read_bytes as f64 / s / device.read;
         let write = used.write_bytes as f64 / s / device.write;
-        if busy >= BUSY {
+        if busy >= SATURATED || (busy >= BUSY && busy >= read) {
             Some(Bottleneck::Cpu)
         } else if read.max(write) < BUSY {
             None

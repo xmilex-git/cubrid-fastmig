@@ -319,7 +319,7 @@ stderr에 내는 단계 진행 상황. 터미널이면 제자리 갱신 화면, 
 _Avoid_: 로그(엔진 로그와 섞인다), 진행 로그
 
 **병목 자원 (bottleneck)**:
-한 단계의 시간을 정하는 자원: cpu, read(장치 읽기), write(장치 쓰기). 고정이 아니다 — 같은 인덱스 빌드가 NVMe에서는 cpu, 디스크에서는 read나 write에 묶인다. 단계는 단계마다 정한 사전값(prior)으로 시작하고, 2초 넘게 돌면 그 사이 쓴 것으로 판정한다: CPU 초 ÷ (경과 × 워커 상한)이 0.5 이상이면 cpu, 아니면 장치 바이트 속도 ÷ 그 장치의 처리량(장치 처리량, 지금은 NVMe 값 하나)이 더 큰 쪽이 0.5 이상일 때 read나 write. 둘 다 아니면(XFS clone·unshare처럼 바이트도 CPU도 적은 일) 판정하지 않고 사전값을 유지하며 속도 계수에도 넣지 않는다. `/proc/self/stat`·`/proc/self/io`를 표시 스레드와 단계 경계에서 읽는다.
+한 단계의 시간을 정하는 자원: cpu, read(장치 읽기), write(장치 쓰기). 고정이 아니다 — 같은 인덱스 빌드가 NVMe에서는 cpu, 디스크에서는 read나 write에 묶인다. 단계는 단계마다 정한 사전값(prior)으로 시작하고, 2초 넘게 돌면 그 사이 쓴 것으로 판정한다: CPU 초 ÷ (경과 × 워커 상한)이 0.75 이상이거나, 0.5 이상이면서 읽기 몫(장치 읽기 속도 ÷ 그 장치의 읽기 처리량) 이상이면 cpu(읽기는 장치를 기다리고 쓰기는 페이지 캐시에 들어가므로 읽기만 덜 바쁜 CPU를 이긴다: SATA SSD에서 pair count가 CPU 0.59, 읽기 0.90으로 읽기를 기다렸다, [workspace#606](https://github.com/xmilex-git/workspace/issues/606)), 아니면 장치 바이트 속도 ÷ 그 장치의 처리량(장치 처리량, 지금은 NVMe 값 하나)이 더 큰 쪽이 0.5 이상일 때 read나 write. 둘 다 아니면(XFS clone·unshare처럼 바이트도 CPU도 적은 일) 판정하지 않고 사전값을 유지하며 속도 계수에도 넣지 않는다. `/proc/self/stat`·`/proc/self/io`를 표시 스레드와 단계 경계에서 읽는다.
 _Avoid_: resource(공간·메모리 예산 `resource_estimate`·plan.json `resources`와 섞인다), 병목 종류, 리소스 타입
 
 **장치 처리량 (device throughput)**:

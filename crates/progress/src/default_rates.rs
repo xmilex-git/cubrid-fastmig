@@ -72,8 +72,12 @@ pub const CLONED_RANGE_BYTES_HDD: DefaultRate = DefaultRate {
 pub const COPY_BYTES_HDD: DefaultRate = DefaultRate {
     points: &[(1, 0.7e9)],
 };
+/// The SATA SSD's fsync refitted when durable-sync came to count the bytes the run wrote after the clone ranges
+/// (workspace#606): the large 11.4 DB, cold, 16 workers, 4 runs of the plan A matrix (cubrid-fastmig f66035e, issue
+/// comment 6559416355) synced 3.74 GB in 12.3-13.3 s; times the write factor open-sources gives under these defaults
+/// (0.94-1.05) that is 266-319 MB/s, mean 291. Judged on new cold runs, not on these.
 pub const FSYNC_BYTES_SATA_SSD: DefaultRate = DefaultRate {
-    points: &[(1, 450e6)],
+    points: &[(1, 290e6)],
 };
 pub const FSYNC_BYTES_HDD: DefaultRate = DefaultRate {
     points: &[(1, 200e6)],

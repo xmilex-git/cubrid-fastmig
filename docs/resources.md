@@ -466,7 +466,7 @@ the byte phases' defaults per kind (from these runs' report.json units per secon
 |---|---|---|---|---|
 | `CLONED_RANGE_BYTES*` | 1.7 GB/s | 250 MB/s | 125 MB/s | target |
 | `COPY_BYTES*` | 3.07 GB/s | 3.07 GB/s | 0.7 GB/s | source (the copy writes into the page cache) |
-| `FSYNC_BYTES*` | 3.0 GB/s | 450 MB/s | 200 MB/s | target |
+| `FSYNC_BYTES*` | 3.0 GB/s | 290 MB/s (450 before workspace#606: durable-sync now counts the bytes written) | 200 MB/s | target |
 
 ### Write probe (workspace#603)
 
