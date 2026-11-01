@@ -515,6 +515,14 @@ workspace#606 comments 6559416355 (unknown cells), 6560906702 and 6561140293 (de
 index build's first samples (workspace#607); the SATA SSD under an unknown kind (one probe stream, start 1.19, −18.2%
 at 25 s) and the index build's tail on SATA and NVMe (keys at 85-95% with 4-5 s left) (workspace#608).
 
+The B HDD index build (cubrid-fastmig c312602, workspace#607): develop -> develop clones the volumes and rewrites 173
+of the 104981 heap pages the index build scans, so the scan reads them from the device (28-34 s on the HDD against a
+cpu default of 2.4 s). When the run rewrites fewer than half the pages it scans, the scan part starts at the read
+prior (`PhaseSpec::first_prior`): the pair count's read factor scales it, and the tree build keeps cpu. On a source
+read in one stream (detected HDD) with more than one worker the scan's default is also divided by
+`SCAN_OF_ONE_STREAM_READ` (1.63: 16 workers seek between their pages). B HDD 16 workers: start 0.66-0.71 and first
+index-build sample −28..−34% before; 1.03-1.05 and +5..+7% after (workspace#607 comment 6561591565).
+
 A byte phase also corrects the write factor when its defaults were far off: an ended phase counts once it ran
 `MIN_SAMPLE_S` or its defaults gave it that long, and a phase with a storage prior keeps it while it moved bytes at
 `BUSY` of that device side even with its one worker busy (`Bottleneck::classify_with_prior`).
