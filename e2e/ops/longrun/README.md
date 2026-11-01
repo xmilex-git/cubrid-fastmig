@@ -42,9 +42,9 @@ migrated, row 1 official, row 2 migrated, row 2 official.
 | `FASTMIG_LONGRUN_MIN_ARCHIVES` | `50` | archives a side must create after the move |
 | `FASTMIG_LONGRUN_MIN_CHECKPOINTS` | `100` | checkpoints a side must complete, over all its server lifetimes |
 | `FASTMIG_LONGRUN_STAT_SECONDS` | `60` | window of the statdump in each snapshot (§ One side, Counters) |
-| `FASTMIG_LONGRUN_MAX_ARCHIVES` | `40` | `log_max_archives` of every side (§ One side, Archives) |
+| `FASTMIG_LONGRUN_MAX_ARCHIVES` | `150` | `log_max_archives` of every side (§ One side, Archives) |
 | `FASTMIG_LONGRUN_PREALLOC_MB` | `1536` | size of the volume each side adds before its first backup (§ One side, Volumes) |
-| `FASTMIG_LONGRUN_CAP_GB` | `50` | disk cap of the size estimate (§ Disk) |
+| `FASTMIG_LONGRUN_CAP_GB` | `80` | disk cap of the size estimate (§ Disk) |
 | `FASTMIG_LONGRUN_GROWTH_MB` | `2` | MB one DML round adds to a side, for the estimate (§ Disk) |
 | `FASTMIG_LONGRUN_BREAK` | none | `pitr-extra-row`: § Fail-before probe |
 | `FASTMIG_OPS_WORKERS` | `4` | migrate worker limit |
@@ -92,9 +92,13 @@ with margin. Night runs 1 and 2 (stopped at cycles 3 and 1) ran without this ste
 **Archives.** The engine deletes archives beyond `log_max_archives` without regard to backups
 (`logpb_remove_archive_logs_exceed_limit`), and a restore stops at a missing one (restoredb asks for it, reads EOF from
 the side's stdin and quits). A restore replays the archives from the backup it starts at: the PITR from the chain's
-last backup before the mark (default: cycle 5's level 1 to cycle 6's mark, one cycle), `latest` from the newest
-chain's last backup. 40 archives hold about five cycles at 8 a cycle, and 8 cycles still delete some. The smoke with
-`MAX_ARCHIVES=2` shows a PITR that passes while archives are being deleted (§ Smoke).
+last backup before the mark (default: cycle 5's level 1 to cycle 6's mark), `latest` from the newest chain's last
+backup. The PITR runs at the end, so its archives must survive from that backup to the end of the run: night run 3
+made 14, 18, 23, 26, 30, 33, 37 and 41 archives in cycles 1..8 (the rate rises as the DB grows), about 111 from
+cycle 5's level 1 to the end; 150 keeps them and still deletes the first ~70 of the run. Night run 3 started with 40
+(planned for 8 a cycle) and was raised to 1000 on all four servers at cycle 6 to keep the PITR's archives
+(docs/ops-verification.md "Long run"). The smoke with 3 kept archives shows a PITR that passes while archives are being
+deleted (§ Smoke).
 
 ## End
 
@@ -182,7 +186,7 @@ and start restored DBs on ports already released.
 Per side: `grown = pristine + cycles × rounds × GROWTH_MB`, plus `PREALLOC_MB`, plus `(MAX_ARCHIVES + 3) × active log` (the kept
 archives, the active log and two spare), plus `(cycles / KILL_EVERY + 1) × 2 × grown` for the chains, plus `1 × grown` for the one restored DB of § End that exists at a time. Every side added up must stay under
 `FASTMIG_LONGRUN_CAP_GB`, and `/home` must have twice that free, or `run.sh` exits 2. T1 baseline (465 MB, 64 MB log),
-defaults: about 11.8 GB per side, 47 GB in all (cap 50 GB, map supervisor 2026-10-31). `GROWTH_MB` 2 is an upper estimate of a round's net rows (orders
+defaults: about 18.9 GB per side, 76 GB in all (cap 80 GB). `GROWTH_MB` 2 is an upper estimate of a round's net rows (orders
 +1800, items +5400, audit +2000, event_log +1000 × 400 B, with indexes); `hours.tsv` `volume_mb` measures it.
 `deletedb -d` at a side's end removes its volumes, log and the backups its log lists; the older chains and the
 install copies stay in `<out>` for the caller to remove by literal

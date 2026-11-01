@@ -9,7 +9,7 @@
 #   FASTMIG_LONGRUN_CYCLES (8), FASTMIG_LONGRUN_ROUNDS (30 per cycle), FASTMIG_LONGRUN_CYCLE_SECONDS (3600),
 #   FASTMIG_LONGRUN_KILL_EVERY (4), FASTMIG_LONGRUN_PITR_CYCLE (CYCLES - 2, at least 1), FASTMIG_LONGRUN_MIN_ARCHIVES
 #   (50), FASTMIG_LONGRUN_MIN_CHECKPOINTS (100), FASTMIG_LONGRUN_STAT_SECONDS (60, the statdump window),
-#   FASTMIG_LONGRUN_MAX_ARCHIVES (40, log_max_archives), FASTMIG_LONGRUN_PREALLOC_MB (1536, the volume added before the
+#   FASTMIG_LONGRUN_MAX_ARCHIVES (150, log_max_archives), FASTMIG_LONGRUN_PREALLOC_MB (1536, the volume added before the
 #   first backup),
 #   FASTMIG_LONGRUN_BREAK (pitr-extra-row), FASTMIG_OPS_WORKERS (4).
 # Output: <side out>/steps.tsv, <side out>/<side>/{hours.tsv,times.tsv,length.tsv,recovery.tsv,faults.tsv,rc,check/,
@@ -27,7 +27,7 @@ MIN_ARCHIVES=${FASTMIG_LONGRUN_MIN_ARCHIVES:-50}
 MIN_CHECKPOINTS=${FASTMIG_LONGRUN_MIN_CHECKPOINTS:-100}
 BREAK=${FASTMIG_LONGRUN_BREAK:-}
 STAT_SECONDS=${FASTMIG_LONGRUN_STAT_SECONDS:-60}
-MAX_ARCHIVES=${FASTMIG_LONGRUN_MAX_ARCHIVES:-40}
+MAX_ARCHIVES=${FASTMIG_LONGRUN_MAX_ARCHIVES:-150}   # 150: night run 3 made 14..41 archives a cycle (rising with the DB); the PITR needs ~111 from c05 to the end
 PREALLOC_MB=${FASTMIG_LONGRUN_PREALLOC_MB:-1536}   # 1536: night run 1 grew a side by up to 237 MB in 3 cycles (~700 MB in 8)
 HERE=$(dirname "$(realpath "$0")")
 OPS=$(realpath "$HERE/..")
@@ -45,8 +45,8 @@ ops_setup "$1" "$2" "$3" "$4"
 round_files
 # checkpoint_interval 2min: about 30 checkpoints an hour. log_max_archives MAX_ARCHIVES: the engine deletes archives
 # beyond it without regard to backups (log_page_buffer.c logpb_remove_archive_logs_exceed_limit), so it must hold the
-# log a restore reads past the backup it starts from: the PITR reads from the chain's last backup before the mark
-# (level 0 or 1, restoredb -l) to the mark, at most two cycles (README § Archives)
+# log a restore reads past the backup it starts from, until the restore runs at the end: the PITR's from the chain's last
+# backup before the mark (restoredb -l) to the end of the run, about 111 archives in night run 3 (README § Archives)
 printf 'checkpoint_interval=2min\nlog_max_archives=%s\n' "$MAX_ARCHIVES" >>"$INST/conf/cubrid.conf"
 
 CHAIN=""      # backup chain directory the next level 1 or 2 goes to

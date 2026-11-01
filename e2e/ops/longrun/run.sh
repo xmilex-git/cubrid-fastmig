@@ -6,7 +6,7 @@
 # Input: bash e2e/ops/longrun/run.sh <bin> <out dir>
 # env: FASTMIG_LONGRUN_INSTALL (the optdebug develop install; copied per side, never written), FASTMIG_LONGRUN_PORTS
 #   (four claimed ports, in the order of paths.tsv rows x migrated, official), FASTMIG_OPS_SERVER_CTL (required);
-#   FASTMIG_LONGRUN_BASEDB_ROOT (~/fastmig-basedb), FASTMIG_LONGRUN_CAP_GB (50), FASTMIG_LONGRUN_GROWTH_MB (MB a DML
+#   FASTMIG_LONGRUN_BASEDB_ROOT (~/fastmig-basedb), FASTMIG_LONGRUN_CAP_GB (80), FASTMIG_LONGRUN_GROWTH_MB (MB a DML
 #   round adds to a side, for the size estimate; README § Disk), FASTMIG_LONGRUN_PATHS (ids of paths.tsv, default all),
 #   and side_loop.sh's FASTMIG_LONGRUN_* settings, passed through.
 # Output: <out>/<path>/<side>/ (side_loop.sh's side out dir), <out>/<path>/<side>.console, <out>/<path>/parity/ and
@@ -22,7 +22,7 @@ BASE_INST=$(realpath "${FASTMIG_LONGRUN_INSTALL:?FASTMIG_LONGRUN_INSTALL require
 read -r -a PORTS <<<"${FASTMIG_LONGRUN_PORTS:?FASTMIG_LONGRUN_PORTS required (four ports)}"
 : "${FASTMIG_OPS_SERVER_CTL:?FASTMIG_OPS_SERVER_CTL required}"
 ROOT=$(realpath "${FASTMIG_LONGRUN_BASEDB_ROOT:-$HOME/fastmig-basedb}")
-CAP_GB=${FASTMIG_LONGRUN_CAP_GB:-50}
+CAP_GB=${FASTMIG_LONGRUN_CAP_GB:-80}
 GROWTH_MB=${FASTMIG_LONGRUN_GROWTH_MB:-2}
 HERE=$(dirname "$(realpath "$0")")
 
@@ -38,7 +38,7 @@ mapfile -t ROWS < <(awk -F'\t' -v want="${FASTMIG_LONGRUN_PATHS:-}" 'NR > 1 && (
 # and two spare, every chain at twice the grown DB, and the one restored DB at a time of the end; all sides together under the
 # cap, and twice that free on /home
 cycles=${FASTMIG_LONGRUN_CYCLES:-8} rounds=${FASTMIG_LONGRUN_ROUNDS:-30} every=${FASTMIG_LONGRUN_KILL_EVERY:-4}
-kept=${FASTMIG_LONGRUN_MAX_ARCHIVES:-40} pre=${FASTMIG_LONGRUN_PREALLOC_MB:-1536}
+kept=${FASTMIG_LONGRUN_MAX_ARCHIVES:-150} pre=${FASTMIG_LONGRUN_PREALLOC_MB:-1536}
 est=0
 for r in "${ROWS[@]}"; do
   IFS=$'\t' read -r id pr tv <<<"$r"

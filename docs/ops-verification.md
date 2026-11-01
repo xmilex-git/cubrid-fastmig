@@ -134,3 +134,66 @@ The 11.4-target rows ran before #599's fix, which touches develop targets only. 
   `orderkey ≤ 6,000,000`; rule and procedure in e2e/ops/queries/README.md § TPC-H DB). Rows: orders 1,500,000, lineitem
   899,197, partsupp 1,200,000, part 300,000, customer 1,500,000, supplier 100,000; the 8 FOREIGN KEYs build. Volumes:
   1920 MB built with 11.4.6, 1408 MB with develop. Official side's prepare (loaddb -S) 297 s and 290 s, migrated 60 s and 48 s.
+
+## Long run
+
+T39 [workspace#594](https://github.com/xmilex-git/workspace/issues/594): the migrated DB and the official-path DB kept
+up all night under the same paced DML and hourly operations, then restored and PITRed. Harness and its rules:
+[e2e/ops/longrun/README.md](../e2e/ops/longrun/README.md).
+
+**Intervention during the run (night run 3).** At the end of cycle 6 (2026-11-01 08:46) the lead raised
+`log_max_archives` from 40 to 1000 on all four servers (`SET SYSTEM PARAMETERS`, and in each install copy's conf for
+the cycle 8 restart). Reason: the measured rate (26..33 archives a cycle by then) would have deleted, before the end
+probes, the archives the PITR replays from cycle 5's level 1 backup (07:39:55..58). Archives kept at that moment:
+105..144 (114-dev migrated and official), 103..142 (dev-dev migrated), 104..143 (dev-dev official); the archive filled
+right after that backup is #112, #112, #110, #111, so the PITR's first archive was still there (file times in the
+run's `lead-notes.txt`). Deletion had run from cycle 3 to cycle 6 (oldest kept 0 → 105). All four sides got the same
+value, so parity is unaffected. The harness default is now 150 (README § Archives).
+
+Run: cubrid-fastmig main 830c06a, optdebug develop 682b080b2 (`~/optdebug/CUBRID-fastmig-dev`, libcubrid sha256
+c82ce9d4…), T1 baseline DBs, 2026-11-01 02:51 → 10:44, CPU 0-15 shared with T37 and a TPC-H load. 8 cycles × 3600 s,
+30 DML rounds a cycle (240), checkpoint_interval 2 min, kill -9 + vacuumdb -S + restart at cycles 4 and 8 (compactdb at
+4), level 0 at cycles 0, 4, 8, level 1 at 1 and 5, level 2 at 2, 3, 6, 7, a 1536 MB volume added on each side before
+its first backup, PITR mark at cycle 6. `RESULT: OK`.
+
+| Path | Side | Archives created | Checkpoints | latest | PITR | Parity (15 checks) | Error lines | Asserts | Cores |
+|---|---|---|---|---|---|---|---|---|---|
+| 11.4 clean → develop | migrated | 223 | 236 | equal | equal | equal | 0 | 0 | 0 |
+| 11.4 clean → develop | official | 221 | 236 | equal | equal | | 0 | 0 | 0 |
+| develop → develop | migrated | 220 | 237 | equal | equal | equal | 0 | 0 | 0 |
+| develop → develop | official | 221 | 236 | equal | equal | | 0 | 0 | 0 |
+
+- `latest`: the newest chain (cycle 8's level 0) up to the end of the log equals the checks after cycle 8. `PITR`:
+  chain-c04 at level 1 (cycle 5) with `-d` the mark (08:39:47..50) and the lob-base copied at the mark equals the
+  checks taken right after the mark. Each restore went into its own empty directory (`restoredb -u`).
+- Range probes (recorded): the first chain no longer restores at the end — `chain0-bktime` (`-d backuptime`) and
+  `chain0-next` need archive 0 or 1, deleted by `log_max_archives` before cycle 6; restoredb asks for it, reads EOF and
+  aborts (`LOG FATAL ERROR: log_fetch_from_archive`, one core each, 8 in all, counted as `range_cores`). `before-move`
+  is refused with "… must be after the time … of the specified backup" on every side: no backup holds the DB before the
+  move, so the restorable range starts at the first backup, right after the move, and ends where the kept archives end.
+- `-1066 Session expired` lines (engine, workspace#595 note in e2e/ops/README.md): 54, 45, 81, 16 — counted apart.
+- Volumes stayed the same size all night (1793..1796 MB migrated, 1728 MB official, du): no growth inside a chain.
+
+RSS of each side's `cub_server` (MB, at each cycle's snapshot; restarts at cycles 4 and 8):
+
+| Cycle | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|---|
+| 11.4 → develop migrated | 711 | 902 | 1002 | 1186 | 948 | 1191 | 1363 | 1484 | 1084 |
+| 11.4 → develop official | 717 | 929 | 1003 | 1149 | 939 | 1256 | 1439 | 1600 | 1074 |
+| develop → develop migrated | 718 | 920 | 1033 | 1167 | 951 | 1191 | 1412 | 1469 | 1090 |
+| develop → develop official | 714 | 936 | 1067 | 1188 | 941 | 1263 | 1392 | 1580 | 1078 |
+
+The two sides have the same shape: RSS rises 120..250 MB a cycle above the 512 MB data buffer and does not flatten
+within a 4-hour uptime (cycle 7, 3 h 57 min after the restart: 1.70 / 1.72 GB, almost all private anonymous memory,
+47 threads); a restart brings it back. Not a migration difference; recorded for the engine (memory growth over uptime).
+
+Vacuum: the snapshot's `statdump -i 60 -c` window read 0 for every counter, page fetches included, on every side — a
+measurement fault of the harness, not a vacuum stop. Read-only `vacuumdb --dump -C` at 10:36 (cycle 8): first log page
+vacuum references 907215 (migrated) and 893916 (official), both in the active log, i.e. vacuum keeps up with the log;
+it also reports "Exceeding read threshold (1000 pages) for OID overflow pages" since 06:39 on both sides.
+
+Earlier attempts, kept as evidence in the workspace scratch: night run 1 (stopped at cycle 3: the second level 2 of a
+chain made backupdb ask before overwriting and read EOF — fixed with an answer, 7eb00b1); night run 2 (stopped at cycle
+1: without the pre-sized volume the official side's volume grows inside a chain, and its level 1/2 restores fail by the
+engine defect [workspace#601](https://github.com/xmilex-git/workspace/issues/601) — fixed with the 1536 MB volume,
+830c06a). Up to their stop both had no assert or core and equal parity.
