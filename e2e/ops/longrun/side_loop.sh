@@ -82,7 +82,7 @@ snapshot 0
 
 for ((c = 1; c <= CYCLES; c++)); do
   CYCLE_START=$(date +%s); n=$(printf 'c%02d' "$c")
-  scenario_step "$n-dml" dml_paced
+  scenario_step "$n-dml" dml_paced "$OUT/$SIDE/stat/$n.txt"
   (( c != PITR_CYCLE )) || step "$n-pitr-mark" 0 pitr_mark "$c"
   step "$n-statistics" 0 sql_file -C "$OPS/statistics.sql"
   if (( c % KILL_EVERY == 0 )); then maintenance "$c" || { FAIL=1; echo "$SIDE: server lost in $n" >&2; break; }; fi

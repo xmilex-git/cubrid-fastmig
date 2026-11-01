@@ -209,6 +209,10 @@ DB. The 4.2 GB DB takes 1 round with `FASTMIG_OPS_MIN_ARCHIVES=0` (G12 5).
   migrated: one per csql session that ran a join with a GROUP BY sort (develop 682b080b2 and 11.4.6; T40
   [workspace#595](https://github.com/xmilex-git/workspace/issues/595)). `server-log-summary.tsv` counts them as
   `session_expired` and leaves them out of `error_lines`.
+- **"\*\*\* Exceeding read threshold (1000 pages) for OID overflow pages (OVFP), Since …"** in a vacuum dump is a table
+  header, printed every time even with no rows (monitor_vacuum_ovfp_threshold.cpp `ovfp_threshold_mgr::print`): the rows
+  under it are the indexes where vacuuming one key's object read at least `vacuum_ovfp_check_threshold` (1000) OID
+  overflow pages in the last `vacuum_ovfp_check_duration` (45000 min), "Since" being the server start. Not a fault.
 - **10.2 official path**: 10.2 `unloaddb` → develop or 11.4 `loaddb --no-user-specified-name` fails at the first
   partitioned table owned by a non-DBA user (`ALTER CLASS [event_log] PARTITION BY …`: `Unknown class "dba.event_log"`,
   schema rolled back; the server's lock-hint lookup has no unqualified-name fallback, engine defect measured in

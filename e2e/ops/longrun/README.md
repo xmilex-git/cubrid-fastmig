@@ -70,7 +70,8 @@ the snapshot records its progress with the RSS.
 
 **Counters.** `cubrid statdump` counts from its own start (it prints zeros when run once), so the snapshot runs
 `statdump -i STAT_SECONDS -c` and keeps the second dump: `Num_vacuum_log_pages_vacuumed` and `..._to_vacuum` over that
-window. Checkpoints are the `Checkpoint finished` lines of the side's server error logs, over every server lifetime.
+window. The window opens with the cycle's first DML round; taken at the cycle end (night run 3) it fell on an idle
+server and read 0 on every counter. Checkpoints are the `Checkpoint finished` lines of the side's server error logs, over every server lifetime.
 The `-1066 Session expired` lines are counted apart (`session_expired`), not as error lines (../README.md § Engine facts).
 
 **Backups.** Level 0 at cycle 0 and every `KILL_EVERY` cycles, each in a new chain directory

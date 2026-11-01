@@ -7,14 +7,18 @@
 
 # dml_paced: ROUNDS DML rounds spread over the first 80 % of the cycle, so the server takes writes all hour; round i
 # does not start before CYCLE_START + 0.8 * CYCLE_SECONDS * (i - 1) / ROUNDS. The rows a round writes depend on the
-# round count only (dml/round.sql), so both sides stay comparable whatever the timing.
+# round count only (dml/round.sql), so both sides stay comparable whatever the timing. <stat file>: the cycle's
+# statdump window opens with round 1, so the snapshot's counters see writes (at the cycle end the server is idle).
 dml_paced() {
-  local i at
+  local i at sp rc=0
+  statdump_to "$1" & sp=$!
   for ((i = 1; i <= ROUNDS; i++)); do
     at=$(( CYCLE_START + CYCLE_SECONDS * 8 * (i - 1) / (10 * ROUNDS) ))
     (( at <= $(date +%s) )) || sleep $(( at - $(date +%s) ))
-    dml_rounds 1 || return 1
+    dml_rounds 1 || { rc=1; break; }
   done
+  wait "$sp" || rc=1
+  return "$rc"
 }
 
 # lob_base: the side's lob-base directory, from its databases.txt
@@ -78,12 +82,13 @@ maintenance() {
   step "check-$n-restart" 0 check "$n-restart"
 }
 
-# snapshot <cycle>: one row of <side>/hours.tsv (header in side_loop.sh): the server's RSS, STAT_SECONDS of its vacuum
-# counters, checkpoints, archives, sizes, faults so far; the statdump kept in <side>/stat/
+# snapshot <cycle>: one row of <side>/hours.tsv (header in side_loop.sh): the server's RSS, the vacuum counters of the
+# cycle's statdump (dml_paced took it; cycle 0 has no DML and takes an idle one here), checkpoints, archives, sizes,
+# faults so far; the statdump kept in <side>/stat/
 snapshot() {
   local c=$1 n f pid rss first last a vol bk e a2 co pl se failed
   n=$(printf 'c%02d' "$c"); f=$OUT/$SIDE/stat/$n.txt
-  statdump_to "$f" || return 1
+  [ -s "$f" ] || statdump_to "$f" || return 1
   pid=$(server_pid)
   rss=$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null)
   first=$(ls "$SIDE_DB" | sed -n "s/^${DB}_lgar\([0-9][0-9]*\)\$/\1/p" | sort -n | head -1 | awk '{ print $1 + 0 }')
