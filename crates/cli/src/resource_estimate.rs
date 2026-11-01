@@ -29,6 +29,7 @@ use fastmig_catalog::source_catalog::SourceCatalog;
 use fastmig_catalog::target_classes::{Origin, TargetClass as CatalogClass};
 use fastmig_catalog::template_store::builtin;
 use fastmig_index::IndexDef;
+use fastmig_index::extent_jobs::{ExtentReads, READ_AHEAD};
 use fastmig_index::heap_scan::WORKER_SHARE;
 use fastmig_index::pair_count::{
     PairStats, owner_heap_pages, pair_bytes_and_growth, record_pair_bytes,
@@ -36,6 +37,7 @@ use fastmig_index::pair_count::{
 use fastmig_index::rebuild::{TargetClass, class_constraints, plain_index_defs};
 use fastmig_index::temp_disk::index_batches;
 use fastmig_ondisk::heap_rewrite::{ClassReEncoder, Growth, ReEncode};
+use fastmig_ondisk::page_extents::MAX_EXTENT_BYTES;
 use fastmig_ondisk::volume_set::VolumeSet;
 use fastmig_ondisk::{Oid, SourceVersion, VersionLine};
 use fastmig_plan::version_pair::VersionPair;
@@ -105,6 +107,7 @@ pub fn estimate(
     source: SourceVersion,
     lob_base: Option<&std::path::Path>,
     workers: usize,
+    reads: ExtentReads,
     physical_memory: u64,
 ) -> io::Result<ResourceEstimate> {
     let started = Instant::now();
@@ -130,6 +133,7 @@ pub fn estimate(
                 Rows::Heaps(&HashMap::new(), &skip),
                 pair.target,
                 workers,
+                reads,
             )?
             .0
         }
@@ -181,6 +185,7 @@ pub fn estimate(
                 Rows::Heaps(&re_encoders, &HashSet::new()),
                 pair.target,
                 workers,
+                reads,
             )?;
             let (s, _) = count(
                 vols,
@@ -188,6 +193,7 @@ pub fn estimate(
                 Rows::Records(&records),
                 pair.target,
                 workers,
+                reads,
             )?;
             // the re-encoded classes the pair count did not read (no index) get their own pass
             let t = std::time::Instant::now();
@@ -228,6 +234,7 @@ fn count(
     rows: Rows,
     line: VersionLine,
     workers: usize,
+    reads: ExtentReads,
 ) -> io::Result<(ResourceEstimate, HashMap<Oid, Growth>)> {
     // the keys as the target line builds them (workspace#552)
     let cons = class_constraints(classes, line).map_err(invalid)?;
@@ -246,6 +253,7 @@ fn count(
             vols,
             &refs,
             workers,
+            reads,
             &|oid| re_encoders.get(&oid).map(|r| r as &dyn ReEncode),
             skip,
         ),
@@ -382,7 +390,9 @@ impl ResourceEstimate {
     /// The most RSS a run with `--mem` `mem` is expected to reach: the limit plus what stays outside it (docs/resources.md,
     /// "Memory outside --mem"), fitted from the measured runs as an upper envelope: 12 MiB of buffers, stacks and
     /// allocator, 18 MiB more when the catalog is regenerated, 32 MiB per GiB of pair bytes (run bookkeeping, sample
-    /// keys, leaf summaries) and with `--verify` 24 MiB per GiB of the verifier's source side. Measured, not proven.
+    /// keys, leaf summaries) and with `--verify` 24 MiB per GiB of the verifier's source side, plus the precheck's extent
+    /// buffers, one per worker and `READ_AHEAD` more (`page_extents::MAX_EXTENT_BYTES`, workspace#596: counted, not
+    /// fitted). Measured, not proven.
     pub fn rss_expected_max(&self, mem: u64, verify: bool) -> u64 {
         const MIB: f64 = (1u64 << 20) as f64;
         let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
@@ -395,6 +405,8 @@ impl ResourceEstimate {
                     .as_ref()
                     .map_or(self.temp_max(), |s| s.iter().sum()));
         }
+        // the precheck reads by extents: a buffer per worker, two more read ahead on one stream (workspace#596)
+        outside += ((self.workers + READ_AHEAD) * MAX_EXTENT_BYTES) as f64 / MIB;
         mem + (outside * MIB).ceil() as u64
     }
 

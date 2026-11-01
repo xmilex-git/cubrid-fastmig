@@ -17,8 +17,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use fastmig_index::extent_jobs::{ExtentReads, extent_jobs};
 use fastmig_index::intermediate_merge::{MERGE_FLOOR, bound_open_runs};
 use fastmig_index::job_pool::run_jobs;
 use fastmig_index::memory_limit::MemoryGrant;
@@ -34,7 +36,7 @@ use fastmig_progress::Meter;
 
 use crate::btree_walk::{
     IndexTree, LeafCounts, LeafPairs, OvfPage, ShardEnd, chain_objects, join_shards, leaf_counts,
-    leaf_records, objects_per_record, ovf_page,
+    leaf_records, looks_like_ovf_page, objects_per_record, ovf_page,
 };
 use crate::catalog_refs::{CatalogInput, check_catalog};
 use crate::database::Database;
@@ -736,16 +738,25 @@ pub fn memory_min(heap_pages: usize, workers: usize) -> usize {
         + workers * (MERGE_FLOOR + fastmig_index::heap_scan::SCAN_MIN)
 }
 
+/// Bytes one kept overflow OID page takes in [`index_key_groups`]'s map: key, value and the table's slack.
+const OVF_ENTRY_BYTES: usize = 48;
+
 /// Per plain index of `db`, its class and name (first owner) and what its leaves hold (records, wide records,
 /// objects past a record): the leaves of every tree in one queue of extents in physical order (workspace#526: upper
 /// bounds of the keys and overflow OID chains a rebuild of the live rows makes, the source's index holding every live
 /// row's key; a big tree is no longer one worker's; workspace#596: key order seeks between the leaves of many trees).
-pub fn index_key_groups(db: &Database, workers: usize) -> Vec<(String, String, LeafCounts)> {
+pub fn index_key_groups(
+    db: &Database,
+    workers: usize,
+    memory: usize,
+    reads: ExtentReads,
+) -> Vec<(String, String, LeafCounts)> {
     let x = open_indexes(db, workers);
     let trees: Vec<&IndexTree> = x.trees.values().collect();
     // every page of each tree's file: its leaves, and the rest read for the overflow OID pages the leaf records
-    // chain to (non-leaf pages are read too, never looked up), so the chains resolve from memory instead of one
-    // random read per page (workspace#596)
+    // chain to (non-leaf pages are read through), so the chains resolve from memory instead of one
+    // random read per page (workspace#596); the overflow pages kept stay within `memory`, a chain past them reads
+    // its pages one by one as before
     let mut pages: Vec<(Vpid, (usize, bool))> = Vec::new();
     for (k, t) in trees.iter().enumerate() {
         let leaves: HashSet<Vpid> = t.leaves.iter().map(|(v, _)| *v).collect();
@@ -764,10 +775,17 @@ pub fn index_key_groups(db: &Database, workers: usize) -> Vec<(String, String, L
     let per_record: Vec<usize> = trees.iter().map(|t| objects_per_record(t)).collect();
     let mut out: Vec<LeafCounts> = vec![LeafCounts::default(); trees.len()];
     let mut ovf: HashMap<Vpid, Option<OvfPage>> = HashMap::new();
+    // overflow pages kept: half of `memory` at OVF_ENTRY_BYTES each (the jobs' lists and the map both hold them once)
+    let ovf_cap = memory / (2 * OVF_ENTRY_BYTES);
+    let kept = AtomicUsize::new(0);
     // records with an overflow OID chain: (tree, objects in the leaf, first overflow page)
     let mut chained: Vec<(usize, usize, Vpid)> = Vec::new();
-    for read in run_jobs(workers, extents(pages, io_pagesize), |e| {
-        e.read(&db.vols, |buf| {
+    for read in extent_jobs(
+        &db.vols,
+        workers,
+        reads,
+        extents(pages, io_pagesize),
+        |e, buf| {
             let mut counts: Vec<(usize, LeafCounts)> = Vec::new();
             let mut pages: Vec<(Vpid, Option<OvfPage>)> = Vec::new();
             let mut chains: Vec<(usize, usize, Vpid)> = Vec::new();
@@ -784,7 +802,9 @@ pub fn index_key_groups(db: &Database, workers: usize) -> Vec<(String, String, L
             };
             for (v, page, &(k, leaf)) in e.listed(buf, io_pagesize) {
                 if !leaf {
-                    pages.push((v, ovf_page(page, trees[k].root.is_unique())));
+                    if looks_like_ovf_page(page) && kept.fetch_add(1, Ordering::Relaxed) < ovf_cap {
+                        pages.push((v, ovf_page(page, trees[k].root.is_unique())));
+                    }
                     continue;
                 }
                 let mut c = LeafCounts::default();
@@ -795,8 +815,8 @@ pub fn index_key_groups(db: &Database, workers: usize) -> Vec<(String, String, L
                 counts.push((k, c));
             }
             (counts, pages, chains)
-        })
-    }) {
+        },
+    ) {
         let (counts, pages, chains) = read;
         for (k, c) in counts {
             out[k] += c;

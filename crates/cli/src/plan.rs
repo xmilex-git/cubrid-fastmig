@@ -238,6 +238,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         plan.source_version,
         lob_base_dir(&s.entry).map_err(io::Error::other)?.as_deref(),
         limits::worker_limit(&p)?,
+        storage.source_extent_reads(),
         limits::physical_memory()?,
     ) {
         // the estimate encodes what the run writes, so a class the plan refused (a 10.2 stream with F_BENCHMARK,
@@ -249,7 +250,13 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     let mut plan = plan;
     let space = match est {
         Ok(mut est) => {
-            est.source_groups = verify::source_key_groups(&s, o.locate, est.workers)?;
+            est.source_groups = verify::source_key_groups(
+                &s,
+                o.locate,
+                est.workers,
+                mem,
+                storage.source_extent_reads(),
+            )?;
             if p.switch("--verify") {
                 let (bytes, pages) = verify::source_pair_bytes(&s, o.locate, est.workers)?;
                 est.verify_source = Some(bytes);

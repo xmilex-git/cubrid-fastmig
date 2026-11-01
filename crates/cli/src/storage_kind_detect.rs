@@ -14,6 +14,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use fastmig_index::extent_jobs::ExtentReads;
 use fastmig_progress::{DeviceThroughput, PhaseSpec, StorageKind, default_rates};
 
 /// The storage kind of one directory and the whole disks it was judged by (empty when sysfs had none).
@@ -201,4 +202,15 @@ fn disk_kind(dir: &Path, disks: &mut Vec<String>, depth: usize) -> StorageKind {
     };
     disks.push(name);
     kind
+}
+
+impl RunStorage {
+    /// How the precheck reads the source by extents: one stream on a rotating disk, where parallel reads seek
+    /// against each other; parallel elsewhere, an unknown device included (workspace#596).
+    pub fn source_extent_reads(&self) -> ExtentReads {
+        match self.source.kind {
+            StorageKind::Hdd => ExtentReads::OneStream,
+            _ => ExtentReads::Parallel,
+        }
+    }
 }

@@ -1000,6 +1000,14 @@ pub struct OvfPage {
     pub next: Vpid,
 }
 
+/// Whether page `p` of a B-tree file is laid out as an overflow OID page: its header record is an overflow header
+/// (8 or 16 B), not a node header (28 B before 11.4, 32 B since). Picks the pages worth keeping for chain walks.
+pub fn looks_like_ovf_page(p: &[u8]) -> bool {
+    slotted(p)
+        .and_then(|s| s.record(0))
+        .is_some_and(|(_, h)| h.len() <= OvfHeader::DIR_SIZE)
+}
+
 /// Overflow OID page `p` of a tree (`unique` as its root says); `None` where it is not slotted or has no header,
 /// which ends the chain there.
 pub fn ovf_page(p: &[u8], unique: bool) -> Option<OvfPage> {

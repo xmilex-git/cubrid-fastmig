@@ -13,6 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use fastmig_index::extent_jobs::ExtentReads;
 use fastmig_index::{MemoryLimit, SpillDir, WorkerLimit};
 use fastmig_ondisk::Oid;
 use fastmig_ondisk::databases_txt;
@@ -294,11 +295,14 @@ pub fn run_verifier(
 }
 
 /// What the source's own plain B-trees hold, by (class, index) of their first owner
-/// (`fastmig_verify::run::index_key_groups`): the key groups the target space bound takes (workspace#526).
+/// (`fastmig_verify::run::index_key_groups`): the key groups the target space bound takes (workspace#526). `memory`:
+/// the memory limit, which the precheck has to itself (workspace#596).
 pub fn source_key_groups(
     src: &OpenSource,
     locate: Locate,
     workers: usize,
+    memory: u64,
+    reads: ExtentReads,
 ) -> io::Result<HashMap<(String, String), LeafCounts>> {
     let db = Database::open_with_log(
         &src.entry.first_volume(),
@@ -307,8 +311,13 @@ pub fn source_key_groups(
         Role::Source,
         None,
     )?;
-    Ok(fastmig_verify::run::index_key_groups(&db, workers)
-        .into_iter()
-        .map(|(c, i, n)| ((c, i), n))
-        .collect())
+    Ok(fastmig_verify::run::index_key_groups(
+        &db,
+        workers,
+        usize::try_from(memory).unwrap_or(usize::MAX),
+        reads,
+    )
+    .into_iter()
+    .map(|(c, i, n)| ((c, i), n))
+    .collect())
 }

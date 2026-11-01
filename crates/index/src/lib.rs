@@ -9,6 +9,7 @@ pub mod btree_page;
 pub mod build;
 pub mod build_error;
 pub mod build_many;
+pub mod extent_jobs;
 pub mod fill;
 pub mod heap_keys;
 pub mod heap_scan;

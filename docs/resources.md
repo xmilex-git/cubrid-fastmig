@@ -110,7 +110,9 @@ that keeps few runs open, several rounds.
 
 Outside `--mem`, and why:
 
-- per worker, fixed: the copy engine's I/O buffer, page buffers of the scan and the build (a few pages), thread
+- per worker, fixed: the copy engine's I/O buffer, page buffers of the scan and the build (a few pages), the
+  precheck's extent buffer (`page_extents::MAX_EXTENT_BYTES`, 4 MiB, and two more read ahead on an HDD source,
+  `extent_jobs`, workspace#596; freed when the precheck ends), thread
   stacks; a key longer than a third of the merge memory still merges two runs at a time;
 - per spilled run (more runs at a smaller `--mem`): its descriptor, extents and one sample key per 1024 pairs
   (`spill_run`), its shard bounds;
@@ -399,7 +401,7 @@ followed; a loop device counts as sata-ssd (not rotational, no `nvme` name). unk
 The kind chooses the device throughput of the bottleneck classification below (an HDD's read with the worker count:
 231 MB/s for one worker down to 57 MB/s, the fio streams' total, at 4 and more) and the default rates of the byte
 phases (table below); unknown takes the hdd values. There is no I/O concurrency limit per kind: on the HDD 16 workers
-beat 1 on every path (round 1 below), and the HDD precheck is slow at any worker count (workspace#596) (workspace#561).
+beat 1 on every path (round 1 below), and the HDD precheck reads in one stream (§ Precheck reads in physical order, workspace#596) (workspace#561).
 
 Each phase reads and writes on the devices below; its device throughput (`DeviceThroughput`, `bottleneck.rs`) is the
 slowest of the listed kinds, read and write apart (`DeviceThroughput::of`: the one-stream sequential rows of the table
@@ -455,7 +457,8 @@ develop; est/act = the start estimate over the run's wall.
 NVMe source, HDD target (A, 16 workers): 22.3 / 18.6 s, est/act 0.40 / 0.47 (the fsync at the NVMe rate).
 
 On the HDD the precheck's counting scan reads the whole source (1.9 GB) at about 40 MB/s with 1 worker or 16:
-two thirds of the run, and why a migration takes three times `cp -a` there (workspace#596). Every other phase
+two thirds of the run, and why a migration takes three times `cp -a` there (round 1; since workspace#596 the two
+precheck reads take 13-15 s there, § Precheck reads in physical order). Every other phase
 gains from the workers. On the SATA SSD and the HDD the start estimate missed the write phases, taken at NVMe rates;
 the byte phases' defaults per kind (from these runs' report.json units per second, the lower end; `default_rates`):
 
@@ -464,3 +467,29 @@ the byte phases' defaults per kind (from these runs' report.json units per secon
 | `CLONED_RANGE_BYTES*` | 1.7 GB/s | 250 MB/s | 125 MB/s | target |
 | `COPY_BYTES*` | 3.07 GB/s | 3.07 GB/s | 0.7 GB/s | source (the copy writes into the page cache) |
 | `FSYNC_BYTES*` | 3.0 GB/s | 450 MB/s | 200 MB/s | target |
+
+### Precheck reads in physical order (workspace#596)
+
+The precheck reads the source twice: `precheck.pair_count` (every indexed heap) and `precheck.source_key_groups` (every
+plain B-tree's leaves and overflow OID pages). Both read their pages as extents (`page_extents`, GLOSSARY "물리 순서
+extent"): sorted by volume and page, a gap of up to 1 MiB read through, at most 4 MiB per read. Key groups read every
+page of each tree's file in that one pass and resolve the overflow OID chains from the pages read (kept within
+`--mem`). The source's storage kind picks how: on an HDD one reader thread reads the extents in order and the workers
+only extract (`ExtentReads::OneStream`); elsewhere every worker reads its own (`Parallel`). An extent that does not
+read is read page by page.
+
+Same DBs and conditions as round 1 above (cold, 16 workers, CPUs 16-31); seconds of `pair_count + source_key_groups`, two runs:
+
+| source | round 1 (da726b4) | per class / key order → extents, parallel (ab787eb) | one stream on HDD (9015f10) |
+|---|---|---|---|
+| HDD, A | 48.6 / 49.6 | 18.3 / 18.4 | 14.9 / 15.1 |
+| HDD, B | 45.4 / 46.0 | 15.5 / 15.3 | 12.9 / 12.7 |
+| SATA SSD, A | 3.78 / 3.80 | 3.54 / 3.54 | 3.53 / 3.55 |
+| SATA SSD, B | 3.69 / 3.69 | 3.55 / 3.56 | 3.56 / 3.55 |
+| NVMe, A | 1.69 / 1.75 | 1.70 / 1.68 | 1.73 / 1.69 |
+| NVMe, B | 1.19 / 1.18 | 1.15 / 1.16 | 1.18 / 1.17 |
+
+What is left on the HDD is the pair count (about 9.4 s of A: 1.2 GB at about 130 MB/s against 231 MB/s sequential);
+16 MiB extents on the one stream did not change it (9.35-9.41 s, d76166b, not kept). Before, the key groups walked
+each tree's levels on one thread and read the overflow OID chains one random page at a time (HDD: 12-23 MB/s for
+17 s of the 21 s).

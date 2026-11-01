@@ -252,6 +252,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     }
     // the reads inside precheck, timed on their own (workspace#526: what the space and temp figures cost)
     let mut pre: Vec<(&'static str, f64)> = Vec::new();
+    let storage = RunStorage::detect(&src.volume_paths(), &o.plan.target_dir, &o.limits.spill_dir);
     let t = Instant::now();
     let before = ProcSample::now();
     let mut est = resource_estimate::estimate(
@@ -262,13 +263,20 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             .map_err(io::Error::other)?
             .as_deref(),
         o.worker_limit,
+        storage.source_extent_reads(),
         limits::physical_memory()?,
     )?;
     pre.push(("precheck.pair_count", t.elapsed().as_secs_f64()));
     let pair_count_used = ProcSample::now().zip(before).map(|(a, b)| a.since(b));
     pre.push(("precheck.appended_bound", est.appended_seconds));
     let t = Instant::now();
-    est.source_groups = verify::source_key_groups(&src, o.plan.locate, o.worker_limit)?;
+    est.source_groups = verify::source_key_groups(
+        &src,
+        o.plan.locate,
+        o.worker_limit,
+        o.limits.memory_limit_bytes,
+        storage.source_extent_reads(),
+    )?;
     pre.push(("precheck.source_key_groups", t.elapsed().as_secs_f64()));
     let mem = o.limits.memory_limit_bytes;
     if o.verify {
@@ -289,7 +297,6 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         }
     }
     let target = target_space::bound(&plan, &est, &src.vols, new_log::file_bytes(&src.log))?;
-    let storage = RunStorage::detect(&src.volume_paths(), &o.plan.target_dir, &o.limits.spill_dir);
     let asked = Instant::now();
     let temp_limit = temp_disk_choice::choose(
         temp_disk,

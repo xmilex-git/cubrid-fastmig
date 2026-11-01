@@ -18,13 +18,13 @@ use fastmig_ondisk::file_table::FileTable;
 use fastmig_ondisk::heap_rewrite::{Growth, ReEncode};
 use fastmig_ondisk::page_extents::extents;
 use fastmig_ondisk::volume_set::VolumeSet;
-use fastmig_ondisk::{Oid, db_pagesize};
+use fastmig_ondisk::{Oid, Vpid, db_pagesize};
 
 use crate::build_error::BuildError;
+use crate::extent_jobs::{ExtentReads, extent_jobs};
 use crate::heap_keys::{ClassKeys, page_bytes_keys_sized, record_keys};
 use crate::heap_scan::RowKey;
 use crate::index_def::IndexDef;
-use crate::job_pool::run_jobs;
 use crate::temp_disk::spill_record_bytes;
 
 /// What the pairs of one index and owner class come to: the input of the temp disk figures (`bytes`) and of the
@@ -140,7 +140,7 @@ pub fn pair_bytes<'c>(
     re_encode: &dyn Fn(Oid) -> Option<&'c dyn ReEncode>,
     skip: &HashSet<Oid>,
 ) -> Result<Vec<PairBytes>, BuildError> {
-    Ok(pair_bytes_and_growth(vols, defs, workers, re_encode, skip)?.0)
+    Ok(pair_bytes_and_growth(vols, defs, workers, ExtentReads::Parallel, re_encode, skip)?.0)
 }
 
 /// [`pair_bytes`], and per owner class with a re-encoder the [`Growth`] of its re-encoded records: the pages its
@@ -150,6 +150,7 @@ pub fn pair_bytes_and_growth<'c>(
     vols: &VolumeSet,
     defs: &[&'c IndexDef<'c>],
     workers: usize,
+    reads: ExtentReads,
     re_encode: &dyn Fn(Oid) -> Option<&'c dyn ReEncode>,
     skip: &HashSet<Oid>,
 ) -> Result<(Vec<PairBytes>, HashMap<Oid, Growth>), BuildError> {
@@ -171,38 +172,49 @@ pub fn pair_bytes_and_growth<'c>(
     let units = extents(pages, io_pagesize);
     let db = db_pagesize(io_pagesize);
     let usable = Growth::usable(io_pagesize);
-    let counted = run_jobs(workers, units, |e| {
-        e.read(vols, |buf| {
-            let buf = buf?;
-            // per class met in this extent: (class, per-index stats, growth); an extent holds few classes
-            let mut tally: Vec<(usize, Vec<PairStats>, Growth)> = Vec::new();
-            for (vpid, page, &c) in e.listed(buf, io_pagesize) {
-                let t = match tally.iter().position(|(k, ..)| *k == c) {
-                    Some(t) => t,
-                    None => {
-                        let n = classes[c].keys.indexes_len();
-                        tally.push((c, vec![PairStats::default(); n], Growth::default()));
-                        tally.len() - 1
-                    }
-                };
-                let (_, stats, grown) = &mut tally[t];
-                page_bytes_keys_sized(
-                    vols,
-                    &classes[c].keys,
-                    page,
-                    vpid,
-                    &mut |ix, oid, key| {
-                        if let RowKey::Key(k) = key
-                            && !skip.contains(&oid)
-                        {
-                            stats[ix].add_key(k.len(), db);
-                        }
-                    },
-                    &mut |before, after| grown.add(before, after, usable),
-                )?;
+    let counted = extent_jobs(vols, workers, reads, units, |e, buf| {
+        // an extent that does not read: its listed pages one by one, so a bad page in a gap fails nothing
+        let owned;
+        let buf = match buf {
+            Ok(b) => b,
+            Err(_) => {
+                let mut b = vec![0u8; e.npages * io_pagesize];
+                for (at, _) in &e.pages {
+                    let v = Vpid::new(e.first.volid, e.first.pageid + *at as i32);
+                    vols.read_page_into(v, &mut b[at * io_pagesize..(at + 1) * io_pagesize])?;
+                }
+                owned = b;
+                &owned
             }
-            Ok::<_, BuildError>(tally)
-        })
+        };
+        // per class met in this extent: (class, per-index stats, growth); an extent holds few classes
+        let mut tally: Vec<(usize, Vec<PairStats>, Growth)> = Vec::new();
+        for (vpid, page, &c) in e.listed(buf, io_pagesize) {
+            let t = match tally.iter().position(|(k, ..)| *k == c) {
+                Some(t) => t,
+                None => {
+                    let n = classes[c].keys.indexes_len();
+                    tally.push((c, vec![PairStats::default(); n], Growth::default()));
+                    tally.len() - 1
+                }
+            };
+            let (_, stats, grown) = &mut tally[t];
+            page_bytes_keys_sized(
+                vols,
+                &classes[c].keys,
+                page,
+                vpid,
+                &mut |ix, oid, key| {
+                    if let RowKey::Key(k) = key
+                        && !skip.contains(&oid)
+                    {
+                        stats[ix].add_key(k.len(), db);
+                    }
+                },
+                &mut |before, after| grown.add(before, after, usable),
+            )?;
+        }
+        Ok::<_, BuildError>(tally)
     });
     let mut out: Vec<PairBytes> = defs.iter().map(|_| PairBytes::new()).collect();
     let mut growth: HashMap<Oid, Growth> = HashMap::new();
