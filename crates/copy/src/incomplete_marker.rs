@@ -10,7 +10,7 @@
 //! process, so a rerun after a kill takes it. The lock is `flock(2)` (std `File::try_lock`), not an `fcntl` lock: a
 //! POSIX lock would be dropped as soon as any other descriptor of the marker in this process is closed.
 //! Source: decision G1 workspace#481 (no resume; rerun cleans what the tool made); ADR 0004; 1번 세션 decision on
-//! workspace#526 (two runs on one --dest).
+//! workspace#526 (two runs on one -F).
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
@@ -21,6 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const MARKER_NAME: &str = "FASTMIG_INCOMPLETE";
+/// `<dest>/fastmig/created-paths`: what a finished migrate created, one absolute path per line in creation order
+/// (workspace#605).
+pub const CREATED_PATHS: &str = "created-paths";
 /// Prefix of a scratch line in the marker: a path a rerun removes but the end-of-run fsync skips.
 const SCRATCH: &str = "scratch\t";
 
@@ -127,8 +130,18 @@ impl IncompleteMarker {
             .collect())
     }
 
-    /// Removes the marker: the migration in this directory passed verification.
-    pub fn finish(self) -> io::Result<()> {
+    /// Removes the marker: the migration in this directory passed its check. Every path it recorded (scratch left
+    /// out) is kept first in `created_paths` (`<dest>/fastmig/created-paths`, listing itself last), synced: the record
+    /// `migrate --replace` removes a finished target by (workspace#605).
+    pub fn finish(self, created_paths: &Path) -> io::Result<()> {
+        let mut text: String = self
+            .created()?
+            .iter()
+            .map(|p| format!("{}\n", p.display()))
+            .collect();
+        text.push_str(&format!("{}\n", created_paths.display()));
+        fs::write(created_paths, text)?;
+        File::open(created_paths)?.sync_all()?;
         fs::remove_file(&self.path)
     }
 }

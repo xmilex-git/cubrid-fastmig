@@ -1,10 +1,12 @@
-//! The process-wide resource limits every subcommand shares: `--mem` (the memory limit; default a quarter of the
-//! physical memory, at least 256 MiB where half the memory allows) and `--spill-dir` (where stages that exceed it spill; default `<dest>/fastmig/spill`).
+//! The process-wide resource limits every subcommand shares: `--temp-mem-size` (the memory limit; default the target
+//! conf's `data_buffer_size` for plan and migrate, else a quarter of the physical memory, at least 256 MiB where half
+//! the memory allows) and `--spill-dir` (where stages that exceed it spill; default `<-F>/fastmig/spill`).
 //!
-//! Input: the parsed `--mem` / `--spill-dir` values and the target directory. Output: [`Limits`].
-//! `--mem` takes bytes with an optional K, M, G or T suffix (powers of 1024).
+//! Input: the parsed `--temp-mem-size` / `--spill-dir` values, the target directory and the conf default. Output:
+//! [`Limits`]. `--temp-mem-size` takes bytes with an optional K, M, G or T suffix (powers of 1024).
 //! Files under the spill directory are never fsynced (see `fastmig_copy::durable`).
-//! Source: decision G1 workspace#481 (one memory limit for the whole run, like `--workers`); the copy engine streams through
+//! Source: decision G1 workspace#481 (one memory limit for the whole run, like `--thread-count`); G13 workspace#604 (names, the conf default:
+//! the engine's data buffer holds the temp file pages too); the copy engine streams through
 //! fixed per-worker buffers, the index builder and verifier spill (workspace#493, #495).
 
 use std::io;
@@ -17,7 +19,7 @@ use fastmig_index::spill_arena::SpillArena;
 
 use crate::args::{CliError, Parsed};
 
-pub const FLAGS: &[&str] = &["--mem", "--spill-dir"];
+pub const FLAGS: &[&str] = &["--temp-mem-size", "--spill-dir"];
 
 #[derive(Clone)]
 pub struct Limits {
@@ -30,12 +32,20 @@ pub struct Limits {
 }
 
 impl Limits {
-    pub fn from(p: &Parsed, target_dir: &Path) -> Result<Limits, CliError> {
-        let memory_limit_bytes = match p.value("--mem") {
-            Some(v) => parse_size(v).ok_or_else(|| CliError::Usage(format!("bad --mem {v}")))?,
-            // at least 256 MiB (at most half the memory): from there every measured run stayed within --mem
-            // (docs/resources.md, "Memory outside --mem")
-            None => {
+    /// `conf_default`: the target conf's `data_buffer_size` (plan, migrate), none for check.
+    pub fn from(
+        p: &Parsed,
+        target_dir: &Path,
+        conf_default: Option<u64>,
+    ) -> Result<Limits, CliError> {
+        let memory_limit_bytes = match (p.value("--temp-mem-size"), conf_default) {
+            (Some(v), _) => {
+                parse_size(v).ok_or_else(|| CliError::Usage(format!("bad --temp-mem-size {v}")))?
+            }
+            (None, Some(c)) => c,
+            // at least 256 MiB (at most half the memory): from there every measured run stayed within --temp-mem-size
+            // (docs/resources.md, "Memory outside --temp-mem-size")
+            (None, None) => {
                 let p = physical_memory()?;
                 (p / 4).max((256 << 20).min(p / 2))
             }
@@ -53,7 +63,7 @@ impl Limits {
     }
 }
 
-/// The smallest `--mem` a run of `workers` workers takes: per worker the copy engine's I/O buffer or what the index
+/// The smallest `--temp-mem-size` a run of `workers` workers takes: per worker the copy engine's I/O buffer or what the index
 /// build needs (`intermediate_merge::WORKER_MIN`), whichever is more (docs/resources.md).
 pub fn mem_min(workers: usize) -> u64 {
     (workers * IO_BUF_BYTES.max(WORKER_MIN)) as u64
@@ -84,19 +94,19 @@ pub fn physical_memory() -> io::Result<u64> {
         .ok_or_else(|| io::Error::other("no MemTotal in /proc/meminfo"))
 }
 
-/// `--workers` (worker limit): the thread cap of the whole run; default half the CPUs.
+/// `-t, --thread-count` (worker limit): the thread cap of the whole run; default half the CPUs.
 pub fn worker_limit(p: &Parsed) -> Result<usize, CliError> {
-    match p.value("--workers") {
+    match p.value("--thread-count") {
         Some(w) => w
             .parse()
             .ok()
             .filter(|&n| n > 0)
-            .ok_or_else(|| CliError::Usage(format!("bad --workers {w}"))),
+            .ok_or_else(|| CliError::Usage(format!("bad --thread-count {w}"))),
         None => Ok(std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))),
     }
 }
 
-/// `--temp-disk min|max|<size>` (temp disk limit, workspace#526): chosen before the run starts.
+/// `--temp-disk-size min|max|<size>` (temp disk limit, workspace#526): chosen before the run starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TempDiskChoice {
     Min,
@@ -105,12 +115,12 @@ pub enum TempDiskChoice {
 }
 
 pub fn temp_disk_choice(p: &Parsed) -> Result<Option<TempDiskChoice>, CliError> {
-    Ok(match p.value("--temp-disk") {
+    Ok(match p.value("--temp-disk-size") {
         None => None,
         Some("min") => Some(TempDiskChoice::Min),
         Some("max") => Some(TempDiskChoice::Max),
         Some(v) => Some(TempDiskChoice::Bytes(parse_size(v).ok_or_else(|| {
-            CliError::Usage(format!("bad --temp-disk {v} (min, max or a size)"))
+            CliError::Usage(format!("bad --temp-disk-size {v} (min, max or a size)"))
         })?)),
     })
 }

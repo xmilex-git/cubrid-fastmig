@@ -65,6 +65,8 @@ pub struct PlanInputs<'a> {
     pub log: &'a LogHeader,
     pub target_line: VersionLine,
     pub target_dir: &'a Path,
+    /// Where each source volume goes, in the order of `vols.volumes()` (`-F`, `-E`, `-i`; workspace#604).
+    pub volume_targets: &'a [PathBuf],
     pub allow_clone: bool,
     /// The source's server ran with `ignore_trailing_space=yes` (its `cubrid.conf`, workspace#541).
     pub source_ignores_trailing_space: bool,
@@ -116,6 +118,8 @@ pub struct PageRange {
 pub struct VolumePlan {
     pub volid: i16,
     pub path: PathBuf,
+    /// The target file (`-F`, `-E`, `-i`).
+    pub target: PathBuf,
     pub bytes: u64,
     pub copy_method: CopyMethod,
 }
@@ -393,7 +397,10 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         refusals.push("log header and volume iopagesize differ".into());
     }
     let mut volumes = Vec::new();
-    for v in i.vols.volumes() {
+    if i.volume_targets.len() != i.vols.volumes().len() {
+        return Err(io::Error::other("one target path per source volume"));
+    }
+    for (v, target) in i.vols.volumes().iter().zip(i.volume_targets) {
         if v.header.db_creation != i.log.db_creation {
             refusals.push(format!(
                 "{}: db_creation {} differs from the log's {}; not one database",
@@ -405,8 +412,14 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         volumes.push(VolumePlan {
             volid: v.volid,
             bytes: fs::metadata(&v.path)?.len(),
-            copy_method: copy_method::predict(&v.path, i.target_dir, i.allow_clone)?,
+            // clone or copy by the volume's own target directory (workspace#604)
+            copy_method: copy_method::predict(
+                &v.path,
+                target.parent().unwrap_or(i.target_dir),
+                i.allow_clone,
+            )?,
             path: v.path.clone(),
+            target: target.clone(),
         });
     }
 
@@ -918,7 +931,14 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
         .filter(|v| v.copy_method == CopyMethod::Clone)
         .map(|v| v.volid)
         .collect();
-    let unshare = !cloned.is_empty() && free_space::can_unshare(i.target_dir)?;
+    // every cloned volume's filesystem has to unshare (its target directory, workspace#604)
+    let mut unshare = !cloned.is_empty();
+    for v in volumes
+        .iter()
+        .filter(|v| v.copy_method == CopyMethod::Clone)
+    {
+        unshare &= free_space::can_unshare(v.target.parent().unwrap_or(i.target_dir))?;
+    }
     // sectors the run frees before it allocates: free to the sector sequence the target space bound previews
     let mut freed_sectors: Vec<Vsid> = Vec::new();
     // the new catalog file and heaps: one sector each new file, plus what the replaced files held past their first
@@ -984,6 +1004,31 @@ pub fn build(i: &PlanInputs) -> io::Result<Plan> {
 
     // what the target needs is bounded with the resource estimate (cli target_space, workspace#526)
     let available = free_space::available_bytes(i.target_dir)?;
+    // byte-copied volumes on another filesystem than the target directory's (`-E`, `-i`): each such filesystem holds
+    // them. shortcut: the target space bound still counts them on the target directory's filesystem too (conservative),
+    // until a run that needs the split is measured
+    let target_dev = copy_method::device_of(i.target_dir)?;
+    let mut elsewhere: Vec<(u64, PathBuf, u64)> = Vec::new();
+    for v in volumes.iter().filter(|v| v.copy_method == CopyMethod::Copy) {
+        let dir = v.target.parent().unwrap_or(i.target_dir);
+        let dev = copy_method::device_of(dir)?;
+        if dev == target_dev {
+            continue;
+        }
+        match elsewhere.iter_mut().find(|(d, _, _)| *d == dev) {
+            Some(e) => e.2 += v.bytes,
+            None => elsewhere.push((dev, dir.to_path_buf(), v.bytes)),
+        }
+    }
+    for (_, dir, bytes) in &elsewhere {
+        let free = free_space::available_bytes(dir)?;
+        if *bytes > free {
+            refusals.push(format!(
+                "the filesystem of {} has {free} B free, its volumes need {bytes} B",
+                dir.display()
+            ));
+        }
+    }
 
     refusals.dedup();
     Ok(Plan {

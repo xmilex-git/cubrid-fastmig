@@ -2,7 +2,7 @@
 //! every spill run of the run is written into as extents. Its space is never given back to the filesystem until
 //! the run ends, so no other process can take it in the middle (user: no disk full during a run).
 //!
-//! Input: the path and the size (`--temp-disk`). Output: [`SpillArena`] — extents handed out first fit and taken
+//! Input: the path and the size (`--temp-disk-size`). Output: [`SpillArena`] — extents handed out first fit and taken
 //! back on free (a run that finds no single free range big enough gets several), and an
 //! [`ExtentReader`] that sees a run's extents as one byte stream. The file is removed when the arena is dropped;
 //! a killed run leaves it to the incomplete marker's rerun cleanup (cli records it).

@@ -4,14 +4,14 @@
 //! worker / memory / spill limits. Output: [`DbResult`].
 //! Order: check 4 (sectors; yields the tracked files) → every index tree opened → the live row map reserved → one
 //! multi-class pass over every heap (checks 1 and the heap side of 2; the index builder's `scan_classes`,
-//! workspace#503) → every in-memory run sorted → one pool on `--workers` threads, most leaf pages first: each plain
+//! workspace#503) → every in-memory run sorted → one pool on `--thread-count` threads, most leaf pages first: each plain
 //! index merged with its heap side in leaf-range shards (check 2, `merge_shards`) and each foreign key against its
 //! primary key → per index the checks across its shards and its root statistics → the root heap → the live row map
 //! sealed → deferred indexes against it → catalog references and OBJECT values (check 3) → LOB files (check 5).
 //! With a temp disk limit the plain indexes are cut into index batches (`temp_disk::index_batches` on their pair bytes,
 //! counted first): the first batch's pass reads every heap and does every heap check, each later batch reads again
 //! only the heaps of its indexes for their keys, and every batch's spill is gone before the next (workspace#553).
-//! Source: G3 workspace#483 Q9 (one scan per class, all its indexes at once; merges per index; workers and --mem of
+//! Source: G3 workspace#483 Q9 (one scan per class, all its indexes at once; merges per index; workers and --temp-mem-size of
 //! migrate), G5 workspace#486 (deferred indexes: structure + OID survival, key values "not checked"); workspace#509
 //! (sorts, shards and foreign keys on the workers; measured on the big develop DB).
 
@@ -55,7 +55,7 @@ pub struct Limits<'a> {
     pub workers: &'a WorkerLimit,
     pub memory: &'a MemoryLimit,
     pub spill: &'a SpillDir,
-    /// Bytes spill files may hold at once (`--temp-disk`); None: every index in one heap pass (workspace#553).
+    /// Bytes spill files may hold at once (`--temp-disk-size`); None: every index in one heap pass (workspace#553).
     pub temp_disk: Option<u64>,
     /// The run's verifier phase (workspace#560), one part per kind of work of this database: heap pages scanned,
     /// and index pairs sorted (or merged down from spill) and then merged, in batches, and per deferred index.
@@ -283,7 +283,7 @@ fn index_pair_bytes(
 }
 
 /// The spill bytes of each plain index of this verifier on `db` when every pair spills, and the heap pages its live
-/// row map is reserved for (workspace#526, #553: the temp disk `--verify` needs on the source, its least the largest
+/// row map is reserved for (workspace#526, #553: the temp disk `--check` needs on the source, its least the largest
 /// index, its most the sum).
 pub fn heap_pair_bytes(db: &Database, workers: usize) -> std::io::Result<(Vec<u64>, usize)> {
     let x = open_indexes(db, workers);
@@ -531,7 +531,7 @@ fn check_batch(
 ) -> std::io::Result<()> {
     let t = Instant::now();
     {
-        // every in-memory run sorted on --workers threads, largest first, not on its index's merge thread
+        // every in-memory run sorted on --thread-count threads, largest first, not on its index's merge thread
         // (workspace#509)
         let mut sorts: Vec<(&mut Run, &KeyDomain)> = index_runs
             .iter_mut()
@@ -571,7 +571,7 @@ fn check_batch(
 
     let t = Instant::now();
     // every shard of every plain index merged with its heap side, and every foreign key against its primary key, in
-    // one pool on --workers threads, the most leaf pages first (workspace#503, #509)
+    // one pool on --thread-count threads, the most leaf pages first (workspace#503, #509)
     let mut jobs: Vec<TreeJob> = Vec::new();
     for (i, ((s, runs, _), (ranges, bounds))) in index_runs.iter().zip(&plans).enumerate() {
         for (k, leaves) in ranges.iter().enumerate() {
@@ -731,7 +731,7 @@ impl TreeJob<'_, '_, '_> {
     }
 }
 
-/// The least `--mem` the verifier runs `workers` workers in over `heap_pages` heap pages: the live row map's
+/// The least `--temp-mem-size` the verifier runs `workers` workers in over `heap_pages` heap pages: the live row map's
 /// reservation, the merge floor of every worker, and one heap scan share per worker (workspace#526).
 pub fn memory_min(heap_pages: usize, workers: usize) -> usize {
     heap_pages * crate::live_row_map::ESTIMATE_PAGE_BYTES

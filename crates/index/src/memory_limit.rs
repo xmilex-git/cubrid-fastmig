@@ -1,4 +1,4 @@
-//! The one memory limit of a run (`--mem`), in bytes, shared by everything that holds keys in memory: heap-scan
+//! The one memory limit of a run (`--temp-mem-size`), in bytes, shared by everything that holds keys in memory: heap-scan
 //! runs of every class and index, sort scratch, merge buffers.
 //!
 //! Input: the limit (cli `Limits::memory_limit_bytes`, default MemTotal/4 and at least 256 MiB, the same argument the verifier uses).

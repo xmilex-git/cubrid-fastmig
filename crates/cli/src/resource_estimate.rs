@@ -1,12 +1,12 @@
 //! The plan's resource table (workspace#526): the temp disk (spill) and memory the index rebuild needs, so the user
-//! picks `--temp-disk` and `--mem` before anything is written.
+//! picks `--temp-disk-size` and `--temp-mem-size` before anything is written.
 //!
 //! Input: the source volumes, the version pair, the worker limit. Output: [`ResourceEstimate`] — per index the bytes
 //! its (key, OID) pairs take as spill records (counted by reading the source heaps with the build's own key
 //! extractor, `fastmig_index::pair_count`; an 11.4 source's rows re-encoded first, its system catalog rows
 //! generated as the run writes them), the counting scan's seconds, and from those: temp min/max, the index
 //! batches a temp limit needs and their extra time, and the memory rows.
-//! Bounds (docs/resources.md): a scan spills at most the pair bytes of its indexes, whatever `--mem` is: temp_min
+//! Bounds (docs/resources.md): a scan spills at most the pair bytes of its indexes, whatever `--temp-mem-size` is: temp_min
 //! = the largest index's, temp_max = all of them in one batch; a batch is one more heap scan, priced at the
 //! counting scan's time. mem_recommended spills less, not nothing; mem_min is the fixed buffers per worker (copy I/O
 //! buffer, index build merge floor and spill buffer, `limits::mem_min`) — the keys spill under a smaller limit.
@@ -87,7 +87,7 @@ pub struct ResourceEstimate {
     /// Seconds `appended_pages_bound` took (part of `scan_seconds`).
     pub appended_seconds: f64,
     /// Spill bytes the verifier's source side takes per plain index (`verify::source_pair_bytes`), counted only for
-    /// `--verify`.
+    /// `--check`.
     pub verify_source: Option<Vec<u64>>,
     /// Heap pages of the source the verifier reads (its live row map), counted with `verify_source`.
     pub verify_heap_pages: Option<usize>,
@@ -332,7 +332,7 @@ impl ResourceEstimate {
         self.per_def.iter().sum()
     }
 
-    /// The smallest limit `--verify` takes: the verifier batches its indexes like the build (workspace#553), on the
+    /// The smallest limit `--check` takes: the verifier batches its indexes like the build (workspace#553), on the
     /// target (the build's pairs) and then on the source, so the largest index of either; None when the source side
     /// was not counted.
     pub fn verify_min(&self) -> Option<u64> {
@@ -365,7 +365,7 @@ impl ResourceEstimate {
         }
     }
 
-    /// The least `--mem` `--verify` runs in (`fastmig_verify::run::memory_min` on the source's heap pages, at least
+    /// The least `--temp-mem-size` `--check` runs in (`fastmig_verify::run::memory_min` on the source's heap pages, at least
     /// `mem_min`); None when the source side was not counted.
     pub fn verify_mem_min(&self) -> Option<u64> {
         self.verify_heap_pages
@@ -387,10 +387,10 @@ impl ResourceEstimate {
         limits::mem_min(self.workers)
     }
 
-    /// The most RSS a run with `--mem` `mem` is expected to reach: the limit plus what stays outside it (docs/resources.md,
-    /// "Memory outside --mem"), fitted from the measured runs as an upper envelope: 12 MiB of buffers, stacks and
+    /// The most RSS a run with `--temp-mem-size` `mem` is expected to reach: the limit plus what stays outside it (docs/resources.md,
+    /// "Memory outside --temp-mem-size"), fitted from the measured runs as an upper envelope: 12 MiB of buffers, stacks and
     /// allocator, 18 MiB more when the catalog is regenerated, 32 MiB per GiB of pair bytes (run bookkeeping, sample
-    /// keys, leaf summaries) and with `--verify` 24 MiB per GiB of the verifier's source side, plus the precheck's extent
+    /// keys, leaf summaries) and with `--check` 24 MiB per GiB of the verifier's source side, plus the precheck's extent
     /// buffers, one per worker and `READ_AHEAD` more (`page_extents::MAX_EXTENT_BYTES`, workspace#596: counted, not
     /// fitted). Measured, not proven.
     pub fn rss_expected_max(&self, mem: u64, verify: bool) -> u64 {
@@ -478,7 +478,7 @@ impl ResourceEstimate {
             (Some(v), Some(vmax)) => {
                 let (tb, sb) = self.verify_batches(v).unwrap_or((0, 0));
                 format!(
-                    "--verify: temp disk min {} MiB (index batches: {tb} on the target, {sb} on the source, about {:.1} s more), max {} MiB (one batch each: target {} MiB, source {} MiB); --mem >= {} MiB (its live row map, merge floors and scan shares)",
+                    "--check: temp disk min {} MiB (index batches: {tb} on the target, {sb} on the source, about {:.1} s more), max {} MiB (one batch each: target {} MiB, source {} MiB); --temp-mem-size >= {} MiB (its live row map, merge floors and scan shares)",
                     mib(v),
                     self.verify_extra_seconds(v),
                     mib(vmax),
@@ -487,10 +487,10 @@ impl ResourceEstimate {
                     mib(self.verify_mem_min().unwrap_or(0))
                 )
             }
-            _ => "--verify: temp disk counted by plan --verify (docs/resources.md)".into(),
+            _ => "--check: temp disk counted by plan --check (docs/resources.md)".into(),
         };
         format!(
-            "resources (index rebuild, --workers {}; counted in {:.1} s, one heap scan):\n  temp disk: min {} MiB ({b} index batches, about {:.1} s more), max {} MiB (one batch)\n  {verify}\n  memory: min {} MiB, this run {} MiB, recommended {} MiB (fewer spills; temp does not depend on it)\n  expected max RSS at this run's --mem: {} MiB, {} MiB with --verify (--mem plus what stays outside it, measured: docs/resources.md)\n",
+            "resources (index rebuild, --thread-count {}; counted in {:.1} s, one heap scan):\n  temp disk: min {} MiB ({b} index batches, about {:.1} s more), max {} MiB (one batch)\n  {verify}\n  memory: min {} MiB, this run {} MiB, recommended {} MiB (fewer spills; temp does not depend on it)\n  expected max RSS at this run's --temp-mem-size: {} MiB, {} MiB with --check (--temp-mem-size plus what stays outside it, measured: docs/resources.md)\n",
             self.workers,
             self.scan_seconds,
             mib(lo),

@@ -9,11 +9,11 @@
 //! `boot_mount` (a path differing from the header only warns while `_vinf` exists); the registered base DB that an
 //! engine run on such a copy wrote into and then deleted (workspace#515).
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use fastmig_ondisk::volume_set::Locate;
 
+use crate::database_files::vinf_volumes;
 use crate::plan::OpenSource;
 
 /// Warnings and refusals about the directories the source's volumes come from.
@@ -66,19 +66,4 @@ pub fn check(s: &OpenSource, locate: Locate) -> (Vec<String>, Vec<String>) {
         ));
     }
     (warnings, refusals)
-}
-
-/// The volume lines (volid ≥ 0) of a `_vinf` file, `%4d %s` per line; none when the file is missing or unreadable
-/// (the engine then follows the headers, as the tool does).
-fn vinf_volumes(path: &Path) -> Vec<(i32, PathBuf)> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|l| {
-            let (id, p) = l.trim_start().split_once(' ')?;
-            Some((id.parse::<i32>().ok()?, PathBuf::from(p.trim())))
-        })
-        .filter(|(id, _)| *id >= 0)
-        .collect()
 }

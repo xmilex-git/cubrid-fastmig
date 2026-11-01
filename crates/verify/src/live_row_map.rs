@@ -4,10 +4,10 @@
 //! Input: per heap pass, its pages' live slots ([`LiveSlots`], built page by page during the scan). Output: "is this
 //! OID a live row, and of which class" in O(log pages) (index → heap OID survival of deferred indexes, OBJECT values,
 //! catalog references), and the OIDs found live in two heaps.
-//! Memory (under `--mem`, workspace#509): [`PAGE_BYTES`] per heap page with a live row plus one bit per slot up to its
+//! Memory (under `--temp-mem-size`, workspace#509): [`PAGE_BYTES`] per heap page with a live row plus one bit per slot up to its
 //! last live slot. The map is reserved before the heap pass at [`ESTIMATE_PAGE_BYTES`] per heap page — so finished
-//! runs, which take what is free, cannot crowd it out — and settled to its real size after; a `--mem` that cannot
-//! hold it stops the run with the `--mem` that can.
+//! runs, which take what is free, cannot crowd it out — and settled to its real size after; a `--temp-mem-size` that cannot
+//! hold it stops the run with the `--temp-mem-size` that can.
 //! Source: G3 workspace#483 Q7 (sorted live OID set), G5 workspace#486 (deferred indexes: OID survival only);
 //! workspace#509 (page bitmap instead of 16 B per row: no sort of every live OID, 1/59 of the memory on the big
 //! develop DB).
@@ -68,7 +68,7 @@ pub struct LiveRowMap<'m> {
 const MIB: usize = 1 << 20;
 
 impl<'m> LiveRowMap<'m> {
-    /// Reserves the map of `heap_pages` heap pages from `memory`; an error naming the `--mem` that holds it when
+    /// Reserves the map of `heap_pages` heap pages from `memory`; an error naming the `--temp-mem-size` that holds it when
     /// the limit cannot.
     pub fn reserve(memory: &'m MemoryLimit, heap_pages: usize) -> io::Result<Self> {
         let need = heap_pages * ESTIMATE_PAGE_BYTES;
@@ -84,10 +84,10 @@ impl<'m> LiveRowMap<'m> {
         Ok(map)
     }
 
-    /// Adds the live rows of one heap of `class`, taking more of `--mem` when the map outgrows its grant.
+    /// Adds the live rows of one heap of `class`, taking more of `--temp-mem-size` when the map outgrows its grant.
     pub fn add(&mut self, class: Oid, s: LiveSlots) -> io::Result<()> {
         let base = self.bits.len() as u32;
-        // exact growth: the map is charged to --mem by capacity, a doubling would charge up to twice its size
+        // exact growth: the map is charged to --temp-mem-size by capacity, a doubling would charge up to twice its size
         self.pages.reserve_exact(s.pages.len());
         self.pages
             .extend(s.pages.iter().map(|&(vpid, at, words)| LivePage {
@@ -118,8 +118,8 @@ impl<'m> LiveRowMap<'m> {
         }
         let limit = self.memory.limit();
         Err(io::Error::other(format!(
-            "live row map of {pages} heap pages needs {} MiB of --mem; --mem {} MiB left {} MiB for it: rerun \
-             with --mem {}M or more",
+            "live row map of {pages} heap pages needs {} MiB of --temp-mem-size; --temp-mem-size {} MiB left {} MiB for it: rerun \
+             with --temp-mem-size {}M or more",
             need.div_ceil(MIB),
             limit / MIB,
             self.grant.bytes / MIB,

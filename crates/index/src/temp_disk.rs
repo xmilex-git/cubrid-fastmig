@@ -1,4 +1,4 @@
-//! The temp disk limit (`--temp-disk`): the bytes spill files may hold at once, kept by scheduling, not by failing.
+//! The temp disk limit (`--temp-disk-size`): the bytes spill files may hold at once, kept by scheduling, not by failing.
 //!
 //! Input: per index the bytes its (key, OID) pairs take as spill records (`pair_count::pair_bytes`, counted on the
 //! target before the build, or on a develop source for the plan) and the limit.
@@ -8,7 +8,7 @@
 //! Spill bound of one scan: a spill record is `key_len u32 · OID 8 B · key` (`spill_run`), so the pairs of a batch
 //! take `T` bytes as records, and a pair is spilled at most once (the build after the scan spills nothing more):
 //! a scan spills at most `T`. Memory gives no credit: a writer spills when its own part of its worker's share is
-//! full, whatever room the limit has (T1 develop dirty at `--mem` 530 MiB spilled 832 KiB where `T − (mem/2 −
+//! full, whatever room the limit has (T1 develop dirty at `--temp-mem-size` 530 MiB spilled 832 KiB where `T − (mem/2 −
 //! share)` gave 0).
 //! Source: workspace#526 (user request: no disk full during a run, the size chosen before it starts).
 

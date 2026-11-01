@@ -1,7 +1,7 @@
-//! The one worker limit of a run (`--workers`), shared by every index built at the same time.
+//! The one worker limit of a run (`--thread-count`), shared by every index built at the same time.
 //!
 //! Input: the limit. Output: permits a parallel step holds while its threads run.
-//! Source: workspace#481 G1 — `--workers N` caps every thread of the process; `--workers 1` is the
+//! Source: workspace#481 G1 — `--thread-count N` caps every thread of the process; `--thread-count 1` is the
 //! single-thread baseline.
 
 use std::sync::{Condvar, Mutex};

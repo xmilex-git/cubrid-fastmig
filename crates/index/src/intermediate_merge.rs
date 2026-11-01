@@ -8,7 +8,7 @@
 //! Memory: a merge of `k` runs holds `k` read buffers and cursors and one write buffer, at most [`max_open`] ×
 //! [`open_cost`] — one worker's merge memory — unless that is under three open runs (a key too long for it), when
 //! it still merges two at a time.
-//! Source: workspace#526 (1번 세션 decision (B): merge buffers inside --mem, a multi-pass merge bounds the open
+//! Source: workspace#526 (1번 세션 decision (B): merge buffers inside --temp-mem-size, a multi-pass merge bounds the open
 //! runs); engine counterpart `external_sort.c` `sort_exphase_merge` (merges runs in passes of the buffers it has).
 
 use std::cmp::Reverse;

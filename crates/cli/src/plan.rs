@@ -1,11 +1,14 @@
 //! `cubrid-fastmig plan`: reads the source only and prints what `migrate` would do; also the source opening and the
 //! plan building `migrate` shares, so both decide the same way.
 //!
-//! Input: the source DB name (found in the source `databases.txt`), the target directory and the choices
-//! (`--target-version`, `--target-name`, `--no-clone`). Output: the plan as a table on stdout, or JSON with
-//! `--json`; exit code 1 when the plan has refusals.
+//! Input: the source DB name (found in the source `databases.txt`), the optional new DB name, the target directory
+//! and the choices (`--target-version`, `--no-clone`, `-r`, `-E`/`-i`, the target conf defaults). Output: the plan
+//! as a table on stdout, or JSON with `--json`; exit code 1 when the plan has refusals.
+//! Names and defaults follow copydb/createdb and the target `cubrid.conf` (G13 workspace#604): `<db> [<new-db>]`,
+//! `-F`, the target line from the target install, `--db-volume-size`/`--temp-mem-size`/`--temp-disk-size` from the
+//! conf; the command line always wins. The chosen values are the `settings` object of plan.json.
 //! Source: decision G1 workspace#481 (plan writes nothing; refusals and warnings), workspace#505 (`--target-version`
-//! decided once by the plan).
+//! decided once by the plan), G13 workspace#604.
 
 use std::fs;
 use std::io;
@@ -18,46 +21,68 @@ use fastmig_ondisk::volume_set::{Access, Locate, VolumeSet};
 use fastmig_ondisk::{SourceVersion, VersionLine};
 use fastmig_plan::cubrid_conf::ignore_trailing_space;
 use fastmig_plan::migration_plan::lob_base_dir;
-use fastmig_plan::version_pair::parse_line;
+use fastmig_plan::version_pair::{line_name, parse_line};
 use fastmig_plan::{Plan, PlanInputs};
 
 use crate::args::{CliError, Parsed, parse};
-use crate::limits::{self, Limits};
+use crate::limits::{self, Limits, TempDiskChoice};
+use crate::replace_target::{self, ReplacedDatabase};
 use crate::storage_kind_detect::RunStorage;
-use crate::{plan_report, resource_estimate, target_space, verify, volume_dirs};
+use crate::target_conf_defaults::TargetConfDefaults;
+use crate::volume_targets::{self, VolumeLayout};
+use crate::{
+    check, plan_report, resource_estimate, target_install_version, target_space, volume_dirs,
+};
 
-const HELP: &str = "\
-cubrid-fastmig plan <db> --dest <dir> [options]
-  --dest <dir>                   target directory migrate would write
-  --target-version 11.4|develop  target release line (default: develop; 11.4 takes a 10.2, 11.2, 11.3 or 11.4
-                                 source)
-  --target-name <name>           target DB name (default: <db>)
+pub const HELP: &str = "\
+cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]
+  Reads the source only and prints what migrate would do (exit 1: the plan refuses).
+  <new-db>                       target DB name (default: <db>)
+  -F, --file-path <dir>          target directory migrate would write (volume 0, fastmig/)
+  --target-version 11.4|develop  target release line (default: the line of the install $CUBRID; 11.4 takes a 10.2,
+                                 11.2, 11.3 or 11.4 source)
+  -E, --extended-volume-path <dir>  target directory of volumes 1.. (default: -F); not with -i
+  -i, --control-file <file>      target path per volume, copydb's format: `volid source_fullvolname dest_fullvolname`
+                                 lines (volumes it does not list go to -F); not with -E
+  -r, --replace                  replace a database registered under <new-db> in the target databases.txt: its
+                                 volumes, logs, _vinf, _dwb and line are removed first (refused while its server is up)
   --source-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --target-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --source-conf <file>           the source server's cubrid.conf: ignore_trailing_space=yes there turns on the
                                  foreign key and LIST/RANGE compare checks (10.2 always has them)
-  --target-conf <file>           the target server's cubrid.conf; ignore_trailing_space=yes refuses (default:
-                                 $CUBRID/conf/cubrid.conf when it exists)
-  --no-clone                     plan byte copies even where the filesystem could clone
+  --target-conf <file>           the target server's cubrid.conf (default: $CUBRID/conf/cubrid.conf when it exists):
+                                 ignore_trailing_space=yes refuses; db_volume_size, data_buffer_size and
+                                 temp_file_max_size_in_pages give the defaults below
+  --db-volume-size <size>        size cap of a volume the run adds when the target runs out of space (default: the
+                                 target conf's db_volume_size, else 512M)
+  --no-clone                     plan byte copies even where the filesystem could clone (clone is chosen per volume
+                                 when its target directory is on the source volume's filesystem; use this when the
+                                 target must not share blocks with the source)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 (a source copied without its headers rewritten)
-  --workers <n>                  worker limit the resource table assumes (default: CPUs / 2)
-  --mem <size>                   memory limit the resource table assumes (default: physical memory / 4, at least 256M)
-  --verify                       also count the temp disk the verifier needs on the source (migrate --verify;
-                                 one more read of every indexed heap)
+  -t, --thread-count <n>         worker limit the resource table assumes (default: CPUs / 2)
+  --temp-mem-size <size>         memory limit the resource table assumes (default: the target conf's
+                                 data_buffer_size, else physical memory / 4, at least 256M)
+  --temp-disk-size min|max|<size>  temp disk limit (default: from the target conf's temp_file_max_size_in_pages:
+                                 > 0 pages × page size, 0 min; else asked on a terminal, max otherwise)
+  --check                        also count the temp disk the check needs on the source (migrate --check; one more
+                                 read of every indexed heap)
   --json                         print plan.json instead of the table
-The resource table (temp disk and memory per --mem, docs/resources.md) needs one read of every indexed heap.";
+The resource table (temp disk and memory per --temp-mem-size, docs/resources.md) needs one read of every indexed heap.";
 
 /// Flags `plan` and `migrate` share.
 pub const FLAGS: &[&str] = &[
-    "--dest",
+    "--file-path",
     "--target-version",
-    "--target-name",
     "--source-databases-txt",
     "--target-databases-txt",
     "--source-conf",
     "--target-conf",
+    "--db-volume-size",
+    "--temp-disk-size",
+    "--extended-volume-path",
+    "--control-file",
 ];
-pub const SWITCHES: &[&str] = &["--no-clone", "--volumes-in-first-dir"];
+pub const SWITCHES: &[&str] = &["--no-clone", "--volumes-in-first-dir", "--replace"];
 
 /// The choices `plan` and `migrate` share.
 pub struct PlanOptions {
@@ -72,7 +97,17 @@ pub struct PlanOptions {
     pub source_conf: Option<PathBuf>,
     /// The target server's `cubrid.conf` (default `$CUBRID/conf/cubrid.conf` when it exists).
     pub target_conf: Option<PathBuf>,
+    /// The defaults that conf gives (workspace#604).
+    pub conf: TargetConfDefaults,
     pub locate: Locate,
+    /// `-r, --replace`: a database registered under the target name is replaced (workspace#604).
+    pub replace: bool,
+    /// `-E` or `-i` (workspace#604).
+    pub layout: VolumeLayout,
+    /// The target server's `db_volume_size` in bytes: size cap of an added volume (ADR 0013).
+    pub db_volume_size: u64,
+    /// `--temp-disk-size` as given; the conf's default needs the page size (`temp_disk_choice`).
+    temp_disk: Option<TempDiskChoice>,
 }
 
 pub fn absolute(p: &str) -> Result<PathBuf, CliError> {
@@ -81,10 +116,20 @@ pub fn absolute(p: &str) -> Result<PathBuf, CliError> {
 
 impl PlanOptions {
     pub fn from(p: &Parsed, what: &str) -> Result<Self, CliError> {
-        let [db] = p.positional.as_slice() else {
-            return Err(CliError::Usage(format!(
-                "{what} takes exactly one database name"
-            )));
+        let (db, new_db) = match p.positional.as_slice() {
+            [db] => (db, db),
+            [db, new_db] => (db, new_db),
+            [] => {
+                return Err(CliError::Usage(format!(
+                    "{what} needs the source database name <db>"
+                )));
+            }
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "{what} takes <db> [<new-db>], not {} names",
+                    p.positional.len()
+                )));
+            }
         };
         let default_dbtxt = || -> Result<PathBuf, CliError> {
             let dir = std::env::var_os("CUBRID_DATABASES").ok_or_else(|| {
@@ -92,16 +137,27 @@ impl PlanOptions {
             })?;
             Ok(PathBuf::from(dir).join("databases.txt"))
         };
-        let target_version = p.value("--target-version").unwrap_or("develop");
+        let target_dir = absolute(
+            p.value("--file-path")
+                .ok_or_else(|| CliError::Usage("-F, --file-path is required".into()))?,
+        )?;
+        let target_line = match p.value("--target-version") {
+            Some(v) => {
+                parse_line(v).ok_or_else(|| CliError::Usage(format!("bad --target-version {v}")))?
+            }
+            None => target_install_version::from_install()?,
+        };
+        let target_conf = p.value("--target-conf").map(PathBuf::from).or_else(|| {
+            std::env::var_os("CUBRID")
+                .map(|c| PathBuf::from(c).join("conf/cubrid.conf"))
+                .filter(|c| c.is_file())
+        });
+        let conf = TargetConfDefaults::read(target_conf.as_deref(), new_db)?;
         Ok(PlanOptions {
             db: db.clone(),
-            target_dir: absolute(
-                p.value("--dest")
-                    .ok_or_else(|| CliError::Usage("--dest is required".into()))?,
-            )?,
-            target_line: parse_line(target_version)
-                .ok_or_else(|| CliError::Usage(format!("bad --target-version {target_version}")))?,
-            target_name: p.value("--target-name").unwrap_or(db).to_string(),
+            target_dir,
+            target_line,
+            target_name: new_db.clone(),
             source_dbtxt: p
                 .value("--source-databases-txt")
                 .map(PathBuf::from)
@@ -112,17 +168,51 @@ impl PlanOptions {
                 .map_or_else(default_dbtxt, Ok)?,
             allow_clone: !p.switch("--no-clone"),
             source_conf: p.value("--source-conf").map(PathBuf::from),
-            target_conf: p.value("--target-conf").map(PathBuf::from).or_else(|| {
-                std::env::var_os("CUBRID")
-                    .map(|c| PathBuf::from(c).join("conf/cubrid.conf"))
-                    .filter(|c| c.is_file())
-            }),
+            target_conf,
             locate: if p.switch("--volumes-in-first-dir") {
                 Locate::FirstVolumeDir
             } else {
                 Locate::Recorded
             },
+            replace: p.switch("--replace"),
+            layout: VolumeLayout::from(p)?,
+            db_volume_size: match p.value("--db-volume-size") {
+                Some(v) => limits::parse_size(v)
+                    .ok_or_else(|| CliError::Usage(format!("bad --db-volume-size {v}")))?,
+                // the target conf's db_volume_size, else the engine default (workspace#604)
+                None => conf.db_volume_size.unwrap_or(512 << 20),
+            },
+            temp_disk: limits::temp_disk_choice(p)?,
+            conf,
         })
+    }
+
+    /// `--temp-disk-size`, else what the target conf's `temp_file_max_size_in_pages` gives in pages of `page_size`.
+    pub fn temp_disk_choice(&self, page_size: u64) -> Option<TempDiskChoice> {
+        self.temp_disk.or_else(|| self.conf.temp_disk(page_size))
+    }
+
+    /// The `settings` object of plan.json: the values chosen from the command line, the target conf or the defaults.
+    pub fn settings_json(&self, limits: &Limits, worker_limit: usize, page_size: u64) -> String {
+        let temp_disk = match self.temp_disk_choice(page_size) {
+            None => "null".to_string(),
+            Some(TempDiskChoice::Min) => "\"min\"".to_string(),
+            Some(TempDiskChoice::Max) => "\"max\"".to_string(),
+            Some(TempDiskChoice::Bytes(b)) => b.to_string(),
+        };
+        format!(
+            "{{\"target_name\": {}, \"target_version\": \"{}\", \"target_conf\": {}, \"db_volume_size\": {}, \"temp_mem_size\": {}, \"temp_disk_size\": {temp_disk}, \"thread_count\": {worker_limit}, \"replace\": {}}}",
+            fastmig_verify::report::json_str(&self.target_name),
+            line_name(self.target_line),
+            self.target_conf
+                .as_deref()
+                .map_or("null".into(), |c| fastmig_verify::report::json_str(
+                    &c.to_string_lossy()
+                )),
+            self.db_volume_size,
+            limits.memory_limit_bytes,
+            self.replace
+        )
     }
 }
 
@@ -173,8 +263,40 @@ pub fn read_log_header(f: &fs::File, path: &Path) -> io::Result<(SourceVersion, 
         .map_err(|e| io::Error::other(format!("{}: {} at {}", path.display(), e.what, e.at)))
 }
 
-/// The plan, with the target-side refusal the plan crate cannot see (the target name already registered).
-pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
+/// A usage error found while the plan is built (the `-i` control file names a volume the source does not have).
+#[derive(Debug)]
+pub struct UsageInPlan(String);
+
+impl std::fmt::Display for UsageInPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageInPlan {}
+
+/// A `make_plan` error as the command returns it: [`UsageInPlan`] is a usage error (exit 2).
+pub fn plan_error(e: io::Error) -> CliError {
+    match e.get_ref().and_then(|r| r.downcast_ref::<UsageInPlan>()) {
+        Some(u) => CliError::Usage(u.0.clone()),
+        None => CliError::Failed(e),
+    }
+}
+
+/// The plan with the target-side checks the plan crate cannot see (the target name already registered, or the
+/// database `--replace` removes and why it cannot), and that database.
+pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<(Plan, Option<ReplacedDatabase>)> {
+    let source: Vec<(i16, PathBuf)> = s
+        .vols
+        .volumes()
+        .iter()
+        .map(|v| (v.volid, v.path.clone()))
+        .collect();
+    let volume_targets = volume_targets::targets(&o.layout, &o.target_dir, &o.target_name, &source)
+        .map_err(|e| match e {
+            CliError::Usage(m) => io::Error::other(UsageInPlan(m)),
+            CliError::Failed(e) => e,
+        })?;
     let mut plan = fastmig_plan::build(&PlanInputs {
         source: &s.entry,
         source_dbtxt: &o.source_dbtxt,
@@ -182,6 +304,7 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
         log: &s.log,
         target_line: o.target_line,
         target_dir: &o.target_dir,
+        volume_targets: &volume_targets,
         allow_clone: o.allow_clone,
         source_ignores_trailing_space: o
             .source_conf
@@ -196,8 +319,41 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
             .transpose()?
             .unwrap_or(false),
     })?;
-    if let Err(e) = register_db::check_name_free(&o.target_dbtxt, &o.target_name) {
-        plan.refusals.push(e.to_string());
+    let mut replaced = None;
+    if o.replace {
+        let (r, refusals) = replace_target::find_replaced(
+            &o.target_dbtxt,
+            &o.target_name,
+            &s.volume_paths(),
+            &o.target_dir,
+            &volume_targets,
+        )?;
+        if let Some(r) = &r {
+            plan.warnings.push(format!(
+                "--replace: {} registered in {} is removed before the migration writes ({} volumes, {} log files)",
+                o.target_name,
+                o.target_dbtxt.display(),
+                r.volumes.len(),
+                r.logs.len()
+            ));
+        }
+        plan.refusals.extend(refusals);
+        replaced = r;
+    } else {
+        if let Err(e) = register_db::check_name_free(&o.target_dbtxt, &o.target_name) {
+            plan.refusals
+                .push(format!("{e} (pass -r, --replace to replace it)"));
+        }
+        let marker = o.target_dir.join(incomplete_marker::MARKER_NAME);
+        for t in volume_targets
+            .iter()
+            .filter(|t| !t.starts_with(&o.target_dir))
+        {
+            if t.exists() && !marker.exists() {
+                plan.refusals
+                    .push(format!("target volume {} already exists", t.display()));
+            }
+        }
     }
     // a copied source still naming the original volumes (workspace#515)
     let (warnings, refusals) = volume_dirs::check(s, o.locate);
@@ -205,20 +361,12 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<Plan> {
     plan.refusals.extend(refusals);
     // a rerun removes what the previous run left before it writes: that space is free to it (workspace#526)
     plan.available_bytes += incomplete_marker::reclaimable_bytes(&o.target_dir)?;
-    Ok(plan)
+    Ok((plan, replaced))
 }
 
 pub fn run(argv: &[String]) -> Result<u8, CliError> {
-    let flags = [FLAGS, limits::FLAGS, &["--workers"]].concat();
-    let p = parse(
-        argv,
-        &flags,
-        &[SWITCHES, &["--json", "--verify", "--help"]].concat(),
-    )?;
-    if p.switch("--help") {
-        println!("{HELP}");
-        return Ok(0);
-    }
+    let flags = [FLAGS, limits::FLAGS, &["--thread-count"]].concat();
+    let p = parse(argv, &flags, &[SWITCHES, &["--json", "--check"]].concat())?;
     let o = PlanOptions::from(&p, "plan")?;
     let s = OpenSource::open(&o)?;
     let plan = match make_plan(&o, &s) {
@@ -227,17 +375,20 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
             println!("{e}");
             return Ok(1);
         }
-        r => r?,
+        Err(e) => return Err(plan_error(e)),
+        Ok((plan, _)) => plan,
     };
-    let limits = Limits::from(&p, &o.target_dir)?;
+    let limits = Limits::from(&p, &o.target_dir, o.conf.data_buffer_size)?;
     let mem = limits.memory_limit_bytes;
+    let workers = limits::worker_limit(&p)?;
+    let settings = o.settings_json(&limits, workers, s.vols.io_pagesize() as u64);
     let storage = RunStorage::detect(&s.volume_paths(), &o.target_dir, &limits.spill_dir);
     let est = match resource_estimate::estimate(
         &s.vols,
         plan.version_pair,
         plan.source_version,
         lob_base_dir(&s.entry).map_err(io::Error::other)?.as_deref(),
-        limits::worker_limit(&p)?,
+        workers,
         storage.source_extent_reads(),
         limits::physical_memory()?,
     ) {
@@ -250,15 +401,15 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     let mut plan = plan;
     let space = match est {
         Ok(mut est) => {
-            est.source_groups = verify::source_key_groups(
+            est.source_groups = check::source_key_groups(
                 &s,
                 o.locate,
                 est.workers,
                 mem,
                 storage.source_extent_reads(),
             )?;
-            if p.switch("--verify") {
-                let (bytes, pages) = verify::source_pair_bytes(&s, o.locate, est.workers)?;
+            if p.switch("--check") {
+                let (bytes, pages) = check::source_pair_bytes(&s, o.locate, est.workers)?;
                 est.verify_source = Some(bytes);
                 est.verify_heap_pages = Some(pages);
             }
@@ -278,7 +429,12 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     match (&space, p.switch("--json")) {
         (Ok((t, est)), true) => print!(
             "{}",
-            plan_report::json(&plan, Ok((t, est.json(mem).as_str())), &storage_json)
+            plan_report::json(
+                &plan,
+                Ok((t, est.json(mem).as_str())),
+                &storage_json,
+                &settings
+            )
         ),
         (Ok((t, est)), false) => {
             print!("{}", plan_report::table(&plan, Ok(t)));
@@ -287,7 +443,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         }
         (Err(e), true) => print!(
             "{}",
-            plan_report::json(&plan, Err(e.as_str()), &storage_json)
+            plan_report::json(&plan, Err(e.as_str()), &storage_json, &settings)
         ),
         (Err(e), false) => {
             print!("{}", plan_report::table(&plan, Err(e.as_str())));

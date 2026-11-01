@@ -1,19 +1,23 @@
-//! `cubrid-fastmig migrate`: moves a cleanly shut down database to a new directory and registers it; with `--verify`
-//! it verifies the target first.
+//! `cubrid-fastmig migrate`: moves a cleanly shut down database to a new directory and registers it; with `--check`
+//! it checks the target first.
 //!
-//! Input: the source DB name (found in the source `databases.txt`), the target directory and options.
-//! Output: the target volumes, a new `_lgat`, `_vinf`, `_keys`, Java SP directories, referenced LOB files, and in
-//! `<dest>/fastmig/`: `plan.json`, `report.json`, `verify.jsonl` (with `--verify`), the SQL files for the user
-//! (`deferred-indexes.sql`, `recompile-plcsql.sql`, `recompile-views.sql`, `post-migration-fixes.sql`, `update-statistics.sql`), `lob-manifest`, `lob-outside-base`,
-//! `measured-classes` and `source-fingerprint` (read by finalize); then the target's `databases.txt` line. Progress
-//! (the phases in `PHASES`) goes to stderr. The source is only read; its active log is read-locked for the whole run.
-//! Order: the plan refuses before anything is written; the new log comes last of the writes; with `--verify` the
-//! verifier runs on the durable target and only a target with 0 migration defects is registered and loses its
-//! incomplete marker; without it every finished run is registered (ADR 0015) and `verify.jsonl` is not written.
+//! Input: the source DB name (found in the source `databases.txt`), the optional new DB name, `-F` and options.
+//! Output: the target volumes (at `-F`, `-E` or the `-i` paths), a new `_lgat`, `_vinf`, `_keys`, Java SP
+//! directories, referenced LOB files, and in `<-F>/fastmig/`: `plan.json`, `report.json`, `check.jsonl` (with
+//! `--check`), the SQL files for the user (`deferred-indexes.sql`, `recompile-plcsql.sql`, `recompile-views.sql`,
+//! `post-migration-fixes.sql`, `update-statistics.sql`), `lob-manifest`, `lob-outside-base`, `measured-classes` and
+//! `source-fingerprint` (read by finalize), and once finished `created-paths` (what the run created, read by a later
+//! `--replace`); then the target's `databases.txt` line. Progress (the phases in `PHASES`) goes to stderr. The source
+//! is only read; its active log is read-locked for the whole run.
+//! Order: the plan refuses before anything is written; with `-r` the old database is removed after that and before
+//! the first write; the new log comes last of the writes; with `--check` the verifier runs on the durable target and
+//! only a target with 0 migration defects is registered and loses its incomplete marker; without it every finished
+//! run is registered (ADR 0015) and `check.jsonl` is not written; with `-d` the source is finalized last.
 //! Between the copy and the new log: page treatment, index rebuild and catalog regeneration (workspace#503, #504);
 //! a target out of space grows like the engine, and added volumes join `_vinf`, the marker and the fsync pass (#508).
-//! Source: decisions G1 workspace#481 (command surface, plan, marker; verify opt-in per ADR 0015), G4 workspace#485
-//! (new log), G6 workspace#488 (LOB and Java assets), workspace#495 (verify), workspace#505 (this wiring).
+//! Source: decisions G1 workspace#481 (command surface, plan, marker; check opt-in per ADR 0015), G4 workspace#485
+//! (new log), G6 workspace#488 (LOB and Java assets), workspace#495 (verifier), workspace#505 (this wiring), G13
+//! workspace#604 (copydb names, `-r`, `-d`, `-E`/`-i`, conf defaults).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -25,6 +29,7 @@ use std::time::Instant;
 
 use fastmig_catalog::output_sql::UPDATE_STATISTICS_SQL;
 use fastmig_copy::byte_copy::{CopyRange, copy_range};
+use fastmig_copy::incomplete_marker::CREATED_PATHS;
 use fastmig_copy::out_of_volume_asset::{self, AssetOutcome};
 use fastmig_copy::volume_copy::{CHUNK_BYTES, IO_BUF_BYTES, clone_targets, preallocate_targets};
 use fastmig_copy::worker_pool;
@@ -52,53 +57,68 @@ use fastmig_verify::Role;
 
 use crate::args::{CliError, parse};
 use crate::catalog_regeneration;
-use crate::finalize::OUTSIDE_BASE;
+use crate::check::{self, DbArg, run_verifier};
+use crate::finalize::{self, CHECK_REPORT, OUTSIDE_BASE};
 use crate::limits::{self, Limits};
 use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
+use crate::replace_target::{self, ReplacedDatabase};
 use crate::required_sql;
 use crate::resource_estimate::{self, ResourceEstimate};
 use crate::source_fingerprint::{self, SourceFingerprint};
 use crate::storage_kind_detect::RunStorage;
 use crate::target_space::{self, Reservation, TargetSpace};
-use crate::verify::{self, DbArg, run_verifier};
 use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
 use fastmig_index::spill_arena::SpillArena;
 use fastmig_index::temp_disk::TEMP_DISK;
 
-const HELP: &str = "\
-cubrid-fastmig migrate <db> --dest <dir> [options]
-  --dest <dir>                   target directory for the volumes (must be empty or hold FASTMIG_INCOMPLETE;
+pub const HELP: &str = "\
+cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
+  Moves the cleanly shut down database <db> to <dir> as <new-db> (default: <db>) and registers it.
+  -F, --file-path <dir>          target directory of volume 0 and fastmig/ (must be empty or hold FASTMIG_INCOMPLETE;
                                  refused while another migrate holds its lock)
-  --target-version 11.4|develop  target release line (default: develop; 11.4 takes a 10.2, 11.2, 11.3 or 11.4
-                                 source)
-  --log-dir <dir>                target log directory (default: --dest)
-  --workers <n>                  worker limit: thread cap for the whole run (default: CPUs / 2)
-  --target-name <name>           target DB name (default: <db>)
+  -L, --log-path <dir>           target log directory (default: -F)
+  -B, --lob-base-path <dir>      target lob-base-path (default: <-F>/lob)
+  -E, --extended-volume-path <dir>  target directory of volumes 1.. (default: -F); not with -i
+  -i, --control-file <file>      target path per volume, copydb's format: `volid source_fullvolname dest_fullvolname`
+                                 lines (volumes it does not list go to -F); not with -E
+  --target-version 11.4|develop  target release line (default: the line of the install $CUBRID; 11.4 takes a 10.2,
+                                 11.2, 11.3 or 11.4 source)
+  -r, --replace                  replace a database registered under <new-db> in the target databases.txt: its
+                                 volumes, logs, _vinf, _dwb and line, and the paths of its fastmig record
+                                 (<vol-path>/fastmig/created-paths), are removed before the writes; refused while its
+                                 server is up or when <dir> would still hold other files
+  -d, --delete-source            turns on --check; with 0 migration defects the source is deleted at the end as by
+                                 finalize (ADR 0008), else it is kept and migrate exits 1
+  --check                        run the check after the writes: structure checks as checkdb does, plus a comparison
+                                 with the source; register and remove FASTMIG_INCOMPLETE only with 0 migration defects
+                                 (default: not run; finalize refuses a target without a passing check)
+  -t, --thread-count <n>         worker limit: thread cap for the whole run (default: CPUs / 2)
+  --temp-mem-size <size>         memory limit for the whole run, e.g. 16G (default: the target conf's
+                                 data_buffer_size, else physical memory / 4, at least 256M)
+  --temp-disk-size min|max|<size>  temp disk limit: spill bytes on disk at once, kept by building indexes in batches
+                                 (default: from the target conf's temp_file_max_size_in_pages: > 0 pages × page
+                                 size, 0 min; else asked on a terminal, max when it fits the free space;
+                                 docs/resources.md)
+  --spill-dir <dir>              where stages over the memory limit spill (default: <-F>/fastmig/spill)
+  --db-volume-size <size>        size cap of a volume the run adds when the target runs out of space, e.g. 512M
+                                 (default: the target conf's db_volume_size, else 512M)
+  --no-statistics                leave update-statistics.sql out of the required SQL list
+  --server-name <host>           db-host of the target's databases.txt line (default: the source's)
   --source-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
   --target-databases-txt <file>  default: $CUBRID_DATABASES/databases.txt
-  --lob-dir <dir>                target lob-base-path (default: <dest>/lob)
-  --mem <size>                   memory limit for the whole run, e.g. 16G (default: physical memory / 4, at least 256M)
-  --spill-dir <dir>              where stages over the memory limit spill (default: <dest>/fastmig/spill)
-  --temp-disk min|max|<size>     temp disk limit: spill bytes on disk at once, kept by building indexes in batches
-                                 (default: asked on a terminal, else max when it fits the free space;
-                                 docs/resources.md)
-  --db-volume-size <size>        the target server's db_volume_size: size cap of a volume the run adds when the
-                                 target runs out of space, e.g. 512M (default: 512M, the engine default)
-  --verify                       run the verifier on target and source after the writes; register and remove
-                                 FASTMIG_INCOMPLETE only with 0 migration defects (default: not run; finalize
-                                 refuses a target without a passing verify)
-  --source-conf <file>           the source server's cubrid.conf (see plan --help)
+  --source-conf <file>           the source server's cubrid.conf (see plan -h)
   --target-conf <file>           the target server's cubrid.conf (default: $CUBRID/conf/cubrid.conf)
-  --no-clone                     byte-copy even where the filesystem could clone (measures the byte copy where clone would be chosen)
+  --no-clone                     byte-copy even where the filesystem could clone (clone is chosen per volume when its
+                                 target directory is on the source volume's filesystem; use this when the target
+                                 must not share blocks with the source)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
 
 const FLAGS: &[&str] = &[
-    "--log-dir",
-    "--workers",
-    "--lob-dir",
-    "--db-volume-size",
-    "--temp-disk",
+    "--log-path",
+    "--thread-count",
+    "--lob-base-path",
+    "--server-name",
 ];
 /// The run's phases, one per `Report::lap` in `migrate`, in order (GLOSSARY "phase").
 const PHASES: &[PhaseSpec] = &[
@@ -142,7 +162,7 @@ const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("register"),
 ];
 /// The verifier's parts (workspace#560): the target's heap pages and pairs, then the source's, each side at its own
-/// rate (a source of an older line reads and sorts slower: spilled runs, older records). `verify::run_verifier`
+/// rate (a source of an older line reads and sorts slower: spilled runs, older records). `check::run_verifier`
 /// counts them in this order.
 const VERIFIER_SAME_LINE: PhaseSpec = PhaseSpec::parts(
     "verifier",
@@ -186,7 +206,7 @@ const DURABLE_SYNC: usize = 9;
 /// Meter of the verifier (workspace#560): index pairs merged, target and source.
 const VERIFIER: usize = 10;
 
-const SWITCHES: &[&str] = &["--help", "--verify"];
+const SWITCHES: &[&str] = &["--check", "--delete-source", "--no-statistics"];
 
 struct Options {
     plan: PlanOptions,
@@ -194,47 +214,45 @@ struct Options {
     worker_limit: usize,
     lob_dir: PathBuf,
     limits: Limits,
-    /// `--verify`: run the verifier after the writes and register only a target with 0 migration defects (ADR 0015).
-    verify: bool,
-    /// The target server's `db_volume_size` in bytes: size cap of an added volume (ADR 0013).
-    db_volume_size: u64,
+    /// `--check`: run the verifier after the writes and register only a target with 0 migration defects (ADR 0015).
+    check: bool,
+    /// `-d, --delete-source`: finalize the source at the end when the check passed (ADR 0008, workspace#604).
+    delete_source: bool,
+    /// `--no-statistics` left out: update-statistics.sql stays in the required SQL list (workspace#604).
+    statistics: bool,
+    /// `--server-name`: the db-host of the target's databases.txt line; none: the source's (workspace#604).
+    server_name: Option<String>,
 }
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
     let flags = [FLAGS, plan_cmd::FLAGS, limits::FLAGS, progress_args::FLAGS].concat();
     let p = parse(argv, &flags, &[SWITCHES, plan_cmd::SWITCHES].concat())?;
-    if p.switch("--help") {
-        println!("{HELP}\n{}", progress_args::HELP);
-        return Ok(());
-    }
     let plan = PlanOptions::from(&p, "migrate")?;
     let worker_limit = limits::worker_limit(&p)?;
-    let temp_disk = limits::temp_disk_choice(&p)?;
     let o = Options {
         log_dir: p
-            .value("--log-dir")
+            .value("--log-path")
             .map(absolute)
             .transpose()?
             .unwrap_or_else(|| plan.target_dir.clone()),
         worker_limit,
-        lob_dir: match p.value("--lob-dir") {
+        lob_dir: match p.value("--lob-base-path") {
             Some(d) => absolute(d.strip_prefix("file:").unwrap_or(d))?,
             None => plan.target_dir.join("lob"),
         },
-        limits: Limits::from(&p, &plan.target_dir)?,
-        db_volume_size: match p.value("--db-volume-size") {
-            Some(v) => limits::parse_size(v)
-                .ok_or_else(|| CliError::Usage(format!("bad --db-volume-size {v}")))?,
-            None => 512 << 20,
-        },
-        verify: p.switch("--verify"),
+        limits: Limits::from(&p, &plan.target_dir, plan.conf.data_buffer_size)?,
+        // -d deletes the source only after a passing check (workspace#604)
+        check: p.switch("--check") || p.switch("--delete-source"),
+        delete_source: p.switch("--delete-source"),
+        statistics: !p.switch("--no-statistics"),
+        server_name: p.value("--server-name").map(str::to_string),
         plan,
     };
     // the copy engine streams every volume through one fixed buffer per worker; the index build merges and spills
     // through fixed buffers per worker too
     if limits::mem_min(o.worker_limit) > o.limits.memory_limit_bytes {
         return Err(CliError::Usage(format!(
-            "--workers {} needs --mem {} KiB at least (copy buffers, index build merge and spill buffers)",
+            "--thread-count {} needs --temp-mem-size {} KiB at least (copy buffers, index build merge and spill buffers)",
             o.worker_limit,
             limits::mem_min(o.worker_limit) >> 10
         )));
@@ -243,7 +261,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     // terminal before the progress display starts). The source log stays read-locked while `src` lives.
     let started = Instant::now();
     let src = OpenSource::open(&o.plan)?;
-    let plan = make_plan(&o.plan, &src)?;
+    let (plan, replaced) = make_plan(&o.plan, &src).map_err(plan_cmd::plan_error)?;
     if !plan.refusals.is_empty() {
         return Err(CliError::Failed(io::Error::other(format!(
             "the plan refuses the migration:\n  {}",
@@ -270,7 +288,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     let pair_count_used = ProcSample::now().zip(before).map(|(a, b)| a.since(b));
     pre.push(("precheck.appended_bound", est.appended_seconds));
     let t = Instant::now();
-    est.source_groups = verify::source_key_groups(
+    est.source_groups = check::source_key_groups(
         &src,
         o.plan.locate,
         o.worker_limit,
@@ -279,9 +297,9 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     )?;
     pre.push(("precheck.source_key_groups", t.elapsed().as_secs_f64()));
     let mem = o.limits.memory_limit_bytes;
-    if o.verify {
+    if o.check {
         let t = Instant::now();
-        let (bytes, pages) = verify::source_pair_bytes(&src, o.plan.locate, o.worker_limit)?;
+        let (bytes, pages) = check::source_pair_bytes(&src, o.plan.locate, o.worker_limit)?;
         pre.push(("precheck.verify_source_count", t.elapsed().as_secs_f64()));
         est.verify_source = Some(bytes);
         est.verify_heap_pages = Some(pages);
@@ -289,7 +307,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         let need = est.verify_mem_min().unwrap_or(0);
         if mem < need {
             return Err(CliError::Failed(io::Error::other(format!(
-                "--verify with --workers {} needs --mem {} KiB at least (the verifier's live row map, merge floors and \
+                "--check with --thread-count {} needs --temp-mem-size {} KiB at least (the verifier's live row map, merge floors and \
                  scan shares)",
                 o.worker_limit,
                 need >> 10
@@ -299,10 +317,10 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     let target = target_space::bound(&plan, &est, &src.vols, new_log::file_bytes(&src.log))?;
     let asked = Instant::now();
     let temp_limit = temp_disk_choice::choose(
-        temp_disk,
+        o.plan.temp_disk_choice(src.vols.io_pagesize() as u64),
         &est,
         mem,
-        o.verify,
+        o.check,
         target.needed(),
         plan.available_bytes,
         &o.limits.spill_dir,
@@ -328,7 +346,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         Some(o.limits.memory_limit_bytes),
         Some(temp_limit),
     )?;
-    let required = required_sql::text(&required_sql::list(&plan));
+    let required = required_sql::text(&required_sql::list(&plan, o.statistics));
     let report = migrate(
         &o,
         Begun {
@@ -341,6 +359,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             storage,
             pre,
             pair_count_used,
+            replaced,
         },
         progress,
     )
@@ -348,6 +367,9 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
     monitor.finish();
     eprint!("{required}");
     println!("{report}");
+    if o.delete_source {
+        finalize::finalize(&o.plan.target_dir)?;
+    }
     Ok(())
 }
 
@@ -388,6 +410,8 @@ struct Begun {
     pre: Vec<(&'static str, f64)>,
     /// What the precheck's pair count used (CPU seconds, device bytes): the resource it was bound by.
     pair_count_used: Option<ProcSample>,
+    /// The database `-r` removes before the first write (workspace#604).
+    replaced: Option<ReplacedDatabase>,
 }
 
 /// Returns report.json.
@@ -451,7 +475,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     rep.progress
         .set_total(INDEX_BUILD, b.est.heap_pages() + b_appended);
     rep.progress.set_part_total(INDEX_BUILD, 1, b_pairs);
-    if o.verify {
+    if o.check {
         // per side: every heap (the target's as many pages as the source's, grown by the page treatment), then every
         // pair once in the sort step (a run sorted, or a spilled run merged down) and once in the merge. shortcut: a
         // later index batch reads its heaps again, not counted, until a batched run is measured
@@ -469,18 +493,22 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     }
     rep.lap("precheck");
 
+    // -r: the old database goes now, after every refusal and before the first write (workspace#604)
+    if let Some(r) = &b.replaced {
+        let gone = replace_target::remove(r, &po.target_dbtxt)?;
+        rep.progress.warn(format!(
+            "--replace: removed {} ({} paths)",
+            r.entry.name,
+            gone.len()
+        ));
+    }
     let mut jobs = Vec::new();
     for v in &plan.volumes {
-        let target = if v.volid == 0 {
-            po.target_dir.join(&po.target_name)
-        } else {
-            po.target_dir
-                .join(format!("{}_x{:03}", po.target_name, v.volid))
-        };
         jobs.push(VolumeJob {
             volid: v.volid,
             source: open_source(&v.path)?,
-            target,
+            // -F, -E or -i (workspace#604)
+            target: v.target.clone(),
             io_pagesize: src.vols.io_pagesize(),
             preallocated: v.copy_method == CopyMethod::Copy,
             precloned: false,
@@ -539,7 +567,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &src,
         po,
         src_lob_base.as_deref(),
-        &plan_report::json(&plan, Ok((&target, resources.as_str())), &b.storage.json()),
+        &plan_report::json(
+            &plan,
+            Ok((&target, resources.as_str())),
+            &b.storage.json(),
+            &po.settings_json(&o.limits, o.worker_limit, src.vols.io_pagesize() as u64),
+        ),
     )?;
     rep.lap("open_sources");
 
@@ -573,7 +606,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let trk = BootDbParm::read(&vols)?.1.trk_vfid;
     // a target out of space grows like the engine would: volumes added next to volume 0 (ADR 0013, workspace#508)
     let growth = VolumeGrowth {
-        nsect_vol_max: sectors_of_bytes(vols.io_pagesize(), o.db_volume_size),
+        nsect_vol_max: sectors_of_bytes(vols.io_pagesize(), po.db_volume_size),
         place: Some(VolumePlace {
             dir: po.target_dir.clone(),
             db_name: po.target_name.clone(),
@@ -740,8 +773,8 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         &fastmig_dir.join("measured-classes"),
         &measured_text,
     )?;
-    let verify_report = fastmig_dir.join("verify.jsonl");
-    let (passed, summary) = if o.verify {
+    let verify_report = fastmig_dir.join(CHECK_REPORT);
+    let (passed, summary) = if o.check {
         marker.create_dir_all(&limits.spill_dir)?;
         marker.record(&verify_report)?;
         let (code, summary) = run_verifier(
@@ -772,7 +805,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         (code == 0, summary)
     } else {
         rep.progress
-            .warn("verify: not run (pass --verify); finalize needs a passing verify".into());
+            .warn("check: not run (pass --check); finalize needs a passing check".into());
         (true, "null".into())
     };
     rep.lap("verify");
@@ -783,7 +816,10 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
             &DatabaseEntry {
                 name: po.target_name.clone(),
                 vol_path: po.target_dir.clone(),
-                hosts: src.entry.hosts.clone(),
+                hosts: o
+                    .server_name
+                    .clone()
+                    .unwrap_or_else(|| src.entry.hosts.clone()),
                 log_path: o.log_dir.clone(),
                 lob_base_path: Some(format!("file:{}", o.lob_dir.display())),
             },
@@ -823,12 +859,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     write_recorded(&marker, &fastmig_dir.join("report.json"), &report)?;
     if !passed {
         return Err(io::Error::other(format!(
-            "verify found migration defects ({}); the target keeps FASTMIG_INCOMPLETE and is not registered\n{summary}",
+            "the check found migration defects ({}); the target keeps FASTMIG_INCOMPLETE and is not registered\n{summary}",
             verify_report.display()
         )));
     }
     // the marker goes last: everything above is in place
-    marker.finish()?;
+    marker.finish(&fastmig_dir.join(CREATED_PATHS))?;
     drop(src);
     Ok(report)
 }
@@ -940,7 +976,7 @@ fn report_json(
         plan.lob.absolute_under_base,
         src_log.append_lsa,
         heap_counter::now_and_peak().map_or("null".into(), |(_, peak)| peak.to_string()),
-        required_sql::json(&required_sql::list(plan)),
+        required_sql::json(&required_sql::list(plan, o.statistics)),
         fastmig_progress::report::json(&rep.progress),
     )
 }

@@ -28,7 +28,7 @@ pub struct Sample {
     pub key: Vec<u8>,
 }
 
-/// Where a run's records are: its own file, or extents of the spill arena (`--temp-disk`, workspace#526).
+/// Where a run's records are: its own file, or extents of the spill arena (`--temp-disk-size`, workspace#526).
 enum Storage {
     File(PathBuf),
     Arena(Arc<SpillArena>, Vec<Extent>),

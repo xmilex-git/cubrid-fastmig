@@ -3,7 +3,7 @@
 //!
 //! Input: the task count, the worker limit and a task function. Output: the first error any task returned; once one
 //! fails, threads stop taking new tasks.
-//! Source: decision G1 workspace#481 (`--workers` is the one process-wide worker limit).
+//! Source: decision G1 workspace#481 (`--thread-count` is the one process-wide worker limit).
 
 use std::io;
 use std::sync::Mutex;

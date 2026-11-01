@@ -3,7 +3,8 @@
 //!
 //! Input: the plan (routine, view and deferred index counts). Output: the steps; their text for stderr; their JSON.
 //! Order: PL/CSQL routines, then views (a view spec may call a routine), then deferred indexes, then statistics (taken
-//! with every index in place). A file with no statement is left out but update-statistics.sql, which always runs.
+//! with every index in place). A file with no statement is left out but update-statistics.sql, which always runs unless `--no-statistics`
+//! (workspace#604).
 //! Source: workspace#599 (a view not recompiled fails a debug develop server's output check, unlike a deferred index,
 //! which only makes a query slower), workspace#488 (PL/CSQL), workspace#486 (deferred indexes), workspace#482 7.
 
@@ -18,7 +19,8 @@ pub struct RequiredSql {
     pub until_run: &'static str,
 }
 
-pub fn list(plan: &Plan) -> Vec<RequiredSql> {
+/// `statistics` false: `--no-statistics`, update-statistics.sql left out (workspace#604).
+pub fn list(plan: &Plan, statistics: bool) -> Vec<RequiredSql> {
     let steps = [
         RequiredSql {
             file: "recompile-plcsql.sql",
@@ -43,7 +45,10 @@ pub fn list(plan: &Plan) -> Vec<RequiredSql> {
             until_run: "the optimizer plans with the statistics of the source or none",
         },
     ];
-    steps.into_iter().filter(|s| s.objects != Some(0)).collect()
+    steps
+        .into_iter()
+        .filter(|s| s.objects != Some(0) && (statistics || s.objects.is_some()))
+        .collect()
 }
 
 /// The block migrate prints last on stderr.

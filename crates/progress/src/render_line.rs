@@ -1,7 +1,7 @@
 //! The plain display: one line per print, for a pipe, a log file or CI. Written to stderr by the monitor.
 //!
 //! Input: the progress state, this tick's estimate, the heap reading. Output: lines such as
-//! `[phase 3/8 volumes] 42.1% (198 MiB/470 MiB, 1.1 GiB/s) ETA phase 0:02 total ~0:05 done ~22:41 heap 2.1 MiB/max 3.0 MiB of --mem 16 GiB`
+//! `[phase 3/8 volumes] 42.1% (198 MiB/470 MiB, 1.1 GiB/s) ETA phase 0:02 total ~0:05 done ~22:41 heap 2.1 MiB/max 3.0 MiB of --temp-mem-size 16 GiB`
 //! followed by ` (since last: volume-copy done 1.78 s 4.2 GiB 2.4 GiB/s, volume-paths done)` naming the phases
 //! that ended since the previous line.
 //! Source: user request relayed in workspace#472 (line format).
@@ -13,12 +13,12 @@ use crate::estimate::{Estimate, elapsed, fraction};
 use crate::meter::{Phase, Progress};
 use crate::unit::{self, Unit};
 
-/// Current and maximum heap bytes (`None` without the counting allocator) and the memory limit (`--mem`), if any.
+/// Current and maximum heap bytes (`None` without the counting allocator) and the memory limit (`--temp-mem-size`), if any.
 #[derive(Clone, Copy)]
 pub struct Heap {
     pub now_max: Option<(u64, u64)>,
     pub memory_limit: Option<u64>,
-    /// Temp disk bytes now, at most, and the limit (`--temp-disk`), when a limit is set.
+    /// Temp disk bytes now, at most, and the limit (`--temp-disk-size`), when a limit is set.
     pub temp: Option<(u64, u64, u64)>,
 }
 
@@ -33,11 +33,11 @@ impl Heap {
             None => "heap n/a".into(),
         };
         if let Some(c) = self.memory_limit {
-            s += &format!(" of --mem {}", unit::bytes(c as f64));
+            s += &format!(" of --temp-mem-size {}", unit::bytes(c as f64));
         }
         if let Some((now, max, limit)) = self.temp {
             s += &format!(
-                " temp {}/max {} of --temp-disk {}",
+                " temp {}/max {} of --temp-disk-size {}",
                 unit::bytes(now as f64),
                 unit::bytes(max as f64),
                 unit::bytes(limit as f64)

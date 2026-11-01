@@ -29,7 +29,14 @@ fn strings<'a>(v: impl IntoIterator<Item = &'a str>) -> String {
 /// `estimate`: the target space and the resource table as JSON (`resource_estimate`), or why they were not estimated;
 /// then `target_space` and `resources` are `null` and `estimate_error` holds the reason. `storage`: the storage kinds
 /// of the source, target and temp side (`storage_kind_detect`, workspace#561).
-pub fn json(p: &Plan, estimate: Result<(&TargetSpace, &str), &str>, storage: &str) -> String {
+/// `settings`: the values chosen from the command line, the target conf or the defaults (`PlanOptions::settings_json`,
+/// workspace#604).
+pub fn json(
+    p: &Plan,
+    estimate: Result<(&TargetSpace, &str), &str>,
+    storage: &str,
+    settings: &str,
+) -> String {
     let (space, resources, error) = match estimate {
         Ok((t, r)) => (
             format!(
@@ -55,9 +62,10 @@ pub fn json(p: &Plan, estimate: Result<(&TargetSpace, &str), &str>, storage: &st
         .iter()
         .map(|v| {
             format!(
-                "{{\"volid\": {}, \"path\": {}, \"bytes\": {}, \"copy_method\": \"{}\"}}",
+                "{{\"volid\": {}, \"path\": {}, \"target\": {}, \"bytes\": {}, \"copy_method\": \"{}\"}}",
                 v.volid,
                 json_str(&v.path.to_string_lossy()),
+                json_str(&v.target.to_string_lossy()),
                 v.bytes,
                 v.copy_method.name()
             )
@@ -92,7 +100,7 @@ pub fn json(p: &Plan, estimate: Result<(&TargetSpace, &str), &str>, storage: &st
         })
         .collect();
     format!(
-        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {space},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"estimate_error\": {error},\n  \"storage\": {storage},\n  \"classes\": [\n    {}\n  ]\n}}\n",
+        "{{\n  \"version_pair\": {{\"source\": \"{}\", \"target\": \"{}\"}},\n  \"settings\": {settings},\n  \"refusals\": {},\n  \"warnings\": {},\n  \"volumes\": [{}],\n  \"re_encoded_classes\": {},\n  \"deferred_indexes\": {},\n  \"system_name_rewrites\": {},\n  \"plcsql_routines\": {},\n  \"lob\": {{\"referenced_files\": {}, \"referenced_bytes\": {}, \"absolute_under_base\": {}, \"outside_base\": [{}], \"unsupported\": {}, \"orphan_files\": {}, \"orphan_bytes\": {}}},\n  \"java\": {{\"files\": {}, \"bytes\": {}}},\n  \"java_static\": {{\"files\": {}, \"bytes\": {}}},\n  \"target_space\": {space},\n  \"treated_pages\": {},\n  \"resources\": {resources},\n  \"estimate_error\": {error},\n  \"storage\": {storage},\n  \"classes\": [\n    {}\n  ]\n}}\n",
         p.source_version.name(),
         line_name(p.version_pair.target),
         strings(p.refusals.iter().map(String::as_str)),
@@ -128,11 +136,12 @@ pub fn table(p: &Plan, t: Result<&TargetSpace, &str>) -> String {
     s.push_str("volumes:\n");
     for v in &p.volumes {
         s.push_str(&format!(
-            "  {:>4}  {:<5}  {:>14} B  {}\n",
+            "  {:>4}  {:<5}  {:>14} B  {} -> {}\n",
             v.volid,
             v.copy_method.name(),
             v.bytes,
-            v.path.display()
+            v.path.display(),
+            v.target.display()
         ));
     }
     let count = |h: HeapTreatment| p.classes.iter().filter(|c| c.heap == h).count();

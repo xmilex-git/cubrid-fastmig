@@ -2,9 +2,9 @@
 //! unchanged — the only command that deletes anything of the source.
 //!
 //! Input: the target directory of a finished migrate (`<dest>/fastmig/` holds the source fingerprint, the LOB
-//! manifests and the verify report). Output: the source's files removed, its databases.txt line removed, and
+//! manifests and the check report `check.jsonl`). Output: the source's files removed, its databases.txt line removed, and
 //! `<dest>/fastmig/finalize.json` listing what was deleted and the LOB files kept.
-//! Guards: no incomplete marker in the target; a verify report (`migrate --verify` or a later `verify` run, ADR 0015)
+//! Guards: no incomplete marker in the target; a check report (`migrate --check` or a later `check` run, ADR 0015)
 //! whose summary has 0 migration defects; the source
 //! fingerprint (log header append_lsa and db_creation read under the read lock, every volume's size, every
 //! referenced LOB file's size) equals the one migrate recorded.
@@ -12,28 +12,35 @@
 //! directory; the referenced LOB files, then `ces_*` directories and the lob-base directory left empty; `java` and
 //! `java_static` of the volume directory. Kept: backups, `_bkvinf`, `_keys`, orphan LOB files and files outside the
 //! lob-base-path (listed in finalize.json).
+//! Also run by `migrate -d, --delete-source` at its end when the check found 0 migration defects (ADR 0008, G13
+//! workspace#604).
 //! Source: decision G1 workspace#481 (guard and delete list), G6 workspace#488 8-10 (LOB and Java files), ADR 0008.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fastmig_copy::incomplete_marker::MARKER_NAME;
+use fastmig_copy::incomplete_marker::{CREATED_PATHS, MARKER_NAME};
 use fastmig_copy::lob_manifest;
 use fastmig_copy::open_locked_log;
 use fastmig_verify::report::json_str;
 
 use crate::args::{CliError, parse};
+use crate::database_files::{log_files, remove_file, unregister};
 use crate::plan::read_log_header;
 use crate::source_fingerprint::{self, SourceFingerprint};
 
-const HELP: &str = "\
+pub const HELP: &str = "\
 cubrid-fastmig finalize <target-dir>
-  Deletes the source of the migration in <target-dir> once it verified and the source is unchanged (ADR 0008).";
+  Deletes the source of the migration in <target-dir> once its check found 0 migration defects and the source is
+  unchanged (ADR 0008).";
 
 /// `<dest>/fastmig/lob-outside-base`: LOB files the source names by an absolute path outside its lob-base-path
 /// (`<size>\t<absolute path>` lines), kept by finalize.
 pub const OUTSIDE_BASE: &str = "lob-outside-base";
+
+/// `<dest>/fastmig/check.jsonl`: the check report migrate --check and check write, finalize reads.
+pub const CHECK_REPORT: &str = "check.jsonl";
 
 fn refuse(msg: String) -> CliError {
     CliError::Failed(io::Error::other(format!("finalize refused: {msg}")))
@@ -62,8 +69,8 @@ fn current(f: &SourceFingerprint) -> io::Result<SourceFingerprint> {
     })
 }
 
-/// The last line of the verify report says 0 migration defects (`report::summary_line`); no report is no pass.
-fn verify_passed(report: &Path) -> io::Result<bool> {
+/// The last line of the check report says 0 migration defects (`report::summary_line`); no report is no pass.
+fn check_passed(report: &Path) -> io::Result<bool> {
     let text = match fs::read_to_string(report) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         r => r?,
@@ -72,39 +79,6 @@ fn verify_passed(report: &Path) -> io::Result<bool> {
         .lines()
         .last()
         .is_some_and(|l| l.starts_with("{\"kind\":\"summary\",\"migration\":0,")))
-}
-
-/// Log-directory files of the database (G1): the exact names, plus every `<db>_lgar<digits>` archive and `<db>_lgar_t`.
-fn log_files(dir: &Path, db: &str) -> io::Result<Vec<PathBuf>> {
-    let exact: Vec<String> = ["_lgat", "_lginf", "_vinf", "_dwb"]
-        .iter()
-        .map(|s| format!("{db}{s}"))
-        .collect();
-    let archive = format!("{db}_lgar");
-    let mut out = Vec::new();
-    for e in fs::read_dir(dir)? {
-        let name = e?.file_name().to_string_lossy().into_owned();
-        if exact.contains(&name)
-            || name.strip_prefix(&archive).is_some_and(|r| {
-                r == "_t" || (!r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
-            })
-        {
-            out.push(dir.join(name));
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-fn remove_file(p: &Path, deleted: &mut Vec<PathBuf>) -> io::Result<()> {
-    match fs::remove_file(p) {
-        Ok(()) => {
-            deleted.push(p.to_path_buf());
-            Ok(())
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(io::Error::new(e.kind(), format!("{}: {e}", p.display()))),
-    }
 }
 
 /// Removes `dir` when it is empty; a non-empty one stays.
@@ -132,20 +106,6 @@ fn files_below(dir: &Path, out: &mut Vec<(u64, PathBuf)>) -> io::Result<()> {
     Ok(())
 }
 
-/// Removes the line of `db` from databases.txt (rename over it, so a crash leaves the old or the new file).
-fn unregister(dbtxt: &Path, db: &str) -> io::Result<()> {
-    let text = fs::read_to_string(dbtxt)?;
-    let kept: String = text
-        .lines()
-        .filter(|l| l.split('#').next().unwrap_or("").split_whitespace().next() != Some(db))
-        .map(|l| format!("{l}\n"))
-        .collect();
-    let tmp = dbtxt.with_extension("fastmig-finalize");
-    fs::write(&tmp, kept)?;
-    fs::File::open(&tmp)?.sync_all()?;
-    fs::rename(&tmp, dbtxt)
-}
-
 fn listed(v: &[(u64, PathBuf)]) -> String {
     let items: Vec<String> = v
         .iter()
@@ -160,17 +120,17 @@ fn listed(v: &[(u64, PathBuf)]) -> String {
 }
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
-    let p = parse(argv, &[], &["--help"])?;
-    if p.switch("--help") {
-        println!("{HELP}");
-        return Ok(());
-    }
+    let p = parse(argv, &[], &[])?;
     let [dir] = p.positional.as_slice() else {
         return Err(CliError::Usage(
             "finalize takes the target directory".into(),
         ));
     };
-    let dir = std::path::absolute(dir)?;
+    finalize(&std::path::absolute(dir)?)
+}
+
+/// Deletes the source of the migration in `dir` (a target directory), guards first.
+pub fn finalize(dir: &Path) -> Result<(), CliError> {
     let fm = dir.join("fastmig");
 
     // guards, all before the first deletion
@@ -180,10 +140,10 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             dir.display()
         )));
     }
-    if !verify_passed(&fm.join("verify.jsonl"))? {
+    if !check_passed(&fm.join(CHECK_REPORT))? {
         return Err(refuse(format!(
-            "{} does not say 0 migration defects: run verify first (`migrate --verify`, or `cubrid-fastmig verify <target> --source <source> --measured-classes {}`; ADR 0015)",
-            fm.join("verify.jsonl").display(),
+            "{} does not say 0 migration defects: run the check first (`migrate --check`, or `cubrid-fastmig check <target> --source <source> --measured-classes {}`; ADR 0015)",
+            fm.join(CHECK_REPORT).display(),
             fm.join("measured-classes").display()
         )));
     }
@@ -269,6 +229,16 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         listed(&outside)
     );
     fs::write(fm.join("finalize.json"), &report)?;
+    // finalize.json is the tool's too: a later --replace of this target removes it with the rest (workspace#605)
+    let created = fm.join(CREATED_PATHS);
+    if created.exists() {
+        let mut f = fs::OpenOptions::new().append(true).open(&created)?;
+        std::io::Write::write_all(
+            &mut f,
+            format!("{}\n", fm.join("finalize.json").display()).as_bytes(),
+        )?;
+        f.sync_all()?;
+    }
     println!(
         "finalize: deleted {} paths of {}, kept {} orphan LOB files",
         deleted.len(),

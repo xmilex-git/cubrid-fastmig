@@ -7,7 +7,7 @@
 //! the overflow key file if one was needed. A unique violation, a duplicate entry, a NULL primary key column or an
 //! unreadable row stops the fill.
 //! Source: R6 § 2 (engine no-logging parallel load); workspace#503 (two-step API: BTIDs exist before the keys, so
-//! class objects and catalog rows can name them first, workspace#504), G1 workspace#481 (`--workers`, `--mem`).
+//! class objects and catalog rows can name them first, workspace#504), G1 workspace#481 (`--thread-count`, `--temp-mem-size`).
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -36,8 +36,8 @@ use crate::temp_disk::index_batches;
 use crate::volume_sink::VolumeFileSink;
 use crate::worker_limit::WorkerLimit;
 
-/// The worker limit, memory limit, spill directory and temp disk limit one run shares (cli `--workers`, `--mem`,
-/// `--spill-dir`, `--temp-disk`).
+/// The worker limit, memory limit, spill directory and temp disk limit one run shares (cli `--thread-count`, `--temp-mem-size`,
+/// `--spill-dir`, `--temp-disk-size`).
 pub struct Limits<'a> {
     pub workers: &'a WorkerLimit,
     pub memory: &'a MemoryLimit,

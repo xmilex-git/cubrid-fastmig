@@ -1,10 +1,10 @@
 //! The temp disk limit of one migrate, decided once before anything is written (workspace#526).
 //!
-//! Input: `--temp-disk min|max|<size>` or nothing, the resource estimate, the memory limit (for the table), the
+//! Input: `--temp-disk-size min|max|<size>` or nothing, the resource estimate, the memory limit (for the table), the
 //! target space the plan needs, and the free space of the target and spill filesystems.
 //! Output: the limit in bytes.
 //! Rules (user, 2026-10-30): no option on a terminal → show min and max and ask; no option otherwise → max when it
-//! fits the free space, else refuse naming the choices; with `--verify` min and max are the verifier's (it batches
+//! fits the free space, else refuse naming the choices; with `--check` min and max are the verifier's (it batches
 //! its indexes like the build, on the target then on the source: `ResourceEstimate::verify_min`, `verify_max`,
 //! workspace#553); a limit below min or a limit plus the target growth over the free space → refuse. Nothing is
 //! retried or grown during the run.
@@ -46,7 +46,7 @@ fn choices(e: &ResourceEstimate, verify: bool) -> String {
     if let (Some(v), Some(vmax), true) = (e.verify_min(), e.verify_max(), verify) {
         let (tb, sb) = e.verify_batches(v).unwrap_or((0, 0));
         return format!(
-            "--temp-disk min ({} MiB; --verify: {tb} index batches on the target, {sb} on the source, about {:.1} s more) or --temp-disk max ({} MiB, one batch each), or a size in between",
+            "--temp-disk-size min ({} MiB; --check: {tb} index batches on the target, {sb} on the source, about {:.1} s more) or --temp-disk-size max ({} MiB, one batch each), or a size in between",
             mib(v),
             e.verify_extra_seconds(v),
             mib(vmax)
@@ -55,7 +55,7 @@ fn choices(e: &ResourceEstimate, verify: bool) -> String {
     let (lo, hi) = (e.temp_min(), e.temp_max());
     let b = e.batches(lo).unwrap_or(0);
     format!(
-        "--temp-disk min ({} MiB, {b} index batches, about {:.1} s more) or --temp-disk max ({} MiB, one batch), or a size in between",
+        "--temp-disk-size min ({} MiB, {b} index batches, about {:.1} s more) or --temp-disk-size max ({} MiB, one batch), or a size in between",
         mib(lo),
         e.extra_seconds(b),
         mib(hi)
@@ -104,7 +104,7 @@ pub fn choose(
             mib(limit),
             mib(lo),
             if verify {
-                "--verify: the largest index of the target or the source"
+                "--check: the largest index of the target or the source"
             } else {
                 "the largest index's pair bytes"
             }

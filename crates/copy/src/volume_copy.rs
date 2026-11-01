@@ -6,7 +6,7 @@
 //! (an existing file is an error) and recorded in the incomplete marker before they are written; they are
 //! made durable later, with every other created file, by [`crate::durable`].
 //! Progress: `meter` (the volume-copy phase) gets the bytes of each clone and of each 8 MiB copy task.
-//! Source: decision G1 workspace#481 (clone whenever possible, copy otherwise; `--workers` slides over the work).
+//! Source: decision G1 workspace#481 (clone whenever possible, copy otherwise; `--thread-count` slides over the work).
 
 use std::fs::{File, OpenOptions};
 use std::io;

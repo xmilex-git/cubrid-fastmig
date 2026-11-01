@@ -6,7 +6,7 @@
 //! that reads one page of one class and extracts each index's key (workspace#491). Output: per class, per index
 //! its runs (`IndexRuns`) and the count of rows with an all-NULL key.
 //! Work units: a class's sectors cut into ranges of `UNIT_SECTORS`, classes largest first (LPT), every unit of every
-//! class in one queue that `--workers` threads drain — a large class spreads over the workers, hundreds of
+//! class in one queue that `--thread-count` threads drain — a large class spreads over the workers, hundreds of
 //! one-sector classes run side by side (workspace#503). A worker keeps one writer per index of the class it is on
 //! and finishes them when the next unit is another class's; the results are merged once at the end (PAR-17).
 //! Memory (workspace#493, #503): each worker holds one share of the memory limit for the whole scan, split among the
@@ -99,13 +99,13 @@ where
     let mut permits = workers.acquire(units.len().max(1));
     // half the limit for the workers' shares, the other half for finished runs kept in memory; the shares are taken
     // together and only as many workers run as get SCAN_MIN each: a worker with less spills one pair per run (the
-    // verifier at --mem 16M after its live row map: heap peak 1.1 GiB, workspace#526)
+    // verifier at --temp-mem-size 16M after its live row map: heap peak 1.1 GiB, workspace#526)
     let share = WORKER_SHARE.min(memory.limit() / (2 * permits.count));
     let mut total = memory.try_acquire(share * permits.count);
     let fed = (total.bytes / SCAN_MIN).min(permits.count);
     if fed == 0 {
         return Err(BuildError::Io(std::io::Error::other(format!(
-            "--mem leaves {} B for the heap scan, which needs at least {SCAN_MIN} B",
+            "--temp-mem-size leaves {} B for the heap scan, which needs at least {SCAN_MIN} B",
             total.bytes
         ))));
     }

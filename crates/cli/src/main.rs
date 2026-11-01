@@ -1,13 +1,17 @@
 //! The `cubrid-fastmig` command: dispatches to one module per subcommand.
 //!
 //! Input: the command line. Output: the subcommand's effect; exit code 0 on success, 2 on usage errors, 1 on
-//! failures.
-//! Source: decision G1 workspace#481 (commands plan, migrate, verify, finalize). Plus the check `set-comparison` (ADR 0007).
+//! failures. `-h`/`--help` prints the command's whole help on stdout and exits 0; a usage error (a missing required
+//! argument, an unknown option) prints one line saying what is wrong and the command's whole help on stderr, exit 2.
+//! Source: decision G1 workspace#481 (commands plan, migrate, check, finalize). Plus the check `set-comparison` (ADR
+//! 0007). Help and exit codes: G13 workspace#604.
 //!
 //! Names follow GLOSSARY.md terms (AGENTS.md § Files and modules).
 
 mod args;
 mod catalog_regeneration;
+mod check;
+mod database_files;
 mod finalize;
 mod heap_counter;
 mod limits;
@@ -17,11 +21,14 @@ mod partition_streams;
 mod plan;
 mod plan_report;
 mod progress_args;
+mod replace_target;
 mod required_sql;
 mod resource_estimate;
 mod set_comparison;
 mod source_fingerprint;
 mod storage_kind_detect;
+mod target_conf_defaults;
+mod target_install_version;
 mod target_space;
 mod temp_disk_choice;
 mod template_extract;
@@ -30,12 +37,12 @@ mod unload_normalize;
 mod unload_rules_10_2;
 mod unload_rules_before_11_4;
 mod unload_rules_official;
-mod verify;
 mod volume_dirs;
+mod volume_targets;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cubrid-fastmig plan <db> --dest <dir> [options]      (cubrid-fastmig plan --help)\n       cubrid-fastmig migrate <db> --dest <dir> [options]   (cubrid-fastmig migrate --help)\n       cubrid-fastmig verify <db> [options]                  (cubrid-fastmig verify --help)\n       cubrid-fastmig set-comparison <source-prefix> <target-prefix>   (cubrid-fastmig set-comparison --help)\n       cubrid-fastmig finalize <target-dir>                  (cubrid-fastmig finalize --help)";
+const USAGE: &str = "usage: cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]      (cubrid-fastmig plan -h)\n       cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]   (cubrid-fastmig migrate -h)\n       cubrid-fastmig check <db> [options]                          (cubrid-fastmig check -h)\n       cubrid-fastmig set-comparison <source-prefix> <target-prefix>   (cubrid-fastmig set-comparison -h)\n       cubrid-fastmig finalize <target-dir>                         (cubrid-fastmig finalize -h)";
 
 unsafe extern "C" {
     fn mallopt(param: i32, value: i32) -> i32;
@@ -44,33 +51,66 @@ unsafe extern "C" {
 /// glibc `M_MMAP_THRESHOLD`.
 const M_MMAP_THRESHOLD: i32 = -3;
 
+/// The whole help of a user command.
+fn help_of(cmd: &str) -> Option<String> {
+    Some(match cmd {
+        "plan" => plan::HELP.to_string(),
+        "migrate" => format!("{}\n{}", migrate::HELP, progress_args::HELP),
+        "check" => check::HELP.to_string(),
+        "finalize" => finalize::HELP.to_string(),
+        "set-comparison" => set_comparison::HELP.to_string(),
+        _ => return None,
+    })
+}
+
 fn main() -> ExitCode {
     // blocks of 1 MiB or more (key runs, merge and copy buffers) are mapped and go back to the system when freed:
     // glibc raises its threshold after the first such free, and later ones stayed in the per-thread arenas (the big
-    // develop DB, --mem 1G --temp-disk min: max RSS 220 MiB above the live heap, over --mem; workspace#526)
+    // develop DB, --temp-mem-size 1G --temp-disk-size min: max RSS 220 MiB above the live heap; workspace#526)
     // SAFETY: called once before any other thread exists; an unknown parameter only returns 0
     unsafe { mallopt(M_MMAP_THRESHOLD, 1 << 20) };
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let result = match argv.first().map(String::as_str) {
-        Some("migrate") => migrate::run(&argv[1..]),
-        Some("finalize") => finalize::run(&argv[1..]),
-        Some("template-extract") => template_extract::run(&argv[1..]),
-        Some("partition-streams") => partition_streams::run(&argv[1..]),
-        // verify has its own exit codes: 1 = migration defects, 2 = usage or tool error (G3 workspace#483)
-        Some("verify") => return checker_exit(verify::run(&argv[1..])),
+    let Some(cmd) = argv.first().map(String::as_str) else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let rest = &argv[1..];
+    if matches!(cmd, "-h" | "--help") {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    let help = help_of(cmd);
+    if let Some(h) = &help
+        && rest.iter().any(|a| a == "-h" || a == "--help")
+    {
+        println!("{h}");
+        return ExitCode::SUCCESS;
+    }
+    let help = help.unwrap_or_else(|| USAGE.to_string());
+    let result = match cmd {
+        "migrate" => migrate::run(rest).map(|()| 0),
+        "finalize" => finalize::run(rest).map(|()| 0),
+        "template-extract" => template_extract::run(rest).map(|()| 0),
+        "partition-streams" => partition_streams::run(rest).map(|()| 0),
+        // check has its own exit codes: 1 = migration defects, 2 = usage or tool error (G3 workspace#483)
+        "check" => return checker_exit(check::run(rest), &help),
         // 1 = the plan refuses the migration (G1 workspace#481)
-        Some("plan") => return checker_exit(plan::run(&argv[1..])),
+        "plan" => return checker_exit(plan::run(rest), &help),
         // 1 = the two unload sets differ (ADR 0007)
-        Some("set-comparison") => return checker_exit(set_comparison::run(&argv[1..])),
+        "set-comparison" => return checker_exit(set_comparison::run(rest), &help),
+        "verify" => {
+            eprintln!("error: unknown command verify (renamed: use check)\n{USAGE}");
+            return ExitCode::from(2);
+        }
         _ => {
-            eprintln!("{USAGE}");
+            eprintln!("error: unknown command {cmd}\n{USAGE}");
             return ExitCode::from(2);
         }
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::SUCCESS,
         Err(args::CliError::Usage(m)) => {
-            eprintln!("error: {m}\n{USAGE}");
+            eprintln!("error: {m}\n{help}");
             ExitCode::from(2)
         }
         Err(args::CliError::Failed(e)) => {
@@ -81,11 +121,11 @@ fn main() -> ExitCode {
 }
 
 /// Exit code of a checking subcommand: its own code (0 = clean, 1 = findings), 2 on usage or tool error.
-fn checker_exit(r: Result<u8, args::CliError>) -> ExitCode {
+fn checker_exit(r: Result<u8, args::CliError>, help: &str) -> ExitCode {
     match r {
         Ok(code) => ExitCode::from(code),
         Err(args::CliError::Usage(m)) => {
-            eprintln!("error: {m}\n{USAGE}");
+            eprintln!("error: {m}\n{help}");
             ExitCode::from(2)
         }
         Err(args::CliError::Failed(e)) => {

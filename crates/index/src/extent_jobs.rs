@@ -1,4 +1,4 @@
-//! Runs one job per extent on `--workers` threads, the extents read in one of two ways: each worker reads its own
+//! Runs one job per extent on `--thread-count` threads, the extents read in one of two ways: each worker reads its own
 //! (parallel reads), or one reader thread reads them all in volume order and hands each over (one read stream).
 //!
 //! Input: the volumes, extents in physical order (`page_extents::extents`), the worker count, the way to read, and

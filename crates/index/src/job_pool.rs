@@ -2,7 +2,7 @@
 //!
 //! Input: the jobs in the order they should start (callers put the largest first, LPT, so the longest job does
 //! not start last and stretch the tail) and the thread count. Output: each job's result, in job order.
-//! Source: workspace#503 (no thread per index: two thousand small indexes run on `--workers` threads, G1
+//! Source: workspace#503 (no thread per index: two thousand small indexes run on `--thread-count` threads, G1
 //! workspace#481 caps every thread with that one limit).
 
 use std::sync::Mutex;

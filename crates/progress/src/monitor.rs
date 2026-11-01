@@ -3,7 +3,7 @@
 //! the previous line, and the summary at the end; a phase boundary or a warning wakes the thread early so the
 //! screen redraws and warnings go out at once.
 //!
-//! Input: the shared [`Progress`], the display mode, the plain-mode interval, a heap probe and the memory limit (`--mem`).
+//! Input: the shared [`Progress`], the display mode, the plain-mode interval, a heap probe and the memory limit (`--temp-mem-size`).
 //! Output: the display on stderr. `--progress none` starts no thread.
 //! Source: user request relayed in workspace#472 (TTY 200 ms in place; plain one line every 10 s, not per phase).
 

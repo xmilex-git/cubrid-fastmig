@@ -21,7 +21,7 @@ use crate::unload_files::{entries, unload_set};
 use crate::unload_normalize::{normalize, official_rules, rules};
 use crate::unload_rules_10_2::ClassOwners;
 
-const HELP: &str = "\
+pub const HELP: &str = "\
 cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix> [--diff <file>]
   <prefix>         <dir>/<db name> as unloaddb -O <dir> wrote it (files <prefix>_schema, _objects, ...)
   --diff <file>    write every differing entry (< source only, > target only)

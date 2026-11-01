@@ -6,7 +6,7 @@
 //! shared worker limit, the spill directory and the merge memory of one worker (`intermediate_merge`).
 //! Output: the root VPID, the root header written, the overflow key file if any, and `BtStats`.
 //! Source: R6 § 2 steps 5–11 (engine no-logging parallel load, `btsort_px_*`, `bt_load_patch_seam`
-//! btree_load.c:5481-5555, develop 5b1867174); workspace#481 G1 (one `--workers` limit for everything).
+//! btree_load.c:5481-5555, develop 5b1867174); workspace#481 G1 (one `--thread-count` limit for everything).
 
 use crate::bt_stats::BtStats;
 use crate::build_error::BuildError;

@@ -1,11 +1,13 @@
-//! `cubrid-fastmig verify`: runs the verifier on a database, or on a migrated target and its source together.
+//! `cubrid-fastmig check`: runs the verifier on a database, or on a migrated target and its source together.
 //!
 //! Input: the database (a name in databases.txt, or the path of its first volume: then the active log is
 //! `<path>_lgat`, the lob-base-path `<dir>/lob`, volumes 1.. next to it — the form of a T1 pristine copy), the
 //! optional source, the worker and memory limits, the classes whose heap header statistics were measured.
-//! Output: the JSONL report (`--report`, default `<target volume dir>/fastmig/verify.jsonl`), the summary line on
+//! Output: the JSONL report (`--report`, default `<target volume dir>/fastmig/check.jsonl`), the summary line on
 //! stdout; exit code 0 = no migration defect, 1 = migration defects, 2 = usage or tool error.
-//! Source: G1 workspace#481 (verify command; finalize reads the exit code and the report), G3 workspace#483 Q9;
+//! The command was `verify` until G13 workspace#604 named it after what it replaces (checkdb) and the options after the
+//! CUBRID utilities (`-t, --thread-count`, `--temp-mem-size`, `--temp-disk-size`).
+//! Source: G1 workspace#481 (check command; finalize reads the exit code and the report), G3 workspace#483 Q9;
 //! G2 workspace#482 + workspace#495 (`--measured-classes`: one class OID `volid|pageid|slotid` per line; migrate
 //! writes `<dest>/fastmig/measured-classes`).
 
@@ -25,22 +27,26 @@ use fastmig_verify::report::{defect_line, exit_code, summary_line};
 use fastmig_verify::{Database, Role, classify, verify_database};
 
 use crate::args::{CliError, parse};
+use crate::finalize::CHECK_REPORT;
 use crate::limits::{self, Limits};
 use crate::plan::OpenSource;
 
-const HELP: &str = "\
-cubrid-fastmig verify <db | first-volume-path> [options]
-  --source <db | path>           also verify the source; target defects the source has are pre-existing
+pub const HELP: &str = "\
+cubrid-fastmig check <db | first-volume-path> [options]
+  Structure checks of a database as checkdb does (heaps, indexes, catalog, sector ownership, out-of-volume assets),
+  plus, with --source, a comparison with the source. Exit 0: no migration defect, 1: migration defects, 2: usage or
+  tool error.
+  --source <db | path>           also check the source; target defects the source has are pre-existing
   --role source|target           rules for <db> (default target: vacuum residue is a defect); source
                                  compares two engine-built databases of one line
   --databases-txt <file>         where <db> is registered (default: $CUBRID_DATABASES/databases.txt)
   --source-databases-txt <file>  where the source is registered (default: --databases-txt)
-  --report <file>                JSONL report (default: <target volume dir>/fastmig/verify.jsonl)
+  --report <file>                JSONL report (default: <target volume dir>/fastmig/check.jsonl)
   --measured-classes <file>      classes whose heap header statistics are compared (volid|pageid|slotid lines)
-  --workers <n>                  thread cap (default: CPUs / 2)
-  --mem <size>                   memory limit, e.g. 16G (default: physical memory / 4, at least 256M)
+  -t, --thread-count <n>         thread cap (default: CPUs / 2)
+  --temp-mem-size <size>         memory limit, e.g. 16G (default: physical memory / 4, at least 256M)
   --spill-dir <dir>              where sorted runs spill (default: <target volume dir>/fastmig/spill)
-  --temp-disk <size>             spill bytes at once: indexes are checked in batches that fit (default: one batch)";
+  --temp-disk-size <size>        spill bytes at once: indexes are checked in batches that fit (default: one batch)";
 
 const FLAGS: &[&str] = &[
     "--source",
@@ -49,8 +55,8 @@ const FLAGS: &[&str] = &[
     "--source-databases-txt",
     "--report",
     "--measured-classes",
-    "--workers",
-    "--temp-disk",
+    "--thread-count",
+    "--temp-disk-size",
 ];
 
 /// Where one database is and how to read it.
@@ -110,7 +116,7 @@ fn open(a: &DbArg, role: Role) -> io::Result<Database> {
 
 /// Spill bytes of each plain index the verifier's source side takes when every pair spills, and its heap pages
 /// (`fastmig_verify::run::heap_pair_bytes`), the log read through the header `src` holds locked (workspace#526,
-/// #553: the temp disk `--verify` needs).
+/// #553: the temp disk `--check` needs).
 pub fn source_pair_bytes(
     src: &OpenSource,
     locate: Locate,
@@ -160,13 +166,9 @@ fn bad(line: &str) -> io::Error {
 /// The exit code on success (0 or 1); usage and tool errors are `Err` (exit 2).
 pub fn run(argv: &[String]) -> Result<u8, CliError> {
     let flags = [FLAGS, limits::FLAGS].concat();
-    let p = parse(argv, &flags, &["--help"])?;
-    if p.switch("--help") {
-        println!("{HELP}");
-        return Ok(0);
-    }
+    let p = parse(argv, &flags, &[])?;
     let [db] = p.positional.as_slice() else {
-        return Err(CliError::Usage("verify takes exactly one database".into()));
+        return Err(CliError::Usage("check takes exactly one database".into()));
     };
     let target = resolve(db, p.value("--databases-txt"))?;
     let source = p
@@ -184,14 +186,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         Some("source") => Role::Source,
         Some(r) => return Err(CliError::Usage(format!("bad --role {r}"))),
     };
-    let worker_limit = match p.value("--workers") {
-        Some(w) => w
-            .parse()
-            .ok()
-            .filter(|&n| n > 0)
-            .ok_or_else(|| CliError::Usage(format!("bad --workers {w}")))?,
-        None => std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)),
-    };
+    let worker_limit = limits::worker_limit(&p)?;
     let tdir = target
         .first_volume
         .parent()
@@ -199,16 +194,17 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         .to_path_buf();
     let lim = Limits {
         temp_disk: p
-            .value("--temp-disk")
+            .value("--temp-disk-size")
             .map(|v| {
-                limits::parse_size(v).ok_or_else(|| CliError::Usage(format!("bad --temp-disk {v}")))
+                limits::parse_size(v)
+                    .ok_or_else(|| CliError::Usage(format!("bad --temp-disk-size {v}")))
             })
             .transpose()?,
-        ..Limits::from(&p, &tdir)?
+        ..Limits::from(&p, &tdir, None)?
     };
     let report = p
         .value("--report")
-        .map_or_else(|| tdir.join("fastmig").join("verify.jsonl"), PathBuf::from);
+        .map_or_else(|| tdir.join("fastmig").join(CHECK_REPORT), PathBuf::from);
     let measured = p
         .value("--measured-classes")
         .map(read_measured)

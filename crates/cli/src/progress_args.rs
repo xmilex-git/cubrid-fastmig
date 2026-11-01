@@ -14,8 +14,7 @@ use crate::heap_counter;
 
 pub const FLAGS: &[&str] = &["--progress", "--progress-interval"];
 
-pub const HELP: &str = "\
-  --progress <auto|tty|plain|none>  progress display on stderr (default auto: the in-place screen when stdout and
+pub const HELP: &str = "  --progress <auto|tty|plain|none>  progress display on stderr (default auto: the in-place screen when stdout and
                                  stderr are terminals, else one line every --progress-interval)
   --progress-interval <seconds>  plain-line interval (default 10)";
 
