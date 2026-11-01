@@ -7,16 +7,16 @@ user picks one, and the run keeps to it by scheduling, not by failing.
 ## What spills
 
 The index rebuild reads every indexed heap once (`fastmig_index::fill`) and turns each live row into a (key, OID)
-pair per index. Pairs that do not fit the memory limit (`--mem`) are sorted and written to spill files under
+pair per index. Pairs that do not fit the memory limit (`--temp-mem-size`) are sorted and written to spill files under
 `--spill-dir` (default `<dest>/fastmig/spill`) as records `key_len u32 · OID 8 B · key`. Every index's pairs exist
 at once by the end of the scan; the builds that follow read them back and write nothing more to disk.
 
-The verifier (`--verify`) spills in its own pass after the build's spill files are gone, so a run needs
+The verifier (`--check`) spills in its own pass after the build's spill files are gone, so a run needs
 **max(build, verify)** temp disk, not the sum. The verifier keys its indexes under the same memory rule, first
 on the target (the build's pairs) and then on the source, whose pairs are not the target's: a develop source still
 holds the deferred indexes' catalog rows, an 11.4 source its own catalog rows (T1: develop +504 B; 11.4 dirty
-10,094,800 B against temp max 9,186,674 B). The source side is counted per index only with `--verify` (`plan
---verify`, `migrate --verify`): the verifier's own reader over the source heaps, nothing kept
+10,094,800 B against temp max 9,186,674 B). The source side is counted per index only with `--check` (`plan
+--check`, `migrate --check`): the verifier's own reader over the source heaps, nothing kept
 (`fastmig_verify::run::heap_pair_bytes`, one more heap read).
 
 Like the build, the verifier cuts its plain indexes into index batches under a limit (workspace#553,
@@ -32,15 +32,15 @@ Foreign keys read only trees and go with the first batch.
   (and with no limit) the verifier makes one heap pass per database, as before; below it, the count and the
   batches past the first cost one heap read each, priced like the build's (`verify_extra_seconds`).
 
-Measured (`verify` target + source, big develop DB, `--workers 16 --mem 1G`, CPUs 16-31, d880015 against b11ab54):
-no limit 14.49 s median of 3 against 14.39 s before (+0.7 %); `--temp-disk` 1,530,677,151 B (target 1 batch,
+Measured (`check` target + source, big develop DB, `--thread-count 16 --temp-mem-size 1G`, CPUs 16-31, d880015 against b11ab54):
+no limit 14.49 s median of 3 against 14.39 s before (+0.7 %); `--temp-disk-size` 1,530,677,151 B (target 1 batch,
 source 2) 17.9 s, 765 MB and 562 MB (3 + 3) 25.2 s and 26.6 s, verify min 280,800,000 B (6 + 6) 35.1 s. Of the
 20.6 s more at min: the pair count 1.8 s per database, the heap passes 2.5 s per database, and the check-2 merges
-5.4 s per database, a batch of few indexes keeping fewer workers busy. `migrate --temp-disk min --verify` on the
+5.4 s per database, a batch of few indexes keeping fewer workers busy. `migrate --temp-disk-size min --check` on the
 big develop and big 11.4 DBs: rc 0, migration defects 0, temp peak 231,612,378 B and 236,048,384 B under the
 280,800,000 B limit.
 
-Before the first rule, T1 11.4 dirty at `--mem 2M --verify` stopped on the arena (limit temp max).
+Before the first rule, T1 11.4 dirty at `--temp-mem-size 2M --check` stopped on the arena (limit temp max).
 
 ## The estimate
 
@@ -65,7 +65,7 @@ arena extent takes exactly the run's bytes, so one scan over a set of indexes sp
 set, whatever the memory limit. Memory gives no credit: each worker's share (`min(256 MiB, mem / (2 ×
 workers))`) is split among the indexes of its class, and a writer spills when its part is full, in in-memory
 bytes (keys, radix words, entries, Vec growth) that exceed its spill bytes, however much room the limit has
-left. The first formula, `T − (mem/2 − share)`, was not a bound: T1 develop dirty at `--mem` 530 MiB spilled
+left. The first formula, `T − (mem/2 − share)`, was not a bound: T1 develop dirty at `--temp-mem-size` 530 MiB spilled
 832 KiB where it gave 0, and the run stopped on the arena.
 
 - **temp min** = the largest `T_i`: the largest index alone. Any limit at or above it lets the run finish.
@@ -76,21 +76,21 @@ left. The first formula, `T − (mem/2 − share)`, was not a bound: T1 develop 
 - **mem min** = per worker the larger of the copy engine's 256 KiB I/O buffer and what the index build needs,
   449 KiB (`intermediate_merge::WORKER_MIN`: the merge floor, and a scan share holding the 64 KiB spill write buffer
   and a run as large); `migrate` refuses less (`limits::mem_min`). Above it the keys spill instead of failing.
-- **verify mem min** (`plan --verify`, `migrate --verify`): the verifier also reserves its live row map before its
+- **verify mem min** (`plan --check`, `migrate --check`): the verifier also reserves its live row map before its
   scan (`ESTIMATE_PAGE_BYTES` per source heap page), so it needs that, the merge floors and one scan share
-  (`SCAN_MIN`, 128 KiB) per worker (`fastmig_verify::run::memory_min`); `migrate --verify` refuses less before
+  (`SCAN_MIN`, 128 KiB) per worker (`fastmig_verify::run::memory_min`); `migrate --check` refuses less before
   anything is written. Big develop DB, 16 workers: 11.4 MiB (mem min 7.0 MiB).
 - **mem recommended** = `2 × (Σ T_i + 256 MiB)`, at most the physical memory: room for every pair, counted in
-  spill bytes, in finished runs. It spills less, not nothing; the temp figures do not depend on `--mem`.
+  spill bytes, in finished runs. It spills less, not nothing; the temp figures do not depend on `--temp-mem-size`.
 
 ## Memory the index build and the verifier take
 
-Inside `--mem` (one `MemoryLimit`, grants returned on drop):
+Inside `--temp-mem-size` (one `MemoryLimit`, grants returned on drop):
 
 - each scan worker's share, `min(256 MiB, mem / (2 × workers))`: its writers' runs (keys, radix words, entries and
   the sort's spare entries, `Run::bytes`) and the 64 KiB write buffer of the one spill it makes at a time;
   the shares are taken together and only as many workers scan as get `SCAN_MIN` each (none: refused). The
-  verifier at `--mem 16M` on the big develop DB, its live row map taken first, left its 16 workers shares too small for
+  verifier at `--temp-mem-size 16M` on the big develop DB, its live row map taken first, left its 16 workers shares too small for
   more than a few pairs per run: heap peak 1.1 GiB, 994 s in its run sort (target and source);
 - a finished run kept in memory: only with a grant of its size taken when the limit has room, else spilled;
 - the merges: a floor of three open runs per worker (`MERGE_FLOOR`, 193 KiB) taken before the scan, and after the
@@ -106,28 +106,28 @@ space only as it writes (`SpillCursor::consume`, `SpillOut`): the bytes on disk 
 merge, so the temp disk bounds above hold. It costs one more read and write of the merged runs; at a memory limit
 that keeps few runs open, several rounds.
 
-### Memory outside `--mem`
+### Memory outside `--temp-mem-size`
 
-Outside `--mem`, and why:
+Outside `--temp-mem-size`, and why:
 
 - per worker, fixed: the copy engine's I/O buffer, page buffers of the scan and the build (a few pages), the
   precheck's extent buffer (`page_extents::MAX_EXTENT_BYTES`, 4 MiB, and two more read ahead on an HDD source,
   `extent_jobs`, workspace#596; freed when the precheck ends), thread
   stacks; a key longer than a third of the merge memory still merges two runs at a time;
-- per spilled run (more runs at a smaller `--mem`): its descriptor, extents and one sample key per 1024 pairs
+- per spilled run (more runs at a smaller `--temp-mem-size`): its descriptor, extents and one sample key per 1024 pairs
   (`spill_run`), its shard bounds;
-- proportional to the data, not to `--mem`: the leaf summaries a build keeps for its upper levels (one key per
+- proportional to the data, not to `--temp-mem-size`: the leaf summaries a build keeps for its upper levels (one key per
   leaf), page treatment's per-page counts (`HeapState`, about 100 B a page);
 - proportional to the catalog: an 11.4 source's regenerated catalog rows (`catalog_layout::generate`; T1: 14 MB of
-  the 21.7 MB peak at `--mem 2M`, valgrind massif);
+  the 21.7 MB peak at `--temp-mem-size 2M`, valgrind massif);
 - the allocator's own: memory freed by one thread kept in its arena (RSS above the live heap; large blocks are
   mapped, glibc `M_MMAP_THRESHOLD` fixed at 1 MiB).
 
-So the excess is no constant: it is largest at a small `--mem` (many runs) and below zero from 256 MiB, where the
+So the excess is no constant: it is largest at a small `--temp-mem-size` (many runs) and below zero from 256 MiB, where the
 limit's own grants are not all touched. Measured max RSS (MiB), big develop and big 11.4 DBs (pair bytes 1.43 GiB
-each), `--workers 16`, CPU 0-15, default temp disk, binary c9def7d:
+each), `--thread-count 16`, CPU 0-15, default temp disk, binary c9def7d:
 
-| `--mem` | develop | develop `--verify` | 11.4 | 11.4 `--verify` |
+| `--temp-mem-size` | develop | develop `--check` | 11.4 | 11.4 `--check` |
 |---|---|---|---|---|
 | 16M | 54.6 (+38.6) | 86.1 (+70.1) | 66.9 (+50.9) | 89.2 (+73.2) |
 | 32M | 53.7 (+21.7) | 68.5 (+36.5) | 71.2 (+39.2) | 74.5 (+42.5) |
@@ -136,29 +136,29 @@ each), `--workers 16`, CPU 0-15, default temp disk, binary c9def7d:
 | 256M | 220.1 (−35.9) | 219.3 (−36.7) | 251.9 (−4.1) | 249.5 (−6.5) |
 | 1G | 680.4 (−343.6) | 714.5 (−309.5) | 677.6 (−346.4) | 695.7 (−328.3) |
 
-`plan` shows the **expected max RSS** at the chosen `--mem` (`ResourceEstimate::rss_expected_max`): `--mem` plus
-12 MiB, plus 18 MiB when the catalog is regenerated, plus 32 MiB per GiB of pair bytes, plus with `--verify` 24 MiB
+`plan` shows the **expected max RSS** at the chosen `--temp-mem-size` (`ResourceEstimate::rss_expected_max`): `--temp-mem-size` plus
+12 MiB, plus 18 MiB when the catalog is regenerated, plus 32 MiB per GiB of pair bytes, plus with `--check` 24 MiB
 per GiB of the verifier's source side — an upper envelope of every run measured (the table above, and T1 at
-`--mem 2M` and 8M: develop dirty 4 workers `--verify` 12.4 MB against 14.5 MiB, 11.4 dirty 29.3 MiB against
-33 MiB, 11.4 clean 16 workers `--mem 8M --verify` 37.0 MiB against 38.5 MiB), fitted, not proven. The default
-`--mem` (no option) is a quarter of the physical memory and at least 256 MiB where half the memory allows: from
-256 MiB every measured run stayed within `--mem`.
+`--temp-mem-size 2M` and 8M: develop dirty 4 workers `--check` 12.4 MB against 14.5 MiB, 11.4 dirty 29.3 MiB against
+33 MiB, 11.4 clean 16 workers `--temp-mem-size 8M --check` 37.0 MiB against 38.5 MiB), fitted, not proven. The default
+`--temp-mem-size` (no option) is a quarter of the physical memory and at least 256 MiB where half the memory allows: from
+256 MiB every measured run stayed within `--temp-mem-size`.
 
-T1 develop dirty, `--workers 4 --mem 2M` (below the old mem min): no `--verify` heap peak 5.3 MiB (3.4 MiB before
-the build starts); `--verify` max RSS 11.3 MiB. Before the merge bound, the build opened every spilled run in every
-shard with a buffer of at least 4 KiB outside the limit: the big develop DB at `--mem 16M` peaked at 257 MiB of heap.
+T1 develop dirty, `--thread-count 4 --temp-mem-size 2M` (below the old mem min): no `--check` heap peak 5.3 MiB (3.4 MiB before
+the build starts); `--check` max RSS 11.3 MiB. Before the merge bound, the build opened every spilled run in every
+shard with a buffer of at least 4 KiB outside the limit: the big develop DB at `--temp-mem-size 16M` peaked at 257 MiB of heap.
 The verifier read the whole active log to parse its header (64 MiB on T1); it reads 512 B now.
 
-## Choosing the limit (`--temp-disk min|max|<size>`)
+## Choosing the limit (`--temp-disk-size min|max|<size>`)
 
 - With the option: that limit; below temp min, or with the target's growth (`target_space.needed_bytes`) over
   the free space of the target filesystem (the spill directory's own filesystem when it lies elsewhere), the run
   is refused before anything is written.
 - Without it on a terminal: the table and the choices are shown and the answer is read (empty answer: max).
-- Without it otherwise: max when it fits the free space, else a refusal naming `--temp-disk min` and its cost.
+- Without it otherwise: max when it fits the free space, else a refusal naming `--temp-disk-size min` and its cost.
 - A limit at or above temp max runs as one batch; below it the run counts the pairs again on the target (after
   page treatment, exact) and batches by those counts.
-- With `--verify`, min and max are verify min and verify max; the verifier batches against verify max the way the
+- With `--check`, min and max are verify min and verify max; the verifier batches against verify max the way the
   build batches against temp max.
 - Over a target a killed run left (`FASTMIG_INCOMPLETE`), the free space counts the files that run listed on the
   target filesystem as free: the rerun removes them before it writes (`incomplete_marker::reclaimable_bytes`). Only
@@ -168,7 +168,7 @@ The verifier read the whole active log to parse its header (64 MiB on T1); it re
   Without it a rerun on a filesystem the first run filled was refused. A spill arena left in a spill directory
   on another filesystem is not counted.
 
-Measured on T1 11.4 dirty (`--no-clone --mem 64M --verify`, target on a tmpfs capped at plan's need): 16 MiB
+Measured on T1 11.4 dirty (`--no-clone --temp-mem-size 64M --check`, target on a tmpfs capped at plan's need): 16 MiB
 short → refused, nothing written; need + 4 MiB → rc 0, migration 0; need + 64 MiB with another process taking all
 free space but the unreserved writes once the run took its space → rc 0; kill -9 with the arena present, a second
 migrate meanwhile refused by the marker lock, rerun on the same filesystem → rc 0, nothing left over.
@@ -235,8 +235,8 @@ prints the bound as `unreserved writes ≤ N MiB` (the reservation's size) so th
 left to other writers. With listed sectors that is only the sectors off the list, an expansion and the LOB and
 Java files.
 
-Measured on T1 (develop and 11.4, clean and dirty, `--workers 16 --mem 64M`; `filefrag -v` extents of the cloned
-volumes without `shared`): 0 sectors off the list on all four, also with `--workers 1` and with `--verify` (rc 0);
+Measured on T1 (develop and 11.4, clean and dirty, `--thread-count 16 --temp-mem-size 64M`; `filefrag -v` extents of the cloned
+volumes without `shared`): 0 sectors off the list on all four, also with `--thread-count 1` and with `--check` (rc 0);
 written beyond the space taken at the start 0 B on all four against a reservation of 9.5–10.6 MB (before the
 list: 4.8–7.1 MB beyond against 22.5–25.9 MB). The price is whole sectors: a B-tree or new heap file takes at
 least one 1 MiB sector, and a heap that takes new pages is unshared to the end of its sectors, so the pages
@@ -246,7 +246,7 @@ whole sectors, the run wrote 16–164 KB (develop) and 0.5–1.06 MB (11.4) beyo
 appended inside heaps' own sectors, which no claim sees. On a target so migrated, develop SA inserting 2,000,000 rows
 expanded volume 1 from 8192 to 16384 pages like on any engine database (`_vinf` names only the target).
 With the free sectors zeroed and the freed files' sectors deferred, T1 and T4 (11.3, 11.2; clean and dirty)
-`--verify` rc 0, and what the cloned volumes own beyond the ranges taken at the start stays within the deferred
+`--check` rc 0, and what the cloned volumes own beyond the ranges taken at the start stays within the deferred
 sectors handed over (develop 81,788,928 B of 87,031,808, 11.4 100,663,296 of 106,954,752, T4 101,711,872 of
 103,809,024). Zeroing a freed file's sectors at the start instead broke the run: the catalog regeneration still
 reads the old system heaps and B-trees there.
@@ -265,12 +265,12 @@ the migrated target, 0 differing lines), and the keys and overflow OID chains of
 (`verify::source_key_groups`: its leaf records and the records holding more objects than a rebuilt record takes,
 deleted objects included — every live row's key is in the source's index, so these bound the rebuild's; counted
 leaf by leaf, 64 leaves a job from one queue over every tree, `btree_walk::leaf_counts`: big 11.4 DB 2.8 s at
-`--workers 16` walking a tree per worker, 0.42 s by leaves). The
+`--thread-count 16` walking a tree per worker, 0.42 s by leaves). The
 system catalog indexes of an 11.4 source, whose rows the run generates, take the worst case: every pair its own
 key, every 86th pair opening a chain. The former `5 · T_i / page + 4` was no bound: a key of 86 rows takes a
 16 KiB overflow OID page for its 86th object, against 1,032 B of spill records.
 
-| DB (`--workers 16`) | pages the run allocated | B-tree bound, pages | bound / actual |
+| DB (`--thread-count 16`) | pages the run allocated | B-tree bound, pages | bound / actual |
 |---|---|---|---|
 | T1 develop clean | 648 | 1,381 | 2.13 |
 | T1 develop dirty | 605 | 1,302 | 2.15 |
@@ -286,7 +286,7 @@ such write unshared a block. Since then a freed file's pages are left as they ar
 retype (`perm_dealloc`: overflow chains a rewritten record leaves, tracker pages a removed entry merges), so the
 bound counts every overflow heap and tracker page instead of the freed files'. What the run really writes outside the space it took at the start, measured as the
 blocks of the cloned volumes no longer shared with the source (`filefrag -v`) plus added volumes, against the
-reservation (`--workers 16 --mem 64M`):
+reservation (`--thread-count 16 --temp-mem-size 64M`):
 
 | DB | written outside, B | reservation, B | reservation / written |
 |---|---|---|---|
@@ -297,7 +297,7 @@ reservation (`--workers 16 --mem 64M`):
 | T4 11.3 dirty | 40,796,160 | 59,802,052 | 1.46 |
 
 That table is before the unshare at the start (2ac7dc5). With it, on XFS, the blocks the run unshares beyond the
-ranges it took at the start, against the reservation (`--workers 16 --mem 64M`):
+ranges it took at the start, against the reservation (`--thread-count 16 --temp-mem-size 64M`):
 
 | T1 DB | unshared at the start, B | written beyond it, B | reservation, B |
 |---|---|---|---|
@@ -315,7 +315,7 @@ record can grow, so every record of a re-encoded class is re-encoded as the trea
 directories included) and one that grows is counted whole on new pages ([`Growth`](../crates/ondisk/src/heap_rewrite/growth.rs)).
 The index pair count already re-encodes every live record of a re-encoded class with an index, with the same
 encoder, so it tallies the growth in that read (`pair_count::pair_bytes_and_growth`); only the re-encoded classes
-without an index get a pass of their own, taken a sector at a time from one queue over their heaps (big 11.4 DB, 75,869 treated pages, bound 2 pages: 12.7 s at `--workers 16`
+without an index get a pass of their own, taken a sector at a time from one queue over their heaps (big 11.4 DB, 75,869 treated pages, bound 2 pages: 12.7 s at `--thread-count 16`
 and 12.2 s at 4 with one heap per worker, 1.36–1.39 s and 5.0 s by sector; about 20 s at 1 either way;
 resources `appended_seconds`, report.json `precheck.appended_bound`). A bound from the class representation alone
 (the most a record can grow, times the records of a page beyond its free space) needs no re-encoding, but a full
@@ -334,7 +334,7 @@ a byte copy, and the clone owns only that share; so a clone is never slower than
 `FALLOC_FL_UNSHARE_RANGE`, used for this until workspace#556, read the shared blocks back from disk a page at a time
 on one worker per volume and lost to the copy once about 40 % of a volume was rewritten.
 
-Big DBs, measured for workspace#556 before the unallocated-page headers of workspace#591 (81c18f0) were added to the clone path (4.2 GB of volumes, about 22 million rows; `--workers 16 --mem 1G`, warm, CPU 16-31, three rounds in turn,
+Big DBs, measured for workspace#556 before the unallocated-page headers of workspace#591 (81c18f0) were added to the clone path (4.2 GB of volumes, about 22 million rows; `--thread-count 16 --temp-mem-size 1G`, warm, CPU 16-31, three rounds in turn,
 median wall seconds; own bytes = the target volumes' blocks not shared with the source, `filefrag`):
 
 | Source → develop | BASE (CoW on write) | `FALLOC_FL_UNSHARE_RANGE` | write over (current method) | `--no-clone` |
@@ -348,7 +348,7 @@ median wall seconds; own bytes = the target volumes' blocks not shared with the 
 BASE is e74b659 with the space taking at the start turned off (the rewritten pages unshared by CoW as they are
 written); the other two clone arms are e74b659 and 122cbb7. The 11.4 run rewrites 1.91 GB of the clones at the start
 (plan `unshare_bytes`) and owns 86 % of the volume bytes at the end, the worst share of the measured DBs, and the
-clone still ties the copy. `--verify` on the new path: 0 migration defects on both.
+clone still ties the copy. `--check` on the new path: 0 migration defects on both.
 
 Clone and take a share r of each volume (1 MiB sectors spread evenly), against a byte copy (allocate, 8 MiB tasks,
 256 KiB buffers), fsync included; the 11.4 big DB's 10 volumes, 4,429,185,024 B, 16 workers, warm, three runs each
@@ -376,11 +376,11 @@ single free range holds a run, merged back on free. The space is never given bac
 ends, so another process filling the disk cannot stop the run halfway. The arena is a scratch line of the marker:
 a rerun after a kill removes it, and the end-of-run fsync skips it.
 
-The progress line shows `temp <now>/max <peak> of --temp-disk <limit>` next to the heap reading (Relaxed
+The progress line shows `temp <now>/max <peak> of --temp-disk-size <limit>` next to the heap reading (Relaxed
 counters, `TEMP_DISK`).
 
 `report.json` records `temp_disk.limit_bytes`, whether it batched, and `peak_bytes`, the most spill bytes on disk
-at any moment of the run (the build and, with `--verify`, the verifier).
+at any moment of the run (the build and, with `--check`, the verifier).
 
 ## Storage kinds (workspace#561)
 
@@ -443,12 +443,12 @@ develop; est/act = the start estimate over the run's wall.
 
 | run | NVMe | SATA SSD | HDD |
 |---|---|---|---|
-| A, `--workers 1` | 62.6 / 62.9 | 72.2 / 70.4 | 106.0 / 102.0 |
-| A, `--workers 16` | 8.3 / 8.4 | 18.5 / 16.8 | 73.0 / 73.9 |
-| A, `--workers 16 --no-clone` | 7.9 / 7.9 | 18.1 / 17.2 | 68.2 / 67.6 |
-| B, `--workers 1` | 45.1 / 45.7 | 49.9 / 53.6 | 80.2 / 81.9 |
-| B, `--workers 16` | 6.4 / 6.4 | 12.2 / 12.8 | 70.5 / 70.2 |
-| B, `--workers 16 --no-clone` | 6.6 / 6.8 | 15.9 / 15.3 | 64.1 / 64.3 |
+| A, `--thread-count 1` | 62.6 / 62.9 | 72.2 / 70.4 | 106.0 / 102.0 |
+| A, `--thread-count 16` | 8.3 / 8.4 | 18.5 / 16.8 | 73.0 / 73.9 |
+| A, `--thread-count 16 --no-clone` | 7.9 / 7.9 | 18.1 / 17.2 | 68.2 / 67.6 |
+| B, `--thread-count 1` | 45.1 / 45.7 | 49.9 / 53.6 | 80.2 / 81.9 |
+| B, `--thread-count 16` | 6.4 / 6.4 | 12.2 / 12.8 | 70.5 / 70.2 |
+| B, `--thread-count 16 --no-clone` | 6.6 / 6.8 | 15.9 / 15.3 | 64.1 / 64.3 |
 | B, `cp -a` + sync | 2.1 / 1.9 | 10.7 / 10.3 | 23.4 / 24.3 |
 | B, `cp --reflink=always` | 0.03 | 0.02 | 0.05 |
 | precheck of A / B at 16 workers | 1.7 / 1.2 | 3.8 / 3.7 | 50 / 47 |
@@ -474,7 +474,7 @@ The precheck reads the source twice: `precheck.pair_count` (every indexed heap) 
 plain B-tree's leaves and overflow OID pages). Both read their pages as extents (`page_extents`, GLOSSARY "물리 순서
 extent"): sorted by volume and page, a gap of up to 1 MiB read through, at most 4 MiB per read. Key groups read every
 page of each tree's file in that one pass and resolve the overflow OID chains from the pages read (kept within
-`--mem`). The source's storage kind picks how: on an HDD one reader thread reads the extents in order and the workers
+`--temp-mem-size`). The source's storage kind picks how: on an HDD one reader thread reads the extents in order and the workers
 only extract (`ExtentReads::OneStream`); elsewhere every worker reads its own (`Parallel`). An extent that does not
 read is read page by page.
 

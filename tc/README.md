@@ -3,7 +3,7 @@
 Runs CUBRID shell testcases that go through `unloaddb` → `loaddb` with the migrated database in their
 place (**포팅 TC, ported testcase**, see [GLOSSARY.md](../GLOSSARY.md)). Each testcase runs unchanged.
 Where it first calls `unloaddb` (the **switch point**), every database it registered is put through
-`cubrid-fastmig migrate`, `verify` and `set-comparison`. Then the testcase goes on against the migrated
+`cubrid-fastmig migrate`, `check` and `set-comparison`. Then the testcase goes on against the migrated
 databases with its own expected answers. Decision and results: [workspace#502](https://github.com/xmilex-git/workspace/issues/502).
 
 This is a runtime check, not a unit test (AGENTS.md § Build and check).

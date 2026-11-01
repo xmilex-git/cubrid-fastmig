@@ -1,6 +1,6 @@
 # 메모리 상한 하나를 모든 단계가 나눠 쓰고, 넘치는 키는 도착 파일시스템에 spill한다
 
-`--mem`(기본 물리 메모리의 1/4) 하나가 프로세스 전체의 메모리 상한이다. 인덱스 빌드(힙 스캔이 쌓는 키, run 정렬 공간, merge 버퍼)와 검증기가 이 상한을 나눠 쓴다. 키가 자기 몫을 넘으면 그 run을 정렬해 `--spill-dir`(기본 `<dest>/fastmig/spill`, 도착 DB와 같은 파일시스템, `/tmp` 금지) 아래 파일로 쓰고, k-way merge가 메모리 run과 파일 run을 함께 읽는다. spill 파일은 빌드가 끝나거나 실패하면 지운다 (사용자 결정, [workspace#493](https://github.com/xmilex-git/workspace/issues/493); `--mem`·`--spill-dir`의 cli 인자는 cli `Limits`).
+`--temp-mem-size`(기본 물리 메모리의 1/4) 하나가 프로세스 전체의 메모리 상한이다. 인덱스 빌드(힙 스캔이 쌓는 키, run 정렬 공간, merge 버퍼)와 검증기가 이 상한을 나눠 쓴다. 키가 자기 몫을 넘으면 그 run을 정렬해 `--spill-dir`(기본 `<dest>/fastmig/spill`, 도착 DB와 같은 파일시스템, `/tmp` 금지) 아래 파일로 쓰고, k-way merge가 메모리 run과 파일 run을 함께 읽는다. spill 파일은 빌드가 끝나거나 실패하면 지운다 (사용자 결정, [workspace#493](https://github.com/xmilex-git/workspace/issues/493); `--temp-mem-size`·`--spill-dir`의 cli 인자는 cli `Limits`).
 
 엔진도 같은 모양이다: 인덱스 빌드 정렬은 고정 크기 정렬 버퍼(`index_build_buffer_size`, CBRD-27235)에 run을 만들고 넘치면 임시 파일에 쓴다(`external_sort.c`).
 

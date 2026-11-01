@@ -50,7 +50,7 @@ of the baseline size).
    the master is visible on the slave. The source pair writes only the marker: T36's `round.sql` and `checks.sql`
    are written for the target line (run-03). Then the slave's `db_ha_apply_info` rows, and heartbeat stop: slave,
    then master (normal shutdown on both).
-2. **Migrate.** On the host, one node at a time: `plan`, `migrate --verify --volumes-in-first-dir`, the deferred SQL
+2. **Migrate.** On the host, one node at a time: `plan`, `migrate --check --volumes-in-first-dir`, the deferred SQL
    in the node (SA), `finalize`. Then the two targets' `db_creation` (from `fastmig/source-fingerprint`) must be equal
    (G4 keeps it from the source).
 3. **Target pair.** HA conf on the target installs, `databases.txt` db-host `fmmaster:fmslave`; heartbeat start,

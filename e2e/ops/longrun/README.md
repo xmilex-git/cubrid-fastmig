@@ -54,7 +54,7 @@ Exit: `0` pass, `1` fail, `2` bad arguments, an existing `<out>`, a non-optdebug
 
 ## One side
 
-`side_loop.sh` prepares the side exactly as the T36 runner (`../sides.sh`: migrate `--verify` → finalize, or createdb →
+`side_loop.sh` prepares the side exactly as the T36 runner (`../sides.sh`: migrate `--check` → finalize, or createdb →
 loaddb), with `checkpoint_interval=2min` and `log_max_archives=MAX_ARCHIVES` added to the conf, and starts the server. Then:
 
 | When | Steps (`<side>/log/<step>.log`, rows of `<path>/<side>/steps.tsv`) |

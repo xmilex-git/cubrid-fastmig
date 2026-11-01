@@ -139,7 +139,7 @@ _Avoid_: HA 이관, 복제 상태 이전
 ## 검증과 원본 삭제
 
 **검증기 (verifier)**:
-출발 DB와 도착 DB를 엔진 없이 읽어 힙·인덱스·카탈로그·섹터 소유·볼륨 밖 자산의 정합을 검사하는 이 도구의 부품. 엔진 checkdb를 대신한다. `verify` 명령으로 따로 돌리거나 `migrate --verify`로 migrate 끝에서 돌린다. migrate는 기본으로 돌리지 않고, finalize는 통과한 검증 기록을 요구한다([ADR 0015](docs/adr/0015-migrate-verifies-only-with-verify-option.md)).
+출발 DB와 도착 DB를 엔진 없이 읽어 힙·인덱스·카탈로그·섹터 소유·볼륨 밖 자산의 정합을 검사하는 이 도구의 부품. 엔진 checkdb를 대신한다. `check` 명령으로 따로 돌리거나 `migrate --check`로 migrate 끝에서 돌린다. migrate는 기본으로 돌리지 않고, finalize는 통과한 검증 기록을 요구한다([ADR 0015](docs/adr/0015-migrate-verifies-only-with-verify-option.md)).
 _Avoid_: checkdb, 체커
 
 **집합 비교 (set comparison)**:
@@ -170,8 +170,16 @@ _Avoid_: 원본 오류, 무시된 결함
 출발 DB에 있었으나 재빌드·재생성으로 도착 DB에서 사라진 결함. 보고만 한다.
 
 **미완료 표지 (incomplete marker)**:
-도착 디렉터리에 놓여 그 마이그레이션이 아직 끝나지 않았음(`--verify`면 검증을 통과하기 전)을 나타내는 표지. 표지가 있는 도착은 다시 실행할 때 처음부터 새로 만든다. 실행 중에는 그 실행이 표지를 배타적으로 잠가, 같은 도착에 둘째 migrate가 들면 아무것도 지우거나 쓰기 전에 거부한다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
+도착 디렉터리에 놓여 그 마이그레이션이 아직 끝나지 않았음(`--check`면 검증을 통과하기 전)을 나타내는 표지. 표지가 있는 도착은 다시 실행할 때 처음부터 새로 만든다. 실행 중에는 그 실행이 표지를 배타적으로 잠가, 같은 도착에 둘째 migrate가 들면 아무것도 지우거나 쓰기 전에 거부한다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
 _Avoid_: 잠금 파일, 체크포인트
+
+**생성 기록 (created paths)**:
+끝난 migrate가 `<-F>/fastmig/created-paths`에 남기는, 그 실행이 만든 파일과 디렉터리 전부의 절대 경로 목록(만든 순서). 미완료 표지가 실행 중에 적던 목록을 표지를 지우기 직전에 옮긴 것이고, finalize가 쓴 `finalize.json`도 덧붙는다. 뒤에 `-r, --replace`가 그 도착을 지울 때 이 목록에 있는 경로까지 지운다. 첫 볼륨이 목록에 없으면 그 DB의 기록으로 보지 않는다([workspace#605](https://github.com/xmilex-git/workspace/issues/605)).
+_Avoid_: 매니페스트(LOB 매니페스트와 섞인다), 설치 목록
+
+**교체 (replace)**:
+`migrate -r, --replace`: 도착 databases.txt에 같은 이름으로 등록된 DB를 이관 전에 지운다. 지우는 범위는 `cubrid deletedb`의 범위(볼륨, 로그 디렉터리의 그 DB 파일, `_vinf`, `_dwb`, 등록 줄)와 그 DB의 생성 기록에 있는 경로다. 그 서버가 떠 있거나, 볼륨이 출발 파일이거나, 지운 뒤에도 `-F`에 다른 파일이 남으면 아무것도 지우기 전에 거부한다([G13](https://github.com/xmilex-git/workspace/issues/604), [workspace#605](https://github.com/xmilex-git/workspace/issues/605)).
+_Avoid_: 덮어쓰기, overwrite
 
 **출발 지문 (source fingerprint)**:
 migrate 때 기록해 두는 출발 DB의 식별 값(로그 헤더의 위치와 생성 시각, 볼륨과 참조 LOB 파일의 크기). finalize는 이 값이 그대로일 때만 출발을 지운다.
@@ -245,7 +253,7 @@ _Avoid_: 쓰레기 파일, 누수 파일
 ## 실행 자원
 
 **워커 상한 (worker limit)**:
-`--workers`로 정하는, 도구가 한꺼번에 쓰는 스레드 수의 상한. 볼륨 처리·카탈로그 재생성·인덱스 빌드·검증기가 나눠 쓴다.
+`-t, --thread-count`로 정하는, 도구가 한꺼번에 쓰는 스레드 수의 상한. 볼륨 처리·카탈로그 재생성·인덱스 빌드·검증기가 나눠 쓴다.
 _Avoid_: 병렬도, 스레드 수
 
 **저장 장치 종류 (storage kind)**:
@@ -253,8 +261,12 @@ _Avoid_: 병렬도, 스레드 수
 _Avoid_: 디스크 타입, 매체
 
 **메모리 상한 (memory limit)**:
-`--mem`으로 정하는, 도구가 키·정렬·merge 버퍼 등에 쓰는 메모리의 상한. 모든 단계가 하나를 나눠 쓴다([ADR 0012](docs/adr/0012-one-memory-limit-with-spill.md)).
+`--temp-mem-size`로 정하는, 도구가 키·정렬·merge 버퍼 등에 쓰는 메모리의 상한. 모든 단계가 하나를 나눠 쓴다([ADR 0012](docs/adr/0012-one-memory-limit-with-spill.md)).
 _Avoid_: 버퍼 크기, sort buffer
+
+**도착 conf 기본값 (target conf defaults)**:
+도착 서버 `cubrid.conf`(`--target-conf`, 기본 `$CUBRID/conf/cubrid.conf`)의 `[common]`·`[@<새DB>]`에서 읽어 옵션을 주지 않았을 때 쓰는 값: `db_volume_size` → `--db-volume-size`(없으면 512M), `data_buffer_size` → `--temp-mem-size`(엔진의 데이터 버퍼에는 임시 파일 페이지도 들어간다; 없으면 물리 메모리 1/4), `temp_file_max_size_in_pages` → `--temp-disk-size`(> 0이면 페이지 수 × 페이지 크기, 0이면 min). 명령행이 늘 이긴다. 도착 라인(`--target-version`)은 conf가 아니라 `$CUBRID` 설치의 `libcubrid.so` 버전에서 정한다([G13](https://github.com/xmilex-git/workspace/issues/604)).
+_Avoid_: 설정 상속, 프로파일
 
 **shard**:
 한 인덱스의 일을 키 범위로 나눈 조각. 인덱스 빌더는 정렬된 run을 구분 키로 잘라 shard마다 리프를 만들고, 검증기는 리프 목록을 부모 separator에서 잘라 shard마다 힙 쪽 run과 병합한다. 여러 워커가 큰 인덱스 하나를 함께 처리하게 한다.
@@ -265,7 +277,7 @@ _Avoid_: 파티션(엔진의 테이블 파티션과 섞인다), 청크
 _Avoid_: 스왑, 임시 볼륨(엔진 용어와 섞인다)
 
 **임시 디스크 한도 (temp disk limit)**:
-`--temp-disk`로 정하는, spill 파일이 한꺼번에 차지할 수 있는 바이트의 상한. 실행을 시작하기 전에 정하고, 실행 중에는 인덱스 묶음을 나눠서 지킨다. 넘칠 것 같다고 도중에 실패하지 않는다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
+`--temp-disk-size`로 정하는, spill 파일이 한꺼번에 차지할 수 있는 바이트의 상한. 실행을 시작하기 전에 정하고, 실행 중에는 인덱스 묶음을 나눠서 지킨다. 넘칠 것 같다고 도중에 실패하지 않는다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
 _Avoid_: 디스크 쿼터, temp 크기
 
 **예약 밖 쓰기 (unreserved writes)**:
@@ -285,7 +297,7 @@ _Avoid_: 청크, 블록(엔진·파일시스템 용어와 섞인다)
 _Avoid_: 그룹, 배치 작업
 
 **병합 메모리 (merge memory)**:
-spill된 run을 다시 읽어 합치는 병합이 쓰는 `--mem`의 몫. 워커마다 힙 스캔 전에 잡는 바닥(열린 run 셋)과, 스캔 뒤 한도에 남은 전부를 워커 수로 나눈 것이다. 열린 run 하나는 읽기 버퍼와 커서, 가장 긴 키만큼 든다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
+spill된 run을 다시 읽어 합치는 병합이 쓰는 `--temp-mem-size`의 몫. 워커마다 힙 스캔 전에 잡는 바닥(열린 run 셋)과, 스캔 뒤 한도에 남은 전부를 워커 수로 나눈 것이다. 열린 run 하나는 읽기 버퍼와 커서, 가장 긴 키만큼 든다([workspace#526](https://github.com/xmilex-git/workspace/issues/526)).
 _Avoid_: 병합 버퍼(버퍼 하나와 섞인다)
 
 **중간 병합 (intermediate merge)**:
@@ -295,7 +307,7 @@ _Avoid_: 다단계 정렬, 재정렬
 ## 진행 표시
 
 **단계 (phase)**:
-한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier(`--verify`일 때만 일하고, 아니면 0초), register. 단위당 비용이 다른 일이 섞인 단계는 부분으로 나눠, 부분마다 자기 단위와 기본 처리량으로 센다: index-build는 heap scan이 읽은 힙 페이지와 리프에 쓴 키, verifier는 target과 source 쪽마다 heap pass가 읽은 힙 페이지와 sort 단계·merge가 각각 한 번씩 센 pair(source 쪽 기본값은 출발 라인별). 표시와 report.json은 한 단계로 내되 부분마다 양을 따로 보인다. 모든 단계는 시간을 쓰는 일마다 카운터가 움직여야 한다(카운터가 2초 넘게 서 있으면 세지 않는 일이 있다는 뜻, report.json `counter_idle_max_s`)(workspace#560). `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
+한 명령의 실행을 순서대로 나눈 구간 하나. 단계마다 자연 단위(바이트, 클래스 수, 키 수 등)로 총량과 완료량을 세거나, 짧은 고정 작업(step)이면 세지 않는다. `migrate`의 단계: precheck, open-sources, volume-copy, volume-paths, page-treatment, index-build, catalog-regeneration, out-of-volume-assets, new-log, durable-sync, verifier(`--check`일 때만 일하고, 아니면 0초), register. 단위당 비용이 다른 일이 섞인 단계는 부분으로 나눠, 부분마다 자기 단위와 기본 처리량으로 센다: index-build는 heap scan이 읽은 힙 페이지와 리프에 쓴 키, verifier는 target과 source 쪽마다 heap pass가 읽은 힙 페이지와 sort 단계·merge가 각각 한 번씩 센 pair(source 쪽 기본값은 출발 라인별). 표시와 report.json은 한 단계로 내되 부분마다 양을 따로 보인다. 모든 단계는 시간을 쓰는 일마다 카운터가 움직여야 한다(카운터가 2초 넘게 서 있으면 세지 않는 일이 있다는 뜻, report.json `counter_idle_max_s`)(workspace#560). `partition-streams`의 단계: read-source-classes, read-develop-classes, transcode.
 _Avoid_: 스텝(짧은 고정 작업만 가리킬 때 외에는), 스테이지
 
 **진행 표시 (progress display)**:

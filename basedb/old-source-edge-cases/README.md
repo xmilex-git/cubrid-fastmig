@@ -2,7 +2,7 @@
 
 Small fixtures for the seven edge cases of T26 [workspace#554](https://github.com/xmilex-git/workspace/issues/554).
 Each is built on a 10.2, 11.2 or 11.3 source and taken to develop two ways: through cubrid-fastmig (`plan`, `migrate
---verify`, then `post-migration-fixes.sql`) and through the engine's official path (source `unloaddb` → develop
+--check`, then `post-migration-fixes.sql`) and through the engine's official path (source `unloaddb` → develop
 `loaddb -u dba`, with `--no-user-specified-name` from 10.2). The same develop checks run on both targets. It is not a
 baseline DB.
 
@@ -30,7 +30,7 @@ crashes leaves the source unclean, and plan refuses an unclean source.
 ## Results
 
 Measured on 10.2.18.9024, 11.2.9.0866 and 11.3.6.1321 → develop 682b080b2 (optdebug), cubrid-fastmig with
-workspace#554. Every fastmig target that plan accepted passed `migrate --verify` with 0 migration defects. No develop
+workspace#554. Every fastmig target that plan accepted passed `migrate --check` with 0 migration defects. No develop
 assert fired.
 
 1. **System class domain (s, r).** The official path gives no target. 10.2 → develop `loaddb` stops the whole schema

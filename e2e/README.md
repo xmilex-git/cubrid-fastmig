@@ -3,7 +3,7 @@
 One command takes a baseline DB (basedb/README.md) through every step of a migration and the checks of
 [workspace#484](https://github.com/xmilex-git/workspace/issues/484), timing each step (**끝-끝 실행, end-to-end run**,
 see [GLOSSARY.md](../GLOSSARY.md)). This is a runtime check, not a unit test (AGENTS.md § Build and check). Verdicts
-come from the tool's own exit codes (`verify`, `set-comparison`, `finalize`) and the engine's.
+come from the tool's own exit codes (`check`, `set-comparison`, `finalize`) and the engine's.
 
 ## Run
 
@@ -63,3 +63,15 @@ unload→load baseline), (7) the lock smoke and partition pruning.
 At most two DB copies live at once: the source copy and the target. A registered target is removed with
 `cubrid deletedb`. What is left (a failed target, the source copy's kept files, logs) stays in `<out>`, removed by its
 literal path once read.
+
+## Command line
+
+`just e2e-cli <BASEDB_ROOT>/develop/pristine/<variant> <new dir on another filesystem> <out dir>` (same
+`FASTMIG_E2E_*` environment; `e2e/cli/run.sh`) checks the command line of workspace#605 on a develop baseline: `-h`
+exits 0 and a missing argument exits 2 with the whole help for every command, each name from before #605 is refused
+with the name that replaced it, plan `--json` shows the target conf defaults (`settings`), `-i` splits the volumes
+over `-F`, another directory of the same filesystem (clone) and the other filesystem (copy) and passes the set
+comparison, `-r` replaces a finished target in the same `-F` (and refuses an unlisted file there or a running server,
+keeping the old target), `-d` deletes the source copy after a clean check and keeps it when the check finds a defect
+(a target LOB file deleted while migrate is stopped at its verifier phase). Rows `step rc expected` in
+`<out>/steps.tsv`.

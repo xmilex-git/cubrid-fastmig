@@ -26,12 +26,38 @@ The first target is 11.4 → develop.
 
 ## The source database is deleted only after verification
 
-`migrate` registers the target when every write succeeded; with `--verify` it first runs the verifier and only a
+`migrate` registers the target when every write succeeded; with `--check` it first runs the verifier and only a
 target with no migration defect is registered and loses its `FASTMIG_INCOMPLETE` marker (ADR 0015).
-`finalize <target-dir>` is the only command that deletes the source, and it refuses unless a verification passed
-(`migrate --verify` or a later `verify` run) and the source is unchanged since the migration (ADR 0008).
+`finalize <target-dir>` deletes the source, and it refuses unless a check passed (`migrate --check` or a later
+`check` run) and the source is unchanged since the migration (ADR 0008); `migrate -d, --delete-source` does the same
+at its end, only after its own check found 0 migration defects (ADR 0008 addendum).
 The verifier runs on both source and target, so defects already present in the source are
 not reported as migration defects.
+
+## Command line
+
+The options follow the CUBRID utilities (copydb, createdb) and take `--flag value`, `--flag=value` and the short
+forms (`-F dir`, `-Fdir`); `-h` prints a command's whole help. Defaults come from the target install and its
+`cubrid.conf`, and the command line always wins (workspace#604):
+
+```sh
+cubrid-fastmig plan    <db> [<new-db>] -F <dir> [options]   # reads only; exit 1 when it refuses
+cubrid-fastmig migrate <db> [<new-db>] -F <dir> [-L <log dir>] [-B <lob dir>] [-E <dir> | -i <control file>]
+                       [-r] [-d | --check] [-t <threads>] [--temp-mem-size <size>] [--temp-disk-size min|max|<size>]
+cubrid-fastmig check   <db | first-volume-path> [--source <db | path>] [-t <threads>]
+cubrid-fastmig finalize <target-dir>
+```
+
+| Option | Default |
+|---|---|
+| `--target-version 11.4\|develop` | the line of the install `$CUBRID` (`lib/libcubrid.so` → `libcubrid.so.<major>.<minor>`); an error when it cannot be read |
+| `--db-volume-size` | target conf `db_volume_size`, else 512M |
+| `--temp-mem-size` | target conf `data_buffer_size`, else physical memory / 4 (at least 256M) |
+| `--temp-disk-size` | target conf `temp_file_max_size_in_pages`: > 0 → pages × page size, 0 → min; else asked on a terminal, max otherwise |
+| `--server-name` | the source's db-host |
+
+A name the tool had before (`--dest`, `--log-dir`, `--lob-dir`, `--workers`, `--mem`, `--temp-disk`, `--verify`,
+`--target-name`, the command `verify`) is refused with the name that replaced it.
 
 ## Required SQL on the target, in order
 
@@ -52,10 +78,10 @@ not reported as migration defects.
 ## Disk and memory are chosen before the start
 
 `plan` shows the temp disk the index rebuild needs at least (one index at a time) and at most
-(every index at once), and what the batches in between cost in time; `migrate --temp-disk min|max|<size>` picks
-one before anything is written and keeps to it by building the indexes in batches, and with `--verify` checking them in batches (`plan --verify` adds what the
+(every index at once), and what the batches in between cost in time; `migrate --temp-disk-size min|max|<size>` picks
+one before anything is written and keeps to it by building the indexes in batches, and with `--check` checking them in batches (`plan --check` adds what the
 verifier needs on the source). The index build and the verifier keep their keys, sort and merge buffers inside
-`--mem`, merging spilled runs in more passes when few fit. How the bounds are computed:
+`--temp-mem-size`, merging spilled runs in more passes when few fit. How the bounds are computed:
 [docs/resources.md](docs/resources.md) (workspace#526).
 
 ## Layout

@@ -1,6 +1,6 @@
 # Operations verification
 
-What runs on migrated databases besides `verify` and the set comparison: the operations scenario (GLOSSARY) and its
+What runs on migrated databases besides `check` and the set comparison: the operations scenario (GLOSSARY) and its
 parity with the official path. Decision: G12 [workspace#587](https://github.com/xmilex-git/workspace/issues/587).
 The version matrix (T37 [workspace#589](https://github.com/xmilex-git/workspace/issues/589)) adds its section here.
 

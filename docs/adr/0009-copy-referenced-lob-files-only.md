@@ -1,6 +1,6 @@
 # LOB 디렉터리는 공유하지 않고, 참조된 파일만 복사한다
 
-도착 DB는 출발의 lob-base-path를 공유하지 않는다. 도구는 출발 레코드의 LOB 로케이터가 가리키는 파일(참조 LOB 파일)만 도착 lob-base-path(`--lob-dir`, 기본 `file:<dest>/lob`)로 복사하고(같은 파일시스템이면 clone), 그 목록을 `<dest>/fastmig/lob-manifest`로 한 번 만들어 복사·검증·finalize가 같이 쓴다. 고아 LOB 파일은 옮기지도 지우지도 않고 개수와 크기만 보고한다 ([G6](https://github.com/xmilex-git/workspace/issues/488)).
+도착 DB는 출발의 lob-base-path를 공유하지 않는다. 도구는 출발 레코드의 LOB 로케이터가 가리키는 파일(참조 LOB 파일)만 도착 lob-base-path(`-B, --lob-base-path`, 기본 `file:<dest>/lob`)로 복사하고(같은 파일시스템이면 clone), 그 목록을 `<dest>/fastmig/lob-manifest`로 한 번 만들어 복사·검증·finalize가 같이 쓴다. 고아 LOB 파일은 옮기지도 지우지도 않고 개수와 크기만 보고한다 ([G6](https://github.com/xmilex-git/workspace/issues/488)).
 
 공유를 기각한 이유: develop은 DELETE와 DROP TABLE 때 LOB 파일을 지우므로(DROP은 CBRD-23700, develop에만 있음), 공유하면 도착 DB가 출발 DB의 파일을 지워 finalize 전 되돌리기와 "출발 무수정"이 깨진다. 디렉터리를 통째로 복사·삭제하지 않는 이유: 같은 lob-base-path를 다른 DB가 함께 쓸 수 있어(copydb `--copy-lob-path`) 그 DB의 파일과 고아 파일을 구별할 수 없다.
 
