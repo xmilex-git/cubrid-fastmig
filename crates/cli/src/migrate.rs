@@ -474,7 +474,6 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     let npages = BootDbParm::read(&src.vols)?.1.vacuum_log_block_npages;
     let first_pageid = new_log_start::first_log_pageid(src.log.append_lsa.pageid, npages as i64);
     // every phase total before the precheck ends: the start estimate is made when the next phase begins
-    let bytes: u64 = plan.volumes.iter().map(|v| v.bytes).sum();
     // a cloned volume costs its clone in open-sources, not a copy (workspace#560)
     let copy_bytes = (plan.volumes.iter())
         .filter(|v| v.copy_method == CopyMethod::Copy)
@@ -482,9 +481,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
         .sum();
     rep.progress.set_total(VOLUME_COPY, copy_bytes);
     rep.progress.set_total(PAGE_TREATMENT, plan.treated_pages);
-    // the sync goes over every file the run created, cloned volumes too (workspace#560)
-    rep.progress
-        .set_total(DURABLE_SYNC, bytes + new_log::file_bytes(&src.log));
+    // the sync makes durable what the run writes after the clone ranges were synced: byte-copied volumes, treated
+    // pages, the new B-trees (their bound); the clean clones cost little (workspace#606). The pass counts what was
+    // actually written once it begins
+    let io = src.vols.io_pagesize() as u64;
+    let written_bound = copy_bytes + (plan.treated_pages + target.btree_pages) * io;
+    rep.progress.set_total(DURABLE_SYNC, written_bound);
     // the build scans the indexed heaps as the page treatment leaves them, then writes every pair to a leaf
     rep.progress
         .set_total(INDEX_BUILD, b.est.heap_pages() + b_appended);
@@ -554,6 +556,8 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     }
     rep.steps
         .push(("volumes.clone_unshare", t.elapsed().as_secs_f64()));
+    // what the run writes from here on is what the durable-sync pass makes durable (workspace#606)
+    let ranges_synced = ProcSample::now();
     let reservation = Arc::new(Reservation::take(
         &marker,
         &fastmig_dir.join("reserve-target"),
@@ -774,7 +778,17 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     marker.record(&volinfo::log_dir_file(&o.log_dir, &po.target_name, "_vinf"))?;
     volinfo::write(&o.log_dir, &po.target_name, &targets)?;
     rep.lap("new_log");
-    durable::sync_created(&marker, o.worker_limit, rep.progress.meter(DURABLE_SYNC))?;
+    let written = match (ProcSample::now(), ranges_synced) {
+        (Some(now), Some(then)) => now.since(then).write_bytes,
+        _ => written_bound,
+    };
+    rep.progress.set_total(DURABLE_SYNC, written);
+    durable::sync_created(
+        &marker,
+        o.worker_limit,
+        rep.progress.meter(DURABLE_SYNC),
+        written,
+    )?;
     rep.lap("fsync");
 
     // verify only on request (user decision 2026-10-30, ADR 0015): target rules on the target, source rules on the
@@ -1068,7 +1082,8 @@ fn take_cloned_ranges(
         }
     }
     let synced = meter.part(1);
-    SyncProgress::run(&synced, written.iter().sum(), |progress| {
+    let total: u64 = written.iter().sum();
+    SyncProgress::run(&synced, total, total, |progress| {
         worker_pool::run(files.len(), worker_limit, |i| {
             files[i].sync_data().map_err(|e| {
                 io::Error::new(

@@ -1,16 +1,18 @@
 //! The progress of a pass that waits for writes to reach the devices (an fsync pass), counted as the devices write:
 //! one scale for the whole pass, so a slow fsync does not leave the phase's counter standing still (workspace#606).
 //!
-//! Input: the phase's meter and the pass's total bytes; the pass calls [`SyncProgress::file_synced`] as each file's
-//! sync returns. Output: the meter raised, never past the total, never down.
+//! Input: the phase's meter, the pass's total (the bytes the run wrote that the pass makes durable: its scale) and the
+//! files' total length; the pass calls [`SyncProgress::file_synced`] as each file's sync returns. Output: the meter
+//! raised, never past the total, never down.
 //! Rule (workspace#606 plan A, 1번 세션 2026-11-01): at the start the system has D0 bytes dirty or under writeback
-//! (`dirty_bytes`); the pass's dirty share is min(D0, total) and its clean share the rest. The clean share counts at
-//! once; the dirty share as the system's dirty bytes fall: count = clean + dirty share x (D0 - now) / D0, read every
-//! [`WATCH`]. The lengths of the files synced so far are a floor. Edge cases:
+//! (`dirty_bytes`); the pass's dirty share is min(D0, total) and its clean share the rest (written back already). The
+//! clean share counts at once; the dirty share as the system's dirty bytes fall: count = clean + dirty share x
+//! (D0 - now) / D0, read every [`WATCH`]. The share of the files' length synced so far, times the total, is a floor.
+//! Edge cases:
 //! - D0 = 0: everything is clean and counts at once;
 //! - D0 > total (other processes' dirty pages): the dirty share is the total and its count runs slow, erring long;
 //! - pages dirtied during the pass, by anyone, raise "now": the count stands still for a while, never goes down;
-//! - `/proc/meminfo` unreadable: only the synced files' lengths count, as before workspace#606.
+//! - `/proc/meminfo` unreadable: only the synced files count, as before workspace#606.
 //!
 //! Two earlier plans failed on the dev host HDD (counter idle 8 s, 4 s): counting section completions (they wait
 //! behind the kernel flusher's writes), and spreading the device progress over the whole total (it overlapped the
@@ -31,15 +33,18 @@ pub struct SyncProgress<'a> {
     total: u64,
     /// What `meter` has been given.
     shown: AtomicU64,
-    /// Lengths of the files whose sync returned.
+    /// Lengths of the files whose sync returned, of `files_total`.
     files: AtomicU64,
+    files_total: u64,
 }
 
 impl<'a> SyncProgress<'a> {
-    /// Runs `pass` with a watcher counting `total` bytes on `meter` until `pass` returns.
+    /// Runs `pass` with a watcher counting `total` bytes on `meter` until `pass` returns; the files `pass` syncs are
+    /// `files_total` bytes long.
     pub fn run<R>(
         meter: &'a Meter<'a>,
         total: u64,
+        files_total: u64,
         pass: impl FnOnce(&SyncProgress<'a>) -> R,
     ) -> R {
         let p = SyncProgress {
@@ -47,6 +52,7 @@ impl<'a> SyncProgress<'a> {
             total,
             shown: AtomicU64::new(0),
             files: AtomicU64::new(0),
+            files_total,
         };
         let d0 = dirty_bytes::system();
         let dirty_share = d0.map(|d| d.min(total));
@@ -69,7 +75,8 @@ impl<'a> SyncProgress<'a> {
     /// One file's sync returned: its length joins the floor.
     pub fn file_synced(&self, len: u64) {
         let files = self.files.fetch_add(len, Relaxed) + len;
-        self.raise(files);
+        let share = files as f64 / self.files_total.max(1) as f64;
+        self.raise((share * self.total as f64) as u64);
     }
 
     fn watch(&self, d0: u64, dirty: u64, done: &AtomicBool) {

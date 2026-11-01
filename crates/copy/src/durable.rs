@@ -3,7 +3,8 @@
 //! the shared worker limit.
 //!
 //! Input: the incomplete marker and the worker limit. Output: all created files and directories flushed to disk.
-//! Progress: `meter` (the durable-sync phase) counts the pass's total length as the devices write it
+//! Progress: `meter` (the durable-sync phase) counts `written`, the bytes the run wrote since the clone ranges were
+//! synced (what this pass makes durable; the files are mostly clean clones), as the devices write them
 //! ([`crate::sync_progress`]): one fsync of a large volume on a slow disk waits seconds behind the kernel flusher's
 //! writes, and the count moves meanwhile (workspace#606: it stood 13 s on the dev host HDD).
 //! Must run before the target is registered, so a crash never leaves a registered target with unwritten pages.
@@ -30,6 +31,7 @@ pub fn sync_created(
     marker: &IncompleteMarker,
     worker_limit: usize,
     meter: Meter,
+    written: u64,
 ) -> io::Result<()> {
     // parents too: a directory the tool did not create (the target dir itself) still gained entries
     let mut set = BTreeSet::new();
@@ -38,12 +40,12 @@ pub fn sync_created(
         set.insert(p);
     }
     let paths: Vec<PathBuf> = set.into_iter().collect();
-    let total = paths
+    let files_total = paths
         .iter()
         .filter_map(|p| fs::metadata(p).ok())
         .map(|m| m.len())
         .sum();
-    SyncProgress::run(&meter, total, |progress| {
+    SyncProgress::run(&meter, written, files_total, |progress| {
         worker_pool::run(paths.len(), worker_limit, |i| match File::open(&paths[i]) {
             Ok(f) => {
                 f.sync_all()?;
