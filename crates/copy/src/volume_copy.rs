@@ -5,7 +5,8 @@
 //! clone is allowed. Output: per volume, the copy method used and the bytes moved. Target files are created new
 //! (an existing file is an error) and recorded in the incomplete marker before they are written; they are
 //! made durable later, with every other created file, by [`crate::durable`].
-//! Progress: `meter` (the volume-copy phase) gets the bytes of each clone and of each 8 MiB copy task.
+//! Progress: `meter` (the volume-copy phase) gets the bytes of each 8 MiB copy task; a cloned volume costs its clone in
+//! open-sources and adds nothing here (counting it made a 0 s phase look like seconds of work, workspace#606).
 //! Source: decision G1 workspace#481 (clone whenever possible, copy otherwise; `--thread-count` slides over the work).
 
 use std::fs::{File, OpenOptions};
@@ -76,7 +77,6 @@ pub fn copy_volumes(
         if job.preallocated || job.precloned {
             let dst = OpenOptions::new().write(true).open(&job.target)?;
             let method = if job.precloned {
-                meter.add(size);
                 CopyMethod::Clone
             } else {
                 CopyMethod::Copy
@@ -92,9 +92,6 @@ pub fn copy_volumes(
             dst.set_len(size)?;
             CopyMethod::Copy
         };
-        if method == CopyMethod::Clone {
-            meter.add(size);
-        }
         *prepared[i].lock().unwrap() = Some((dst, method, size));
         Ok(())
     })?;
