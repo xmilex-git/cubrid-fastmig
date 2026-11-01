@@ -351,7 +351,20 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         phases[VERIFIER] = VERIFIER_OLDER_LINE;
     }
     // the byte phases at their storage kind's rates (workspace#561)
-    let phases = storage.phase_specs(&phases, source_read);
+    let mut phases = storage.phase_specs(&phases, source_read);
+    // the index build's heap scan reads the target's heap pages; on cloned volumes those the run does not rewrite
+    // are not in the page cache but on the device, so the scan waits for reads at the source's measured pace (the pair
+    // count read the same pages; on the HDD the develop source's scan took 28 s, its cpu default 2.4 s,
+    // workspace#607). shortcut: all or nothing at half the scanned pages, until a run with a partial rewrite is measured
+    let rewritten: u64 = if plan.unshare {
+        (target.unshare_ranges.iter()).map(|r| r.pages as u64).sum()
+    } else {
+        0
+    };
+    let cloned = (plan.volumes.iter()).any(|v| v.copy_method != CopyMethod::Copy);
+    if cloned && 2 * rewritten < est.heap_pages() {
+        phases[INDEX_BUILD].first_prior = Some(Bottleneck::Read);
+    }
     let progress = Progress::new(
         "migrate",
         &phases,

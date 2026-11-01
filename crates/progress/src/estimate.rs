@@ -14,7 +14,8 @@
 //!   ([`crate::bottleneck`]). A host whose CPU work runs 1.5x slower than the defaults makes the remaining CPU-bound
 //!   phases 1.5x longer, and leaves the I/O-bound ones alone; a bottleneck nothing has been bound by yet keeps its
 //!   default (factor 1); work whose use shows no bottleneck moves no factor;
-//! - a phase not yet begun takes its default seconds times its prior bottleneck's factor;
+//! - a phase not yet begun takes its default seconds times its prior bottleneck's factor, part by part (a part may
+//!   have its own prior, [`crate::meter::PhaseSpec::first_prior`]);
 //! - the running phase takes its default seconds left times a blend of that factor and its own seconds per default
 //!   second, weighted [`PRIOR_WEIGHT`] against the share done: the prior first, the phase's own observation as it
 //!   gets done. No moving average, no floor: a good prior is not overwritten by a noisy rate. A phase in parts does
@@ -138,9 +139,13 @@ impl PartClock {
     /// The bottleneck part `k` showed once it has been active [`MIN_SAMPLE_S`].
     fn classified(&self, k: usize, ph: &Phase, workers: usize) -> Option<Bottleneck> {
         match self.used[k] {
-            Some(u) if self.secs[k] >= MIN_SAMPLE_S => {
-                Bottleneck::classify_with_prior(u, self.secs[k], workers, ph.device, ph.spec.prior)
-            }
+            Some(u) if self.secs[k] >= MIN_SAMPLE_S => Bottleneck::classify_with_prior(
+                u,
+                self.secs[k],
+                workers,
+                ph.device,
+                ph.spec.prior_of(k),
+            ),
             _ => None,
         }
     }
@@ -190,7 +195,7 @@ impl Estimator {
                     let prior = factors.of(self
                         .parts
                         .classified(k, ph, p.worker_limit)
-                        .unwrap_or(ph.spec.prior));
+                        .unwrap_or(ph.spec.prior_of(k)));
                     let f = if total > 0.0 {
                         (done / total).min(1.0)
                     } else {
@@ -208,7 +213,7 @@ impl Estimator {
         };
         let pending: f64 = p.phases[cur + 1..]
             .iter()
-            .map(|q| scaled_default(p, q, factors.of(q.spec.prior)))
+            .map(|q| scaled_default(p, q, &factors))
             .sum();
         Estimate {
             // the moving average in the phase's unit, shown only: one rate, so not for a phase in parts
@@ -230,7 +235,7 @@ pub(crate) fn at_start(p: &Progress, from: usize, sample: Option<ProcSample>) ->
     let factors = speed_factors(p, now, sample);
     el + p.phases[from..]
         .iter()
-        .map(|q| scaled_default(p, q, factors.of(q.spec.prior)))
+        .map(|q| scaled_default(p, q, &factors))
         .sum::<f64>()
 }
 
@@ -306,11 +311,15 @@ fn total_secs(p: &Progress, ph: &Phase) -> f64 {
     default_secs(p, ph, |k| ph.totals[k].load(Relaxed))
 }
 
-/// A whole phase: a step takes its fixed time; measured work its default time times the factor.
-fn scaled_default(p: &Progress, ph: &Phase, factor: f64) -> f64 {
+/// A whole phase: a step takes its fixed time; measured work each part's default time times its prior's factor.
+fn scaled_default(p: &Progress, ph: &Phase, factors: &SpeedFactors) -> f64 {
     match ph.spec.unit {
         Unit::Step => STEP.as_secs_f64(),
-        _ => total_secs(p, ph) * factor,
+        _ => (0..ph.totals.len())
+            .map(|k| {
+                part_secs(p, ph, k, ph.totals[k].load(Relaxed)) * factors.of(ph.spec.prior_of(k))
+            })
+            .sum(),
     }
 }
 

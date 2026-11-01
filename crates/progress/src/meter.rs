@@ -40,6 +40,9 @@ pub struct PhaseSpec {
     /// per unit differs from the first part's (the index build's tree build after its heap scan; the verifier's
     /// target pairs, source pages and source pairs, workspace#560). Parts may alternate (batches).
     pub more: &'static [(Unit, DefaultRate)],
+    /// The first part's bottleneck when it is not `prior`'s: set per run (an index build's heap scan of cold pages,
+    /// workspace#607).
+    pub first_prior: Option<Bottleneck>,
 }
 
 impl PhaseSpec {
@@ -51,6 +54,7 @@ impl PhaseSpec {
             rate: DefaultRate { points: &[] },
             prior: Bottleneck::Cpu,
             more: &[],
+            first_prior: None,
         }
     }
 
@@ -66,6 +70,7 @@ impl PhaseSpec {
             rate,
             prior,
             more: &[],
+            first_prior: None,
         }
     }
 
@@ -84,12 +89,21 @@ impl PhaseSpec {
             rate,
             prior,
             more,
+            first_prior: None,
         }
     }
 
     /// Each part's unit and default rate, the first part's first.
     pub fn all_parts(&self) -> impl Iterator<Item = (Unit, DefaultRate)> + '_ {
         std::iter::once((self.unit, self.rate)).chain(self.more.iter().copied())
+    }
+
+    /// The bottleneck part `k` is assumed to have until it shows its own.
+    pub fn prior_of(&self, k: usize) -> Bottleneck {
+        match (k, self.first_prior) {
+            (0, Some(b)) => b,
+            _ => self.prior,
+        }
     }
 }
 
