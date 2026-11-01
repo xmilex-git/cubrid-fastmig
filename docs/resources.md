@@ -400,7 +400,7 @@ order hdd > unknown > sata-ssd > nvme (one device known to be slow is enough). b
 followed; a loop device counts as sata-ssd (not rotational, no `nvme` name). unknown takes the hdd device throughput.
 The kind chooses the device throughput of the bottleneck classification below (an HDD's read with the worker count:
 231 MB/s for one worker down to 57 MB/s, the fio streams' total, at 4 and more) and the default rates of the byte
-phases (table below); unknown takes the hdd values. There is no I/O concurrency limit per kind: on the HDD 16 workers
+phases (table below; in migrate the target's byte phases follow the write probe, § Write probe); unknown takes the hdd values. There is no I/O concurrency limit per kind: on the HDD 16 workers
 beat 1 on every path (round 1 below), and the HDD precheck reads in one stream (§ Precheck reads in physical order, workspace#596) (workspace#561).
 
 Each phase reads and writes on the devices below; its device throughput (`DeviceThroughput`, `bottleneck.rs`) is the
@@ -467,6 +467,46 @@ the byte phases' defaults per kind (from these runs' report.json units per secon
 | `CLONED_RANGE_BYTES*` | 1.7 GB/s | 250 MB/s | 125 MB/s | target |
 | `COPY_BYTES*` | 3.07 GB/s | 3.07 GB/s | 0.7 GB/s | source (the copy writes into the page cache) |
 | `FSYNC_BYTES*` | 3.0 GB/s | 450 MB/s | 200 MB/s | target |
+
+### Write probe (workspace#603)
+
+When the storage kind is unknown (no block device found: btrfs, ZFS, overlay, NFS, or sysfs hidden, e.g. in a
+container) the kind's defaults are the hdd ones. On NVMe that made the start estimate 2.5-2.9x the run and left the
+ETA +55..+150% until the fsync ran (rootless podman with `/sys/block` and `/sys/dev` masked, the large DBs, 16
+workers). So migrate measures the target instead (`crates/cli/src/write_probe.rs`, GLOSSARY "쓰기 실측"): at the start
+of the precheck, `O_DIRECT` 1 MiB blocks into an `O_TMPFILE` file in the target directory for 1 s or 512 MiB, then one
+`fdatasync`; the rate is the bytes over the whole time. The fdatasync waits for the drive's write cache, so the rate is
+the medium's. The clone ranges and the fsync take 0.55 and 0.95 of it (`default_rates::*_OF_WRITE_PROBE`); the
+byte copy keeps its source kind's default, or the precheck's source read rate when that is faster (the precheck is
+often CPU-bound, so that rate is only a floor). A probe that cannot run leaves the kind's defaults. plan.json shows it
+as `storage.target_write_probe`.
+
+| device | probe, 3 runs | probe seconds | fio sequential write 1 MiB |
+|---|---|---|---|
+| NVMe (990 PRO) | 2.30 / 2.30 / 2.47 GB/s | 0.22 | 2416 MB/s |
+| SATA SSD (MZ7L33T8) | 266 / 500 / 483 MB/s | 1.0 | 464 MB/s |
+| HDD (ST12000NM000J, write cache on) | 219 / 221 / 190 MB/s | 1.02-1.27 | 229 MB/s |
+
+With the probe (1d51157), the large DBs, cold, CPUs 16-31, two runs per cell, every run rc 0 (workspace#603; start =
+start estimate / actual, worst = the worst ETA error of the 2 s progress lines from 10 s on and after the precheck):
+
+| cell | detected: start, worst | unknown (container): start, worst | unknown before: start, worst |
+|---|---|---|---|
+| A NVMe 16 workers | 1.05, −10.1 / −15.6% | 1.04-1.06, −8.1 / +12.0% | 2.70-2.83, +114.5 / +117.1% |
+| A NVMe 1 worker | 1.02, +4.1 / +4.0% | 1.02, +4.8 / +5.1% | 1.25, +18.7 / +19.2% |
+| B NVMe 16 workers | 1.03-1.04, −12.9 / −11.6% | 1.03, +7.6 / +7.3% | 2.51, +151.5% |
+| B NVMe 1 worker | 0.96, +6.1 / +4.8% | 0.96-0.97, +7.1 / −14.2% | 1.18, +26.7% |
+| A HDD 16 workers | 1.10-1.12, +28.6 / +22.3% | 1.06-1.07, +17.4 / +21.3% | 0.97-0.99, −15.7 / +16.8% |
+| B HDD 16 workers | 0.77-0.78, −20.0 / −31.1% | 0.78-0.79, −19.8 / −18.6% | not run |
+
+The probe there: NVMe 2.34-2.52 GB/s in 0.21-0.23 s, HDD 178-182 MB/s in 1.17-1.18 s. Two HDD effects remain, the
+same detected or not: the durable-sync counter moves only when one file's fsync returns, so a 536 MB volume's ~8 s
+fsync on the HDD inflates the ETA by up to +29% (workspace#606); and in B the index build reads the HDD heaps
+(read-bound, 43.5 s) under a cpu prior, so its first two samples run −20..−31%.
+
+A byte phase also corrects the write factor when its defaults were far off: an ended phase counts once it ran
+`MIN_SAMPLE_S` or its defaults gave it that long, and a phase with a storage prior keeps it while it moved bytes at
+`BUSY` of that device side even with its one worker busy (`Bottleneck::classify_with_prior`).
 
 ### Precheck reads in physical order (workspace#596)
 
