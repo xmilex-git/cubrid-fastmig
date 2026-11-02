@@ -175,28 +175,6 @@ pub fn wrap(s: &str, w: usize) -> Vec<String> {
         .collect()
 }
 
-/// `items` joined with `, ` into lines of at most `w` columns, broken only between items (an item longer than a line
-/// stands alone); the later lines indented by two.
-pub fn wrap_list(items: &[String], w: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut line = String::new();
-    for it in items {
-        let indent = if out.is_empty() { 0 } else { 2 };
-        let used = line.chars().count();
-        if used > 0 && used + 2 + it.chars().count() > w.saturating_sub(indent) {
-            out.push(std::mem::take(&mut line) + ",");
-        }
-        if !line.is_empty() {
-            line.push_str(", ");
-        } else if !out.is_empty() {
-            line.push_str("  ");
-        }
-        line.push_str(it);
-    }
-    out.push(line);
-    out
-}
-
 /// [`boxed`], but a line wider than the box is written whole past the right edge instead of cut: a path or a command
 /// the user copies stays in one piece (the terminal wraps it).
 pub fn boxed_whole(

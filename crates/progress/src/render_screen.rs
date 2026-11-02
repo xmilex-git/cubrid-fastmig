@@ -205,12 +205,6 @@ impl Frame<'_> {
         )
     }
 
-    /// The running phase, or the last one once all ended.
-    fn current_phase(&self) -> Option<&Phase> {
-        let p = self.p;
-        p.phases.get(p.current()).or(p.phases.last())
-    }
-
     fn gauges(&self, inner: usize) -> Vec<String> {
         let st = self.st;
         let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
@@ -240,12 +234,11 @@ impl Frame<'_> {
         out
     }
 
-    /// `cpu (93 cpu·s in 7.5 s)`, the running phase's bottleneck; `(prior)` before it is classified.
-    fn bottleneck(&self) -> String {
+    /// `cpu (93 cpu·s in 7.5 s)`, the running phase's bottleneck; `(prior)` before it is classified; none once
+    /// every phase ended (workspace#610: the last frame keeps no stale bottleneck).
+    fn bottleneck(&self) -> Option<String> {
         let st = self.st;
-        let Some(ph) = self.current_phase() else {
-            return String::new();
-        };
+        let ph = self.p.phases.get(self.p.current())?;
         let shown = classified(ph, self.now, self.sample, self.p.worker_limit);
         let name = shown.unwrap_or(ph.spec.prior).name();
         let how = match (shown, used(ph, self.sample)) {
@@ -261,17 +254,17 @@ impl Frame<'_> {
             Some(Bottleneck::Cpu) | None => Color::Green,
             Some(_) => Color::Yellow,
         };
-        format!(
+        Some(format!(
             "bound {}{}  {}",
             st.paint(color, name),
             st.paint(Color::Gray, &how),
             st.paint(Color::Gray, ph.spec.name)
-        )
+        ))
     }
 
     fn resource_lines(&self, inner: usize) -> Vec<String> {
         let mut out = self.gauges(inner);
-        out.push(self.bottleneck());
+        out.extend(self.bottleneck());
         out.push(format!(
             "disk  {}",
             self.st.paint(Color::Gray, self.info_or(|i| &i.devices))
@@ -361,11 +354,9 @@ impl Frame<'_> {
     /// Resources and notes in one three-row box, for a short terminal.
     fn merged_panel(&self) -> Vec<String> {
         let st = self.st;
-        let lines = vec![
-            self.gauges((self.width - 4) / 2).join("  "),
-            self.bottleneck(),
-            self.note_lines(2).join("  "),
-        ];
+        let mut lines = vec![self.gauges((self.width - 4) / 2).join("  ")];
+        lines.extend(self.bottleneck());
+        lines.push(self.note_lines(2).join("  "));
         boxed(
             st,
             &format!("resources {} {}", st.glyphs.dot, self.notes_title()),

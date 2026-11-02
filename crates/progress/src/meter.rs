@@ -268,14 +268,6 @@ impl Progress {
         self.log.lock().unwrap_or_else(|e| e.into_inner()).close()
     }
 
-    /// Each phase's name and seconds (0 for a phase that never began).
-    pub fn phase_seconds(&self) -> Vec<(&'static str, f64)> {
-        let now = Instant::now();
-        (self.phases.iter())
-            .map(|ph| (ph.spec.name, crate::estimate::elapsed(ph, now)))
-            .collect()
-    }
-
     /// Elapsed + estimated remaining seconds when the first measured phase began.
     pub fn start_estimate(&self) -> Option<f64> {
         self.start_estimate.get().copied()

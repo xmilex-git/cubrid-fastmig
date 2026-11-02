@@ -1,6 +1,6 @@
 //! What a finished migrate shows on a terminal instead of report.json: a result box (time against the start
-//! estimate, each phase's time, the check's outcome, where the target is registered, the report and the run log),
-//! then the required SQL box.
+//! estimate, the check's outcome, where the target is registered, the report and the run log; each phase's time is in
+//! the phases box above it), then the required SQL box.
 //!
 //! Input: the finished progress, the check's summary line (`null` without `--check`), the required SQL steps and the
 //! paths. Output: the text for stdout. Without a terminal on stdout migrate prints report.json as before.
@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use fastmig_progress::panel::{boxed_whole, wrap_list};
+use fastmig_progress::panel::boxed_whole;
 use fastmig_progress::{Color, Progress, Stream, Style, style::term_size};
 
 use crate::required_sql::{self, RequiredSql};
@@ -42,7 +42,6 @@ pub fn text(
     dbtxt: &Path,
 ) -> String {
     let width = term_size(Stream::Stdout).0.saturating_sub(1).max(40);
-    let inner = width - 4;
     let mut lines = Vec::new();
     let est = p.start_estimate().map_or(String::new(), |e| {
         format!(" (estimated at start ~{})", secs(e))
@@ -51,14 +50,6 @@ pub fn text(
         "took {}{est}",
         st.strong(Color::Green, &secs(p.run_seconds()))
     ));
-    let times: Vec<String> = (p.phase_seconds().into_iter())
-        .map(|(n, s)| format!("{n} {}", secs(s)))
-        .collect();
-    lines.extend(
-        wrap_list(&times, inner)
-            .into_iter()
-            .map(|l| st.paint(Color::Gray, &l)),
-    );
     lines.push(match count(summary, "migration") {
         Some(0) => format!(
             "check  {}, {} pre-existing, {} resolved",
