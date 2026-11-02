@@ -19,7 +19,7 @@ use fastmig_progress::{
     DefaultRate, DeviceThroughput, PhaseSpec, StorageKind, Unit, default_rates,
 };
 
-use crate::write_probe::WriteProbe;
+use crate::write_probe::{self, WriteProbe};
 
 /// The storage kind of one directory and the whole disks it was judged by (empty when sysfs had none).
 #[derive(Clone, Debug)]
@@ -105,7 +105,9 @@ impl RunStorage {
 
     /// `specs` with the byte phases' default rates of the storage they run on (docs/resources.md § Storage kinds):
     /// - the writes waited for (open-sources' second part, its fdatasync, workspace#606; durable-sync) from the
-    ///   target's kind, or from its write probe when the kind is unknown and the probe ran (workspace#603, #606);
+    ///   target's kind, or from its write probe when the kind is unknown and the probe ran (workspace#603, #606): the
+    ///   clone ranges from its scattered pass, or its sequential one when that pass was skipped, the fsync from its
+    ///   sequential pass (workspace#608);
     /// - the byte copy into the page cache (volume-copy; open-sources' first part) from the source's kind, or
     ///   `source_read` (bytes per second the precheck read the source at) when that is faster: the precheck is often
     ///   CPU-bound, so its read rate is only a floor of what the source reads at (workspace#603);
@@ -113,7 +115,6 @@ impl RunStorage {
     pub fn phase_specs(&self, specs: &[PhaseSpec], source_read: Option<f64>) -> Vec<PhaseSpec> {
         use StorageKind::*;
         let (s, t) = (self.source.kind, self.target.kind);
-        let probe = self.target_write.map(|w| w.rate());
         // the byte copy into the page cache: volume-copy, and open-sources' first part
         let copy = match s {
             Hdd | Unknown => default_rates::COPY_BYTES_HDD,
@@ -124,10 +125,13 @@ impl RunStorage {
             _ => copy,
         };
         // the writes waited for: open-sources' second part (its fdatasync) and durable-sync
-        let (ranges_synced, fsync) = match (probe, t) {
+        let (ranges_synced, fsync) = match (self.target_write, t) {
             (Some(w), _) => (
-                one_point(w * default_rates::CLONED_RANGE_OF_WRITE_PROBE),
-                one_point(w * default_rates::FSYNC_OF_WRITE_PROBE),
+                one_point(match w.scattered {
+                    Some(s) => s.rate() * default_rates::CLONED_RANGE_OF_SCATTERED_PROBE,
+                    None => w.sequential.rate() * default_rates::CLONED_RANGE_OF_WRITE_PROBE,
+                }),
+                one_point(w.sequential.rate() * default_rates::FSYNC_OF_WRITE_PROBE),
             ),
             (None, SataSsd) => (
                 default_rates::CLONED_RANGE_BYTES_SATA_SSD,
@@ -163,12 +167,21 @@ impl RunStorage {
     }
 
     pub fn json(&self) -> String {
+        let pass = |p: write_probe::Pass| {
+            format!(
+                "\"bytes\": {}, \"seconds\": {:.3}, \"bytes_per_s\": {:.0}",
+                p.bytes,
+                p.seconds,
+                p.rate()
+            )
+        };
+        // the sequential pass at the top level, as before the scattered one (workspace#608)
         let probe = match self.target_write {
             Some(w) => format!(
-                "{{\"bytes\": {}, \"seconds\": {:.3}, \"bytes_per_s\": {:.0}}}",
-                w.bytes,
-                w.seconds,
-                w.rate()
+                "{{{}, \"scattered\": {}}}",
+                pass(w.sequential),
+                w.scattered
+                    .map_or("null".to_string(), |s| format!("{{{}}}", pass(s)))
             ),
             None => "null".to_string(),
         };

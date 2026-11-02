@@ -92,6 +92,13 @@ pub const FSYNC_BYTES_HDD: DefaultRate = DefaultRate {
 /// cold runs, not on these (docs/resources.md § Write probe).
 pub const CLONED_RANGE_OF_WRITE_PROBE: f64 = 0.7;
 pub const FSYNC_OF_WRITE_PROBE: f64 = 1.0;
+/// The clone ranges' fdatasync per byte of the ranges, as a share of the write probe's scattered pass (16 GiB span,
+/// workspace#608). Fitted on the same runs as the factors above, the large 11.4 DB, cold, 16 workers (4 matrices of
+/// workspace#603/#606, the probe run on every kind then): the ranges synced at 0.57-0.77 (mean 0.67, 12 runs) of the
+/// sequential probe on the HDD and 0.86-1.04 (mean 0.94, 8 runs) on the SATA SSD; the scattered pass ran 0.77 and
+/// 0.99 of the sequential one there (3 probes each), so the factor is 0.87 on the HDD and 0.94 on the SATA SSD: 0.9 for
+/// both. Judged on new cold runs, not on these.
+pub const CLONED_RANGE_OF_SCATTERED_PROBE: f64 = 0.9;
 
 /// Heap pages the index build's scan reads (its first part): the large 11.4 DB (111.4 k pages) in about 43.5 / 10.1 /
 /// 2.2 s and the large develop DB (105.0 k pages) in 44.9 / 10.9 / 2.9 s at 1 / 4 / 16 workers, read from the 2 s
