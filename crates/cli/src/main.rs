@@ -39,6 +39,7 @@ mod source_fingerprint;
 mod source_unload_copy;
 mod storage_kind_detect;
 mod target_conf_defaults;
+mod target_dirs;
 mod target_install_version;
 mod target_space;
 mod temp_disk_choice;

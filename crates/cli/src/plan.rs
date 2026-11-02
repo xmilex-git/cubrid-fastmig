@@ -35,8 +35,8 @@ use crate::storage_kind_detect::RunStorage;
 use crate::target_conf_defaults::TargetConfDefaults;
 use crate::volume_targets::{self, VolumeLayout};
 use crate::{
-    check, plan_report, resource_estimate, run_paths, target_install_version, target_space,
-    volume_dirs,
+    check, plan_report, resource_estimate, run_paths, target_dirs, target_install_version,
+    target_space, volume_dirs,
 };
 
 pub const HELP: &str = "\
@@ -46,10 +46,10 @@ cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]
   -F, --file-path <dir>          target directory migrate would write (volume 0, fastmig/)
   --target-version 11.4|develop  target release line (default: the line of the install $CUBRID; 11.4 takes a 10.2,
                                  11.2, 11.3 or 11.4 source)
-  -E, --extended-volume-path <dir>  target directory of volumes 1.. (default: -F); not with -i
+  -E, --extended-volume-path <dir>  target directory of volumes 1.., existing and writable (default: -F); not with -i
   -i, --control-file <file>      target path per volume, copydb's format: `volid source_fullvolname dest_fullvolname`
                                  lines (volumes it does not list go to -F); not with -E
-  -L, --log-path <dir>           target log directory migrate would write (default: -F)
+  -L, --log-path <dir>           target log directory migrate would write, existing and writable (default: -F)
   -B, --lob-base-path <dir>      target lob-base-path (default: <-F>/lob)
   -r, --replace                  replace a database registered under <new-db> in the target databases.txt: its
                                  volumes, logs, _vinf, _dwb and line are removed first (refused while its server is up);
@@ -379,6 +379,9 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<(Plan, Option<Re
             }
         }
     }
+    // -E and -L must exist: migrate does not create them (workspace#614)
+    plan.refusals
+        .extend(target_dirs::check(o).iter().map(|p| p.refusal()));
     // a copied source still naming the original volumes (workspace#515)
     let (warnings, refusals) = volume_dirs::check(s, o.locate);
     plan.warnings.extend(warnings);

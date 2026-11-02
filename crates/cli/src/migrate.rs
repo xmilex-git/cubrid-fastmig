@@ -88,9 +88,9 @@ cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
   Moves the cleanly shut down database <db> to <dir> as <new-db> (default: <db>) and registers it.
   -F, --file-path <dir>          target directory of volume 0 and fastmig/ (must be empty or hold FASTMIG_INCOMPLETE;
                                  refused while another migrate holds its lock)
-  -L, --log-path <dir>           target log directory (default: -F)
+  -L, --log-path <dir>           target log directory, existing and writable (default: -F)
   -B, --lob-base-path <dir>      target lob-base-path (default: <-F>/lob)
-  -E, --extended-volume-path <dir>  target directory of volumes 1.. (default: -F); not with -i
+  -E, --extended-volume-path <dir>  target directory of volumes 1.., existing and writable (default: -F); not with -i
   -i, --control-file <file>      target path per volume, copydb's format: `volid source_fullvolname dest_fullvolname`
                                  lines (volumes it does not list go to -F); not with -E
   --target-version 11.4|develop  target release line (default: the line of the install $CUBRID; 11.4 takes a 10.2,

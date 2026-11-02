@@ -3,7 +3,8 @@
 //!
 //! Input: the plan (volume paths and their copy methods), the open source (its databases.txt entry and active log),
 //! the [`PlanOptions`] (`-F`, `-L`, `-B`, `-E`/`-i` through the plan, databases.txt files, `--no-clone`, `-r`).
-//! Output: the [`PathRow`]s the question screen, the plan screen, the progress screen and the end box show.
+//! Output: the [`PathRow`]s the question screen, the plan screen, the progress screen and the end box show; a target
+//! directory `target_dirs` refuses carries its problem after the path.
 //! Volume 0's directory is one row; volumes 1.. in another directory pair get a row per pair (`-E`, `-i`). The target
 //! log is new (the run writes it), the source archives are not carried over; LOB and Java directories are cloned
 //! where the filesystem allows it (`copy_method::predict`, as the volumes).
@@ -19,6 +20,7 @@ use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_progress::PathRow;
 
 use crate::plan::{OpenSource, PlanOptions};
+use crate::target_dirs;
 
 /// Rows of volume directory pairs before the rest is counted.
 const VOLUME_GROUPS: usize = 8;
@@ -135,5 +137,12 @@ pub fn rows(plan: &Plan, src: &OpenSource, o: &PlanOptions) -> io::Result<Vec<Pa
         source: Some(show(&o.source_dbtxt)),
         target: show(&o.target_dbtxt),
     });
+    // a given -E or -L directory the plan refuses: the row says why (workspace#614)
+    for p in target_dirs::check(o) {
+        let dir = show(&p.dir);
+        for r in out.iter_mut().filter(|r| r.target == dir) {
+            r.target = format!("{dir} ({})", p.problem.short());
+        }
+    }
     Ok(out)
 }
