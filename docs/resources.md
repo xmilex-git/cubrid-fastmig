@@ -478,7 +478,7 @@ container) the kind's defaults are the hdd ones. On NVMe that made the start est
 ETA +55..+150% until the fsync ran (rootless podman with `/sys/block` and `/sys/dev` masked, the large DBs, 16
 workers). So migrate measures the target instead (`crates/cli/src/write_probe.rs`, GLOSSARY "쓰기 실측"): at the start
 of the precheck, `O_DIRECT` 1 MiB blocks into an `O_TMPFILE` file in the target directory for 1 s or 512 MiB, then one
-`fdatasync`; the rate is the bytes over the whole time. The fdatasync waits for the drive's write cache, so the rate is
+`fdatasync`; the rate is the bytes over the whole time (a second, scattered pass for the clone ranges: below). The fdatasync waits for the drive's write cache, so the rate is
 the medium's. The clone ranges and the fsync take 0.7 and 1.0 of it (`default_rates::*_OF_WRITE_PROBE`, refitted in 87ce6cc); the
 byte copy keeps its source kind's default, or the precheck's source read rate when that is faster (the precheck is
 often CPU-bound, so that rate is only a floor). A probe that cannot run leaves the kind's defaults. plan.json shows it
@@ -528,7 +528,31 @@ index-build sample −28..−34% before; 1.03-1.05 and +5..+7% after (workspace#
 
 A byte phase also corrects the write factor when its defaults were far off: an ended phase counts once it ran
 `MIN_SAMPLE_S` or its defaults gave it that long, and a phase with a storage prior keeps it while it moved bytes at
-`BUSY` of that device side even with its one worker busy (`Bottleneck::classify_with_prior`).
+`BUSY` of that device side even with its one worker busy (`Bottleneck::classify_with_prior`). An ended phase under
+`MIN_ENDED_S` (0.1 s) moves no factor: a durable-sync that finds its bytes already written back ends in milliseconds
+and would otherwise shorten every later estimate (workspace#608).
+
+The scattered pass (workspace#608): the SATA SSD under an unknown kind started at 1.19 and ran −18.2% at 25 s because
+the clone ranges' factor 0.7 is the HDD's. The ranges are written scattered over the volumes: they synced at 0.57-0.77
+(mean 0.67, 12 runs) of the sequential probe on the HDD and 0.86-1.04 (mean 0.94, 8 runs) on the SATA SSD, the same
+split as fio's random / sequential 1 MiB writes (0.76 and 1.00). Four probe streams did not change the SATA SSD's
+probe (about 255 MB/s with one or four), so the probe gained a second pass instead: after the sequential one, 1 MiB
+`O_DIRECT` blocks at distinct pseudo-random places of a range `fallocate`d in the same `O_TMPFILE` file, 1 s or 512 MiB,
+then `fdatasync`. Its rate over the sequential one by range (3 probes each, CPUs 0-15):
+
+| range | 1 GiB | 4 GiB | 16 GiB | 64 GiB |
+|---|---|---|---|---|
+| HDD | 0.80 | 0.82 | 0.77 | 0.72 |
+| SATA SSD | 0.98 | 0.99 | 0.99 | 0.97 |
+| factor the ranges need, HDD / SATA SSD | 0.84 / 0.95 | 0.82 / 0.95 | 0.87 / 0.94 | 0.93 / 0.96 |
+
+16 GiB is the smallest range where one factor (`CLONED_RANGE_OF_SCATTERED_PROBE` = 0.9) fits both within 5%; 64 GiB
+fits within 2% but holds four times the space. The range is taken only when it is at most 10% of the target's free
+space (`FREE_SHARE`: the range holds that space for about a second, so a nearly full disk keeps 90% of what was free);
+otherwise, or when `fallocate` fails, the pass is skipped and the ranges keep 0.7 of the sequential pass. So a target
+with less than 160 GiB free (16 GiB / 0.1) is not probed scattered: its clone ranges are estimated from the sequential
+pass × 0.7, which fits the HDD and runs the SATA SSD's open-sources about 25% long (workspace#608). The fsync
+keeps the sequential pass × 1.0. The HDD's scattered pass takes about 1.8 s, the SATA SSD's 1.0 s, NVMe's well under.
 
 ### Precheck reads in physical order (workspace#596)
 
