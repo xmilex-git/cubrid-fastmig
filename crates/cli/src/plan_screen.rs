@@ -1,4 +1,5 @@
-//! `plan` on a terminal: the plan in boxes instead of the table — the header (source → target), volumes, classes,
+//! `plan` on a terminal: the plan in boxes instead of the table — the header (source → target), the paths (whole,
+//! workspace#612 decision 6), volumes, classes,
 //! target space, resources, notes (the warnings grouped by the SQL file that fixes them), refusals, and the required
 //! SQL migrate will leave, in the box migrate ends with.
 //!
@@ -14,9 +15,9 @@ use std::path::Path;
 use fastmig_plan::migration_plan::VolumePlan;
 use fastmig_plan::version_pair::line_name;
 use fastmig_plan::{HeapTreatment, PageTreatment, Plan};
-use fastmig_progress::panel::{boxed, cut_middle, wrap};
+use fastmig_progress::panel::{boxed, boxed_whole, cut_middle, wrap};
 use fastmig_progress::style::term_size;
-use fastmig_progress::{Color, Stream, Style, big_text, unit};
+use fastmig_progress::{Color, PathRow, Stream, Style, big_text, path_panel, unit};
 
 use crate::required_sql::{self, RequiredSql};
 use crate::target_space::TargetSpace;
@@ -35,6 +36,7 @@ pub struct PlanScreen<'a> {
     pub estimate: Result<(&'a TargetSpace, String), &'a str>,
     /// The storage line (`storage: source nvme (nvme0n1), ...`).
     pub storage: String,
+    pub paths: Vec<PathRow>,
 }
 
 impl PlanScreen<'_> {
@@ -45,6 +47,13 @@ impl PlanScreen<'_> {
         let p = self.plan;
         let steps = required_sql::list(p, true);
         let mut out = self.header(st, width, cols >= 100 && rows >= 40);
+        out.extend(boxed_whole(
+            st,
+            "paths",
+            &path_panel::lines(st, &self.paths, inner),
+            Color::Blue,
+            width,
+        ));
         out.extend(boxed(
             st,
             &format!("volumes ({})", p.volumes.len()),

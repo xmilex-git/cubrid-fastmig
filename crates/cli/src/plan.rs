@@ -35,7 +35,8 @@ use crate::storage_kind_detect::RunStorage;
 use crate::target_conf_defaults::TargetConfDefaults;
 use crate::volume_targets::{self, VolumeLayout};
 use crate::{
-    check, plan_report, resource_estimate, target_install_version, target_space, volume_dirs,
+    check, plan_report, resource_estimate, run_paths, target_install_version, target_space,
+    volume_dirs,
 };
 
 pub const HELP: &str = "\
@@ -48,6 +49,8 @@ cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]
   -E, --extended-volume-path <dir>  target directory of volumes 1.. (default: -F); not with -i
   -i, --control-file <file>      target path per volume, copydb's format: `volid source_fullvolname dest_fullvolname`
                                  lines (volumes it does not list go to -F); not with -E
+  -L, --log-path <dir>           target log directory migrate would write (default: -F)
+  -B, --lob-base-path <dir>      target lob-base-path (default: <-F>/lob)
   -r, --replace                  replace a database registered under <new-db> in the target databases.txt: its
                                  volumes, logs, _vinf, _dwb and line are removed first (refused while its server is up);
                                  as copydb -r, a failed migrate then leaves neither the old database nor a new one
@@ -66,7 +69,8 @@ cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]
   --volumes-in-first-dir         find volumes 1.. next to volume 0 (a source copied without its headers rewritten)
   -t, --thread-count <n>         worker limit the resource table assumes (default: CPUs / 2)
   --temp-mem-size <size>         memory limit the resource table assumes (default: the target conf's
-                                 data_buffer_size, else physical memory / 4, at least 256M)
+                                 data_buffer_size, else physical memory / 4, at least 256M; migrate asks on a
+                                 terminal)
   --temp-disk-size min|max|<size>  temp disk limit (default: from the target conf's temp_file_max_size_in_pages:
                                  > 0 pages × page size, 0 min; else asked on a terminal, max otherwise)
   --check                        also count the temp disk the check needs on the source (migrate --check; one more
@@ -86,6 +90,8 @@ pub const FLAGS: &[&str] = &[
     "--temp-disk-size",
     "--extended-volume-path",
     "--control-file",
+    "--log-path",
+    "--lob-base-path",
 ];
 pub const SWITCHES: &[&str] = &["--no-clone", "--volumes-in-first-dir", "--replace"];
 
@@ -93,6 +99,10 @@ pub const SWITCHES: &[&str] = &["--no-clone", "--volumes-in-first-dir", "--repla
 pub struct PlanOptions {
     pub db: String,
     pub target_dir: PathBuf,
+    /// `-L, --log-path`: the target log directory (default `-F`).
+    pub log_dir: PathBuf,
+    /// `-B, --lob-base-path`: the target LOB base directory (default `<-F>/lob`).
+    pub lob_dir: PathBuf,
     pub target_line: VersionLine,
     pub target_name: String,
     pub source_dbtxt: PathBuf,
@@ -160,6 +170,15 @@ impl PlanOptions {
         let conf = TargetConfDefaults::read(target_conf.as_deref(), new_db)?;
         Ok(PlanOptions {
             db: db.clone(),
+            log_dir: p
+                .value("--log-path")
+                .map(absolute)
+                .transpose()?
+                .unwrap_or_else(|| target_dir.clone()),
+            lob_dir: match p.value("--lob-base-path") {
+                Some(d) => absolute(d.strip_prefix("file:").unwrap_or(d))?,
+                None => target_dir.join("lob"),
+            },
             target_dir,
             target_line,
             target_name: new_db.clone(),
@@ -454,6 +473,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
                 Err(e) => Err(e.as_str()),
             },
             storage: storage.table().trim_end().to_string(),
+            paths: run_paths::rows(&plan, &s, &o)?,
         };
         print!("{}", screen.text(&st));
         return Ok(u8::from(!plan.refusals.is_empty()));

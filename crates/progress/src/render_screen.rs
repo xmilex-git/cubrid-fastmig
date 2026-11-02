@@ -1,5 +1,5 @@
 //! The terminal display: boxes on stderr redrawn in place each tick — a header (source → target, the whole run's
-//! bar, ETA and end time), resources (memory and temp disk gauges with their peaks, the running phase's bottleneck,
+//! bar, ETA and end time), the paths (source and target of each kind of file), resources (memory and temp disk gauges with their peaks, the running phase's bottleneck,
 //! the devices), notes (the warnings grouped by the SQL file that fixes them) and phases (a bar, time, amount and
 //! rate per phase).
 //!
@@ -8,11 +8,13 @@
 //! are never changed and no alternate screen is used, so an interrupted run (Ctrl-C, `kill -9`, a dropped SSH link)
 //! leaves nothing to restore; the last frame stays in the scrollback.
 //! Fitting: below 100 columns resources and notes are stacked; a phase row drops its rate, then its amount, then
-//! narrows its bar; a frame taller than the terminal drops the foot, then merges resources and notes into one box,
+//! narrows its bar; a paths row wider than the terminal folds the paths into one line naming the run log (a path is
+//! never cut, and a wrapped line would break the redraw); a frame taller than the terminal folds the paths, then drops
+//! the foot, then merges resources and notes into one box,
 //! then folds the finished phases into one row, then leaves resources and notes out.
 //! shortcut: a terminal narrowed while drawing wraps the previous frame and the next redraw starts too low, until a
 //! user reports it.
-//! Source: workspace#610 decisions 2-7; ECMA-48 CUU (`ESC [ n A`), EL (`ESC [ 2 K`), ED (`ESC [ J`).
+//! Source: workspace#610 decisions 2-7; workspace#612 decision 6 (the paths panel); ECMA-48 CUU (`ESC [ n A`), EL (`ESC [ 2 K`), ED (`ESC [ J`).
 
 use std::io::Write;
 use std::time::Instant;
@@ -23,6 +25,7 @@ use crate::clock;
 use crate::estimate::{Estimate, classified, elapsed, fraction, used};
 use crate::meter::{Phase, Progress};
 use crate::panel::{bar, boxed, cut_middle, fit, gauge, side_by_side};
+use crate::path_panel;
 use crate::proc_sample::ProcSample;
 use crate::render_line::{Heap, secs};
 use crate::style::{Color, Stream, Style, term_size};
@@ -109,7 +112,8 @@ struct Frame<'a> {
 impl Frame<'_> {
     /// The frame in at most `max_rows` lines.
     fn lines(&self, max_rows: usize) -> Vec<String> {
-        let head = self.header();
+        let mut head = self.header();
+        let mut paths = self.paths();
         let mut foot = vec![self.foot()];
         let mut middle = self.resources_and_notes();
         let mut folded = 0;
@@ -117,6 +121,10 @@ impl Frame<'_> {
         let total = |h: &[String], m: &[String], ph: &[String], f: &[String]| {
             h.len() + m.len() + ph.len() + f.len()
         };
+        if total(&head, &middle, &phases, &foot) + paths.len() > max_rows {
+            paths = self.paths_folded();
+        }
+        head.extend(paths);
         if total(&head, &middle, &phases, &foot) > max_rows {
             foot.clear();
         }
@@ -203,6 +211,36 @@ impl Frame<'_> {
             Color::Cyan,
             self.width,
         )
+    }
+
+    /// The paths box, or the folded line when a row does not fit the width; nothing when the command set no paths.
+    fn paths(&self) -> Vec<String> {
+        let rows = self.p.screen.get().map_or(&[][..], |i| &i.paths[..]);
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let inner = self.width - 4;
+        if !path_panel::fits(self.st, rows, inner) {
+            return self.paths_folded();
+        }
+        boxed(
+            self.st,
+            "paths",
+            &path_panel::lines(self.st, rows, inner),
+            Color::Blue,
+            self.width,
+        )
+    }
+
+    /// `paths: migrate.log`: the run log lists them.
+    fn paths_folded(&self) -> Vec<String> {
+        if self.p.screen.get().is_none_or(|i| i.paths.is_empty()) {
+            return Vec::new();
+        }
+        let log = (self.p.log_path())
+            .and_then(|l| Some(l.file_name()?.to_string_lossy().into_owned()))
+            .unwrap_or("the run log".into());
+        vec![self.st.paint(Color::Gray, &format!(" paths: {log}"))]
     }
 
     fn gauges(&self, inner: usize) -> Vec<String> {

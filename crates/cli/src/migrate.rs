@@ -56,8 +56,8 @@ use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
 use fastmig_progress::{
-    Bottleneck, Meter, PhaseSpec, ProcSample, Progress, ScreenInfo, StorageKind, Stream, Unit,
-    default_rates,
+    Bottleneck, Meter, PathRow, PhaseSpec, ProcSample, Progress, ScreenInfo, StorageKind, Stream,
+    Unit, default_rates, path_panel,
 };
 use fastmig_verify::Role;
 
@@ -67,7 +67,7 @@ use crate::check::{self, DbArg, run_verifier};
 use crate::end_screen;
 use crate::finalize::{self, CHECK_REPORT, OUTSIDE_BASE};
 use crate::limits::{self, Limits};
-use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
+use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, make_plan};
 use crate::post;
 use crate::replace_target::{self, ReplacedDatabase};
 use crate::required_sql;
@@ -76,7 +76,9 @@ use crate::source_fingerprint::{self, SourceFingerprint};
 use crate::storage_kind_detect::{RunStorage, one_point};
 use crate::target_space::{self, Reservation, TargetSpace};
 use crate::write_probe;
-use crate::{heap_counter, plan_report, progress_args, temp_disk_choice};
+use crate::{
+    heap_counter, plan_report, progress_args, question_screen, run_paths, temp_disk_choice,
+};
 use fastmig_index::extent_jobs::ExtentReads;
 use fastmig_index::spill_arena::SpillArena;
 use fastmig_index::temp_disk::TEMP_DISK;
@@ -116,11 +118,14 @@ cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
                                  --engine-check). Later, on a finished target: cubrid-fastmig post (post -h)
   -t, --thread-count <n>         worker limit: thread cap for the whole run (default: CPUs / 2)
   --temp-mem-size <size>         memory limit for the whole run, e.g. 16G (default: the target conf's
-                                 data_buffer_size, else physical memory / 4, at least 256M)
+                                 data_buffer_size; else asked on a terminal, physical memory / 4 (at least 256M)
+                                 otherwise)
   --temp-disk-size min|max|<size>  temp disk limit: spill bytes on disk at once, kept by building indexes in batches
                                  (default: from the target conf's temp_file_max_size_in_pages: > 0 pages × page
-                                 size, 0 min; else asked on a terminal, max when it fits the free space;
-                                 docs/resources.md)
+                                 size, 0 min; else asked on a terminal (recommended: max, or the free space when
+                                 max does not fit), max when it fits the free space otherwise; docs/resources.md)
+  On a terminal migrate first shows the source and target path of every kind of file (volumes, logs, LOB, Java SP,
+  databases.txt), then asks the limits no option or conf set; the paths stay on the progress and end screens.
   --spill-dir <dir>              where stages over the memory limit spill (default: <-F>/fastmig/spill)
   --db-volume-size <size>        size cap of a volume the run adds when the target runs out of space, e.g. 512M
                                  (default: the target conf's db_volume_size, else 512M)
@@ -139,12 +144,7 @@ cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
 /// The run log in `<dest>/fastmig/` (workspace#610).
 pub const RUN_LOG: &str = "migrate.log";
 
-const FLAGS: &[&str] = &[
-    "--log-path",
-    "--thread-count",
-    "--lob-base-path",
-    "--server-name",
-];
+const FLAGS: &[&str] = &["--thread-count", "--server-name"];
 /// The run's phases, one per `Report::lap` in `migrate`, in order (GLOSSARY "phase").
 const PHASES: &[PhaseSpec] = &[
     PhaseSpec::step("precheck"),
@@ -238,9 +238,7 @@ const SWITCHES: &[&str] = &["--check", "--delete-source", "--no-statistics", "--
 
 struct Options {
     plan: PlanOptions,
-    log_dir: PathBuf,
     worker_limit: usize,
-    lob_dir: PathBuf,
     limits: Limits,
     /// `--check`: run the verifier after the writes and register only a target with 0 migration defects (ADR 0015).
     check: bool,
@@ -278,17 +276,8 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     let post_options = (p.switch("--run-sql") || post_options.engine_check).then_some(post_options);
     let plan = PlanOptions::from(&p, "migrate")?;
     let worker_limit = limits::worker_limit(&p)?;
-    let o = Options {
-        log_dir: p
-            .value("--log-path")
-            .map(absolute)
-            .transpose()?
-            .unwrap_or_else(|| plan.target_dir.clone()),
+    let mut o = Options {
         worker_limit,
-        lob_dir: match p.value("--lob-base-path") {
-            Some(d) => absolute(d.strip_prefix("file:").unwrap_or(d))?,
-            None => plan.target_dir.join("lob"),
-        },
         limits: Limits::from(&p, &plan.target_dir, plan.conf.data_buffer_size)?,
         // -d deletes the source only after a passing check (workspace#604)
         check: p.switch("--check") || p.switch("--delete-source"),
@@ -298,9 +287,17 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         post: post_options,
         plan,
     };
+    // a terminal asks the limits no option or conf set (workspace#612 decision 3); without one the defaults stand
+    let terminal = io::stdin().is_terminal() && io::stderr().is_terminal();
+    let mem_set_by = match (p.value("--temp-mem-size"), o.plan.conf.data_buffer_size) {
+        (Some(_), _) => Some("--temp-mem-size"),
+        (None, Some(_)) => Some("the target conf"),
+        (None, None) => None,
+    };
+    let ask_mem = terminal && mem_set_by.is_none();
     // the copy engine streams every volume through one fixed buffer per worker; the index build merges and spills
     // through fixed buffers per worker too
-    if limits::mem_min(o.worker_limit) > o.limits.memory_limit_bytes {
+    if !ask_mem && limits::mem_min(o.worker_limit) > o.limits.memory_limit_bytes {
         return Err(CliError::Usage(format!(
             "--thread-count {} needs --temp-mem-size {} KiB at least (copy buffers, index build merge and spill buffers)",
             o.worker_limit,
@@ -394,9 +391,10 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         pre.push(("precheck.verify_source_count", t.elapsed().as_secs_f64()));
         est.verify_source = Some(bytes);
         est.verify_heap_pages = Some(pages);
-        // refused before anything is written: under it the verifier's scan workers get no share (workspace#526)
+        // refused before anything is written: under it the verifier's scan workers get no share (workspace#526); an
+        // asked limit is held to it by the question screen
         let need = est.verify_mem_min().unwrap_or(0);
-        if mem < need {
+        if !ask_mem && mem < need {
             return Err(CliError::Failed(io::Error::other(format!(
                 "--check with --thread-count {} needs --temp-mem-size {} KiB at least (the verifier's live row map, merge floors and \
                  scan shares)",
@@ -407,16 +405,44 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     }
     let target = target_space::bound(&plan, &est, &src.vols, new_log::file_bytes(&src.log))?;
     let asked = Instant::now();
-    let temp_limit = temp_disk_choice::choose(
-        o.plan.temp_disk_choice(src.vols.io_pagesize() as u64),
-        &est,
-        mem,
-        o.check,
-        target.needed(),
-        plan.available_bytes,
-        &o.limits.spill_dir,
-        &o.plan.target_dir,
-    )?;
+    let disk_choice = o.plan.temp_disk_choice(src.vols.io_pagesize() as u64);
+    let choose = |c| {
+        temp_disk_choice::choose(
+            c,
+            &est,
+            o.check,
+            target.needed(),
+            plan.available_bytes,
+            &o.limits.spill_dir,
+            &o.plan.target_dir,
+        )
+    };
+    let disk_preset = match disk_choice {
+        Some(c) => Some(choose(Some(c))?),
+        None if !terminal => Some(choose(None)?),
+        None => None,
+    };
+    let paths = run_paths::rows(&plan, &src, &o.plan)?;
+    let temp_limit = if disk_preset.is_none() || ask_mem {
+        let st = progress_args::style(&p, Stream::Stderr)?;
+        let questions = [
+            temp_disk_choice::question(
+                &est,
+                o.check,
+                target.needed(),
+                plan.available_bytes,
+                &o.limits.spill_dir,
+                &o.plan.target_dir,
+                disk_preset.map(|v| (v, "--temp-disk-size or the target conf")),
+            )?,
+            limits::memory_question(&est, o.check, mem_set_by.map(|by| (mem, by))),
+        ];
+        let answers = question_screen::ask(&st, &paths, &questions)?;
+        o.limits.memory_limit_bytes = answers[1];
+        answers[0]
+    } else {
+        disk_preset.unwrap_or_default()
+    };
     // the run's clock starts with the precheck, less the time a terminal question waited for its answer (workspace#560)
     let mut phases = PHASES.to_vec();
     if plan.version_pair.source != plan.version_pair.target {
@@ -454,7 +480,17 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
     );
     let steps = required_sql::list(&plan, o.statistics);
     let fastmig_dir = o.plan.target_dir.join("fastmig");
-    progress.set_screen(screen_info(&o, &plan, &storage, &steps, &fastmig_dir));
+    for l in path_panel::log_lines(&paths) {
+        progress.log(&l);
+    }
+    progress.set_screen(screen_info(
+        &o,
+        &plan,
+        &storage,
+        &steps,
+        &fastmig_dir,
+        paths.clone(),
+    ));
     let monitor = progress_args::start(
         &p,
         progress.clone(),
@@ -496,7 +532,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
             let t = post::PostTarget {
                 name: o.plan.target_name.clone(),
                 first_volume: o.plan.target_dir.join(&o.plan.target_name),
-                log: o.log_dir.join(format!("{}_lgat", o.plan.target_name)),
+                log: o.plan.log_dir.join(format!("{}_lgat", o.plan.target_name)),
                 databases_txt: o.plan.target_dbtxt.clone(),
                 fastmig_dir: fastmig_dir.clone(),
             };
@@ -534,6 +570,7 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
                 &o.plan.target_dbtxt,
                 post_view,
                 took,
+                &paths,
             )
         );
     } else {
@@ -560,6 +597,7 @@ fn screen_info(
     storage: &RunStorage,
     steps: &[required_sql::RequiredSql],
     fastmig_dir: &Path,
+    paths: Vec<PathRow>,
 ) -> ScreenInfo {
     let methods: BTreeSet<&str> = plan.volumes.iter().map(|v| v.copy_method.name()).collect();
     let mut detail = format!(
@@ -585,6 +623,7 @@ fn screen_info(
             disks(&storage.target.disks)
         ),
         sql: required_sql::notes(steps),
+        paths,
         report: fastmig_dir.join("report.json").display().to_string(),
     }
 }
@@ -734,7 +773,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<(String
         });
     }
     let marker = IncompleteMarker::prepare(&po.target_dir)?;
-    marker.create_dir_all(&o.log_dir)?;
+    marker.create_dir_all(&o.plan.log_dir)?;
     let fastmig_dir = po.target_dir.join("fastmig");
     marker.create_dir_all(&fastmig_dir)?;
     // the run log (workspace#610): the lines held since the display started go in first
@@ -744,7 +783,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<(String
     // every byte the run may write is taken from the filesystems now, before the first byte of the target
     // (workspace#526): byte-copied volumes and the new log in full, one reservation for the rest, the temp disk limit
     preallocate_targets(&jobs, &marker)?;
-    let lgat = volinfo::log_dir_file(&o.log_dir, &po.target_name, "_lgat");
+    let lgat = volinfo::log_dir_file(&o.plan.log_dir, &po.target_name, "_lgat");
     let log_header = new_log::new_header(&src.log, pair.target, first_pageid, &po.target_name);
     marker.record(&lgat)?;
     new_log::allocate(&lgat, &log_header)?;
@@ -969,7 +1008,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<(String
     let lob = match &src_lob_base {
         Some(base) => out_of_volume_asset::copy_referenced_lob_files(
             base,
-            &o.lob_dir,
+            &o.plan.lob_dir,
             &plan.lob.referenced,
             &plan.lob.lob_dirs,
             o.worker_limit,
@@ -981,8 +1020,12 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<(String
 
     // The new log's header comes last (workspace#482): a crash before it leaves no bootable target.
     new_log::write(&lgat, &log_header)?;
-    marker.record(&volinfo::log_dir_file(&o.log_dir, &po.target_name, "_vinf"))?;
-    volinfo::write(&o.log_dir, &po.target_name, &targets)?;
+    marker.record(&volinfo::log_dir_file(
+        &o.plan.log_dir,
+        &po.target_name,
+        "_vinf",
+    ))?;
+    volinfo::write(&o.plan.log_dir, &po.target_name, &targets)?;
     rep.lap("new_log");
     let written = match (ProcSample::now(), ranges_synced) {
         (Some(now), Some(then)) => now.since(then).write_bytes,
@@ -1018,7 +1061,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<(String
                 locate: Locate::Recorded,
                 log: lgat.clone(),
                 log_header: None,
-                lob_base: Some(o.lob_dir.clone()),
+                lob_base: Some(o.plan.lob_dir.clone()),
             },
             Some(&DbArg {
                 first_volume: src.entry.first_volume(),
@@ -1055,8 +1098,8 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<(String
                     .server_name
                     .clone()
                     .unwrap_or_else(|| src.entry.hosts.clone()),
-                log_path: o.log_dir.clone(),
-                lob_base_path: Some(format!("file:{}", o.lob_dir.display())),
+                log_path: o.plan.log_dir.clone(),
+                lob_base_path: Some(format!("file:{}", o.plan.lob_dir.display())),
             },
         )?;
     }

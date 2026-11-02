@@ -157,7 +157,12 @@ The verifier read the whole active log to parse its header (64 MiB on T1); it re
 - With the option: that limit; below temp min, or with the target's growth (`target_space.needed_bytes`) over
   the free space of the target filesystem (the spill directory's own filesystem when it lies elsewhere), the run
   is refused before anything is written.
-- Without it on a terminal: the table and the choices are shown and the answer is read (empty answer: max).
+- Without it on a terminal: the question screen (workspace#612) shows min, recommended, max and free with the index
+  batches and extra time of each, and reads `min`, `max` or a size (Enter: recommended, which is max, or the free
+  space when max does not fit; refused before asking when not even min fits). An answer below min or over free is
+  named in red and asked again. The same screen asks `--temp-mem-size` when neither the option nor the target conf's
+  `data_buffer_size` sets it: min the run's fixed buffers (with `--check` the verifier's floor), recommended
+  `mem_recommended`, max and free the physical memory.
 - Without it otherwise: max when it fits the free space, else a refusal naming `--temp-disk-size min` and its cost.
 - A limit at or above temp max runs as one batch; below it the run counts the pairs again on the target (after
   page treatment, exact) and batches by those counts.

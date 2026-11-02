@@ -18,6 +18,8 @@ use fastmig_index::intermediate_merge::WORKER_MIN;
 use fastmig_index::spill_arena::SpillArena;
 
 use crate::args::{CliError, Parsed};
+use crate::question_screen::Question;
+use crate::resource_estimate::ResourceEstimate;
 
 pub const FLAGS: &[&str] = &["--temp-mem-size", "--spill-dir"];
 
@@ -123,4 +125,27 @@ pub fn temp_disk_choice(p: &Parsed) -> Result<Option<TempDiskChoice>, CliError> 
             CliError::Usage(format!("bad --temp-disk-size {v} (min, max or a size)"))
         })?)),
     })
+}
+
+/// The memory limit's question on the question screen (workspace#612): min the run's fixed buffers (with `--check`
+/// the verifier's floor, `verify_mem_min`), recommended `mem_recommended`, max and free the physical memory.
+pub fn memory_question(
+    e: &ResourceEstimate,
+    verify: bool,
+    preset: Option<(u64, &'static str)>,
+) -> Question {
+    let min = match e.verify_mem_min() {
+        Some(v) if verify => v,
+        _ => e.mem_min(),
+    };
+    Question {
+        name: "temp mem",
+        min,
+        recommended: e.mem_recommended().max(min),
+        max: e.physical_memory,
+        free: e.physical_memory,
+        free_means: "free is the physical memory".into(),
+        extra: None,
+        preset,
+    }
 }

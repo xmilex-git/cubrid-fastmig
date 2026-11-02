@@ -152,7 +152,7 @@ migration finished but the SQL of `--run-sql` or the engine check failed (the ta
 |---|---|
 | `--target-version 11.4\|develop` | the line of the install `$CUBRID` (`lib/libcubrid.so` → `libcubrid.so.<major>.<minor>`); an error when it cannot be read |
 | `-t, --thread-count` | CPUs / 2 |
-| `--temp-mem-size` | target conf `data_buffer_size`, else physical memory / 4 (at least 256M) |
+| `--temp-mem-size` | target conf `data_buffer_size`; else asked on a terminal, physical memory / 4 (at least 256M) otherwise |
 | `--temp-disk-size` | target conf `temp_file_max_size_in_pages`: > 0 → pages × page size, 0 → min; else asked on a terminal, max otherwise |
 | `--db-volume-size` | target conf `db_volume_size`, else 512M |
 | `--server-name` | the source's db-host |
@@ -168,7 +168,9 @@ A name the tool had before (`--dest`, `--log-dir`, `--lob-dir`, `--workers`, `--
 ### Set disk and memory use before the run
 
 `plan` shows the temp disk the index rebuild needs at least (one index at a time) and at most (every index at once),
-and what the batches in between cost in time; `migrate --temp-disk-size min|max|<size>` picks one before anything is
+and what the batches in between cost in time. On a terminal `migrate` first shows the absolute source and target
+paths (volumes, logs, LOB, Java SP, databases.txt), then asks in a box screen the temp disk and temp mem no option or
+conf set (Enter: recommended). `migrate --temp-disk-size min|max|<size>` picks one before anything is
 written and keeps to it by building the indexes in batches. The index build and the verifier keep their keys, sort
 and merge buffers inside `--temp-mem-size`, merging spilled runs in more passes when few fit. How the bounds are
 computed: [docs/resources.md](docs/resources.md)

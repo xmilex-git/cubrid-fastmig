@@ -144,7 +144,7 @@ cubrid-fastmig finalize <target-dir>
 |---|---|
 | `--target-version 11.4\|develop` | `$CUBRID` install의 버전(`lib/libcubrid.so` → `libcubrid.so.<major>.<minor>`), 읽을 수 없으면 오류 |
 | `-t, --thread-count` | CPU 수 / 2 |
-| `--temp-mem-size` | 도착 conf `data_buffer_size`, 없으면 물리 메모리 / 4 (최소 256M) |
+| `--temp-mem-size` | 도착 conf `data_buffer_size`. 없으면 터미널에서 묻고, 아니면 물리 메모리 / 4 (최소 256M) |
 | `--temp-disk-size` | 도착 conf `temp_file_max_size_in_pages`: > 0 → 페이지 수 × 페이지 크기, 0 → min. 없으면 터미널에서 묻고, 아니면 max |
 | `--db-volume-size` | 도착 conf `db_volume_size`, 없으면 512M |
 | `--server-name` | 원본의 db-host |
@@ -160,7 +160,9 @@ cubrid-fastmig finalize <target-dir>
 ### 작업 전 디스크, 메모리 사용량 정하기
 
 `plan`은 인덱스 재빌드에 드는 temp 디스크의 최소(인덱스 하나씩)와 최대(모든 인덱스를 한 번에)를 보여 주고,
-그 사이 배치 수에 따른 시간 차이도 보여 줍니다. `migrate --temp-disk-size min|max|<size>`는 쓰기 전에 하나를 고르고,
+그 사이 배치 수에 따른 시간 차이도 보여 줍니다. 터미널에서 `migrate`는 쓰기 전에 출발·도착 절대 경로(볼륨, 로그, LOB,
+Java SP, databases.txt)를 먼저 보이고, 옵션이나 conf로 정해지지 않은 temp disk·temp mem을 상자 화면에서 묻습니다
+(Enter = 추천값). `migrate --temp-disk-size min|max|<size>`는 쓰기 전에 하나를 고르고,
 인덱스를 배치로 나눠 빌드해서 그 한도를 지킵니다. 인덱스 빌드와 검증기는 키, 정렬, 병합 버퍼를 `--temp-mem-size`
 안에서 쓰고, 넘치면 디스크로 내린 run을 여러 번 병합합니다. 계산 방법: [docs/resources.md](docs/resources.md)
 
