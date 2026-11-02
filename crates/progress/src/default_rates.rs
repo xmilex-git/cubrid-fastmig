@@ -108,9 +108,10 @@ pub const INDEX_SCAN_PAGES: DefaultRate = DefaultRate {
 pub const SCAN_OF_ONE_STREAM_READ: f64 = 1.63;
 
 /// Index build keys written to leaves (the index build's part 1: merge, leaves, upper levels): 73.0 M keys in
-/// the rest of the same runs, about 28.0 / 9.3 / 7.6 s at 1 / 4 / 16 workers.
+/// the rest of the same runs, about 28.0 s at 1 worker; 8.75 / 3.74 s at 4 / 16 workers once the largest index
+/// borrows freed permits for its shards (workspace#609 calibration, NVMe, the large 11.4 and develop DBs averaged).
 pub const TREE_BUILD_KEYS: DefaultRate = DefaultRate {
-    points: &[(1, 2.6e6), (4, 7.85e6), (16, 9.6e6)],
+    points: &[(1, 2.6e6), (4, 8.35e6), (16, 19.5e6)],
 };
 
 /// Heap pages walked by the page treatment (patch or re-encode), large 11.4 DB (75.9 k pages): 22.8 / 6.1 / 1.9 s at
