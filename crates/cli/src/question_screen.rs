@@ -5,7 +5,8 @@
 //! Input: the [`Style`] of stderr, the [`PathRow`]s, one [`Question`] per limit (a limit set by an option or the conf
 //! is shown, not asked). Output: the answers in bytes, in the order of the questions.
 //! The terminal stays in its own (cooked) mode: the cursor is moved into the input box and one line is read; the
-//! frame below the paths is redrawn in place after each answer (CUU, EL, ED as the progress screen). An answer that is
+//! frame below the paths is redrawn in place after each answer (CUU, EL, ED as the progress screen); while a box asks,
+//! its answer row is the frame's last line, so Ctrl-C leaves the shell prompt below the frame. An answer that is
 //! not `min`, `max` or a size, below min or over free is named in red inside the box and the same box asks again.
 //! End of input ends the run with an error before anything is written; Ctrl-C stops it as anywhere else.
 //! shortcut: an answer longer than the terminal is wide wraps and the next redraw starts too low, until a user
@@ -198,46 +199,52 @@ fn frame(
         Color::Magenta,
         width,
     );
+    let asking = fields.iter().position(|f| matches!(f, Field::Asking(_)));
+    if asking.is_some() {
+        let dot = st.glyphs.dot;
+        lines.push(st.paint(
+            Color::Gray,
+            fit(
+                &format!(" Enter: recommended {dot} min, max, 900M, 2G {dot} Ctrl-C stops before any write"),
+                width,
+            )
+            .trim_end(),
+        ));
+    }
+    // while a box asks, its answer row is the frame's last line: Ctrl-C (cooked mode) leaves the shell prompt on the
+    // line below the frame, not inside it; the bottom edges are drawn once every limit is taken
     let side = width >= SIDE_MIN;
     let box_w = if side {
         (width - (qs.len() - 1)) / qs.len()
     } else {
         width
     };
-    let boxes: Vec<Vec<String>> = (qs.iter().zip(fields))
-        .map(|(q, f)| input_box(st, q, f, box_w))
-        .collect();
-    let mut inputs = Vec::new();
+    let mut inputs = vec![(0, 0); qs.len()];
     if side {
         let top = lines.len();
-        for i in 0..qs.len() {
-            inputs.push((top + 1, i * (box_w + 1) + ANSWER_COL));
-        }
-        let joined = boxes.into_iter().reduce(side_by_side).unwrap_or_default();
+        let joined = (qs.iter().zip(fields))
+            .map(|(q, f)| input_box(st, q, f, box_w, asking.is_some()))
+            .reduce(side_by_side)
+            .unwrap_or_default();
         lines.extend(joined);
+        for (i, at) in inputs.iter_mut().enumerate() {
+            *at = (top + 2, i * (box_w + 1) + ANSWER_COL);
+        }
     } else {
-        for bx in boxes {
-            inputs.push((lines.len() + 1, ANSWER_COL));
-            lines.extend(bx);
+        // the asking box last
+        let order = (0..qs.len()).filter(|&i| Some(i) != asking).chain(asking);
+        for i in order {
+            let open = Some(i) == asking;
+            inputs[i] = (lines.len() + 2, ANSWER_COL);
+            lines.extend(input_box(st, &qs[i], &fields[i], box_w, open));
         }
     }
-    if fields.iter().all(|f| matches!(f, Field::Taken(..))) {
-        return (lines, inputs);
-    }
-    let dot = st.glyphs.dot;
-    lines.push(st.paint(
-        Color::Gray,
-        fit(
-            &format!(" Enter: recommended {dot} min, max, 900M, 2G {dot} Ctrl-C stops before any write"),
-            width,
-        )
-        .trim_end(),
-    ));
     (lines, inputs)
 }
 
-/// The small box of one limit: the answer row (the prompt and the Enter hint, or the value taken) and a status row.
-fn input_box(st: &Style, q: &Question, f: &Field, w: usize) -> Vec<String> {
+/// The small box of one limit: a status row (the hint, the reason in red, `taken`), then the answer row (the prompt and
+/// the Enter hint, or the value taken); `open`: without the bottom edge, so the answer row is the box's last line.
+fn input_box(st: &Style, q: &Question, f: &Field, w: usize, open: bool) -> Vec<String> {
     let inner = w.max(8) - 4;
     let mark = if st.unicode { "›" } else { ">" };
     let (answer_row, status, color) = match f {
@@ -269,5 +276,9 @@ fn input_box(st: &Style, q: &Question, f: &Field, w: usize) -> Vec<String> {
             Color::Green,
         ),
     };
-    boxed(st, q.name, &[answer_row, status], color, w)
+    let mut out = boxed(st, q.name, &[status, answer_row], color, w);
+    if open {
+        out.pop();
+    }
+    out
 }
