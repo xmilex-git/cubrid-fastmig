@@ -5,10 +5,10 @@
 //! Input: the source fingerprint, the source install, the target's SA runner and name, the version pair, the work
 //! directory `<dest>/fastmig/post/`. Output: [`Comparison`]: same or not, with the set-comparison output and diff
 //! files; a refusal when the source copy does not fit.
-//! Left on disk: `set-comparison.out`, `set-comparison.diff` and the unload logs. The source copy is removed whatever
-//! the outcome; the unload files are removed when the sets are the same (kept for reading otherwise). Both
-//! directories are in `created-paths` before they are made, so `--replace` removes what a killed run left, and
-//! the next post run removes them first.
+//! Left on disk: `set-comparison.out`, `.err`, `.diff` (every differing entry) and the unload logs. The source copy and
+//! both unloads are removed whatever the outcome (a failed run left 8 GB of unloads of the big 11.4 DB, workspace#611
+//! gate). The three directories are in `created-paths` before they are made, so `--replace` removes what a killed run
+//! left, and the next post run removes them first.
 //! Source: workspace#611 decision 3 (e); e2e/run.sh steps 6 (target unloaddb, set-comparison with the pair).
 
 use std::fs;
@@ -87,17 +87,36 @@ pub fn run(
             )));
         }
     };
-    let source = EngineSa::new(source_install, &dbtxt, work)?;
-    let unloaded = unload(&source, "source-unloaddb", &fp.db, &src_dir);
-    fs::remove_dir_all(&copy)?;
-    if let Err(e) = unloaded? {
+    let result = compare(fp, source_install, &dbtxt, target, target_db, pair, work);
+    // nothing of the copy or the unloads stays, whatever the outcome: set-comparison.diff holds every differing entry
+    clear(work)?;
+    result
+}
+
+/// The two unloads and the comparison; the caller removes the directories.
+fn compare(
+    fp: &SourceFingerprint,
+    source_install: &Path,
+    dbtxt: &Path,
+    target: &EngineSa,
+    target_db: &str,
+    pair: (&str, &str),
+    work: &Path,
+) -> io::Result<Comparison> {
+    let (src_dir, tgt_dir) = (work.join(SOURCE_UNLOAD), work.join(TARGET_UNLOAD));
+    let source = EngineSa::new(source_install, dbtxt, work)?;
+    let unloaded = unload(&source, "source-unloaddb", &fp.db, &src_dir)?;
+    fs::remove_dir_all(work.join(SOURCE_COPY))?;
+    if let Err(e) = unloaded {
         return Ok(Comparison::Failed(e));
     }
     if let Err(e) = unload(target, "target-unloaddb", target_db, &tgt_dir)? {
         return Ok(Comparison::Failed(e));
     }
     let output = work.join("set-comparison.out");
-    let status = Command::new(std::env::current_exe()?)
+    // this binary's own set-comparison; a binary replaced while the run went on has no path any more
+    let exe = std::env::current_exe()?;
+    let status = Command::new(&exe)
         .arg("set-comparison")
         .arg(src_dir.join(&fp.db))
         .arg(tgt_dir.join(target_db))
@@ -106,24 +125,16 @@ pub fn run(
         .args(["--source-version", pair.0, "--target-version", pair.1])
         .stdin(Stdio::null())
         .stdout(fs::File::create(&output)?)
-        .stderr(Stdio::inherit())
-        .status()?;
-    match status.code() {
-        Some(0) => {
-            fs::remove_dir_all(&src_dir)?;
-            fs::remove_dir_all(&tgt_dir)?;
-            Ok(Comparison::Compared {
-                same: true,
-                output: output.display().to_string(),
-            })
-        }
-        Some(1) => Ok(Comparison::Compared {
+        .stderr(fs::File::create(work.join("set-comparison.err"))?)
+        .status()
+        .map_err(|e| io::Error::other(format!("set-comparison ({}): {e}", exe.display())))?;
+    let output = output.display().to_string();
+    Ok(match status.code() {
+        Some(0) => Comparison::Compared { same: true, output },
+        Some(1) => Comparison::Compared {
             same: false,
-            output: output.display().to_string(),
-        }),
-        c => Ok(Comparison::Failed(format!(
-            "set-comparison exited {c:?} ({})",
-            output.display()
-        ))),
-    }
+            output,
+        },
+        c => Comparison::Failed(format!("set-comparison exited {c:?} ({output})")),
+    })
 }
