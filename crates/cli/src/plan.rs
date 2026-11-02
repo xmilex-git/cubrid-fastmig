@@ -48,9 +48,9 @@ cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]
                                  11.2, 11.3 or 11.4 source)
   -E, --extended-volume-path <dir>  target directory of volumes 1.., existing and writable (default: -F); not with -i
   -i, --control-file <file>      target path per volume, copydb's format: `volid source_fullvolname dest_fullvolname`
-                                 lines (volumes it does not list go to -F); not with -E
+                                 lines (volumes it does not list go to -F; missing directories are made); not with -E
   -L, --log-path <dir>           target log directory migrate would write, existing and writable (default: -F)
-  -B, --lob-base-path <dir>      target lob-base-path (default: <-F>/lob)
+  -B, --lob-base-path <dir>      target lob-base-path (default: <-F>/lob); a missing last level is created (0700)
   -r, --replace                  replace a database registered under <new-db> in the target databases.txt: its
                                  volumes, logs, _vinf, _dwb and line are removed first (refused while its server is up);
                                  as copydb -r, a failed migrate then leaves neither the old database nor a new one
@@ -379,9 +379,12 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<(Plan, Option<Re
             }
         }
     }
-    // -E and -L must exist: migrate does not create them (workspace#614)
-    plan.refusals
-        .extend(target_dirs::check(o).iter().map(|p| p.refusal()));
+    // -E, -L, -B and the -i directories as migrate can write or create them (workspace#614)
+    plan.refusals.extend(
+        target_dirs::check(o, &volume_targets)
+            .iter()
+            .map(|p| p.refusal()),
+    );
     // a copied source still naming the original volumes (workspace#515)
     let (warnings, refusals) = volume_dirs::check(s, o.locate);
     plan.warnings.extend(warnings);

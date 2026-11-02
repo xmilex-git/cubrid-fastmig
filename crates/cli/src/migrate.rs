@@ -77,7 +77,8 @@ use crate::storage_kind_detect::{RunStorage, one_point};
 use crate::target_space::{self, Reservation, TargetSpace};
 use crate::write_probe;
 use crate::{
-    heap_counter, plan_report, progress_args, question_screen, run_paths, temp_disk_choice,
+    heap_counter, plan_report, progress_args, question_screen, run_paths, target_dirs,
+    temp_disk_choice,
 };
 use fastmig_index::extent_jobs::ExtentReads;
 use fastmig_index::spill_arena::SpillArena;
@@ -89,10 +90,10 @@ cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
   -F, --file-path <dir>          target directory of volume 0 and fastmig/ (must be empty or hold FASTMIG_INCOMPLETE;
                                  refused while another migrate holds its lock)
   -L, --log-path <dir>           target log directory, existing and writable (default: -F)
-  -B, --lob-base-path <dir>      target lob-base-path (default: <-F>/lob)
+  -B, --lob-base-path <dir>      target lob-base-path (default: <-F>/lob); a missing last level is created (0700)
   -E, --extended-volume-path <dir>  target directory of volumes 1.., existing and writable (default: -F); not with -i
   -i, --control-file <file>      target path per volume, copydb's format: `volid source_fullvolname dest_fullvolname`
-                                 lines (volumes it does not list go to -F); not with -E
+                                 lines (volumes it does not list go to -F; missing directories are made); not with -E
   --target-version 11.4|develop  target release line (default: the line of the install $CUBRID; 11.4 takes a 10.2,
                                  11.2, 11.3 or 11.4 source)
   -r, --replace                  replace a database registered under <new-db> in the target databases.txt: its
@@ -776,6 +777,9 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<(String
     marker.create_dir_all(&o.plan.log_dir)?;
     let fastmig_dir = po.target_dir.join("fastmig");
     marker.create_dir_all(&fastmig_dir)?;
+    // a missing -B last level and -i directories (workspace#614 decisions 4, 5)
+    let targets: Vec<PathBuf> = jobs.iter().map(|j| j.target.clone()).collect();
+    target_dirs::create(&o.plan, &targets, &marker)?;
     // the run log (workspace#610): the lines held since the display started go in first
     let run_log = fastmig_dir.join(RUN_LOG);
     marker.record(&run_log)?;

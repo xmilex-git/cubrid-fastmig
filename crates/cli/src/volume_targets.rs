@@ -48,6 +48,11 @@ impl VolumeLayout {
         Ok(VolumeLayout { extended, control })
     }
 
+    /// `-i` as given.
+    pub fn control(&self) -> Option<&Path> {
+        self.control.as_deref()
+    }
+
     /// `-E` as given, absolute.
     pub fn extended(&self) -> Option<&Path> {
         self.extended.as_deref()

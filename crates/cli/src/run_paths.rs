@@ -137,8 +137,9 @@ pub fn rows(plan: &Plan, src: &OpenSource, o: &PlanOptions) -> io::Result<Vec<Pa
         source: Some(show(&o.source_dbtxt)),
         target: show(&o.target_dbtxt),
     });
-    // a given -E or -L directory the plan refuses: the row says why (workspace#614)
-    for p in target_dirs::check(o) {
+    // a given target directory the plan refuses: the row says why (workspace#614)
+    let targets: Vec<PathBuf> = plan.volumes.iter().map(|v| v.target.clone()).collect();
+    for p in target_dirs::check(o, &targets) {
         let dir = show(&p.dir);
         for r in out.iter_mut().filter(|r| r.target == dir) {
             r.target = format!("{dir} ({})", p.problem.short());
