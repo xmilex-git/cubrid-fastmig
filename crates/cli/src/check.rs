@@ -3,8 +3,8 @@
 //! Input: the database (a name in databases.txt, or the path of its first volume: then the active log is
 //! `<path>_lgat`, the lob-base-path `<dir>/lob`, volumes 1.. next to it — the form of a T1 pristine copy), the
 //! optional source, the worker and memory limits, the classes whose heap header statistics were measured.
-//! Output: the JSONL report (`--report`, default `<target volume dir>/fastmig/check.jsonl`), the summary line on
-//! stdout; exit code 0 = no migration defect, 1 = migration defects, 2 = usage or tool error.
+//! Output: the JSONL report (`--report`, default `<target volume dir>/fastmig/check.jsonl`), `check.log` beside it (the summary line and the report path), the summary line on stdout
+//! (on a terminal a result box instead, workspace#610); exit code 0 = no migration defect, 1 = migration defects, 2 = usage or tool error.
 //! The command was `verify` until G13 workspace#604 named it after what it replaces (checkdb) and the options after the
 //! CUBRID utilities (`-t, --thread-count`, `--temp-mem-size`, `--temp-disk-size`).
 //! Source: G1 workspace#481 (check command; finalize reads the exit code and the report), G3 workspace#483 Q9;
@@ -12,7 +12,7 @@
 //! writes `<dest>/fastmig/measured-classes`).
 
 use std::collections::{BTreeSet, HashMap};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use fastmig_index::extent_jobs::ExtentReads;
@@ -21,15 +21,18 @@ use fastmig_ondisk::Oid;
 use fastmig_ondisk::databases_txt;
 use fastmig_ondisk::log_header::LogHeader;
 use fastmig_ondisk::volume_set::Locate;
-use fastmig_progress::Meter;
+use fastmig_progress::panel::boxed_whole;
+use fastmig_progress::style::term_size;
+use fastmig_progress::{Color, Meter, Stream, Style};
 use fastmig_verify::btree_walk::LeafCounts;
 use fastmig_verify::report::{defect_line, exit_code, summary_line};
 use fastmig_verify::{Database, Role, classify, verify_database};
 
 use crate::args::{CliError, parse};
-use crate::finalize::CHECK_REPORT;
+use crate::finalize::{CHECK_LOG, CHECK_REPORT};
 use crate::limits::{self, Limits};
 use crate::plan::OpenSource;
+use crate::{end_screen, progress_args};
 
 pub const HELP: &str = "\
 cubrid-fastmig check <db | first-volume-path> [options]
@@ -165,8 +168,8 @@ fn bad(line: &str) -> io::Error {
 
 /// The exit code on success (0 or 1); usage and tool errors are `Err` (exit 2).
 pub fn run(argv: &[String]) -> Result<u8, CliError> {
-    let flags = [FLAGS, limits::FLAGS].concat();
-    let p = parse(argv, &flags, &[])?;
+    let flags = [FLAGS, limits::FLAGS, progress_args::STYLE_FLAGS].concat();
+    let p = parse(argv, &flags, progress_args::SWITCHES)?;
     let [db] = p.positional.as_slice() else {
         return Err(CliError::Usage("check takes exactly one database".into()));
     };
@@ -221,8 +224,42 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         &report,
         None,
     )?;
-    println!("{summary}");
+    // the check log beside the report (workspace#610)
+    let log = report.with_file_name(CHECK_LOG);
+    std::fs::write(&log, format!("{summary}\nreport: {}\n", report.display()))?;
+    if std::io::stdout().is_terminal() {
+        let st = progress_args::style(&p, Stream::Stdout)?;
+        print!("{}", result_box(&st, code, &summary, &report, &log));
+    } else {
+        println!("{summary}");
+    }
     Ok(code)
+}
+
+/// The check's result on a terminal: the defect counts by origin, the report and the log.
+fn result_box(st: &Style, code: u8, summary: &str, report: &Path, log: &Path) -> String {
+    let width = term_size(Stream::Stdout).0.saturating_sub(1).max(40);
+    let count = |key: &str| end_screen::count(summary, key).map_or("?".into(), |n| n.to_string());
+    let (color, verdict) = if code == 0 {
+        (Color::Green, "no migration defect")
+    } else {
+        (Color::Red, "migration defects found")
+    };
+    let lines = [
+        st.strong(color, verdict),
+        format!(
+            "migration {}, pre-existing {}, resolved {}",
+            count("migration"),
+            count("pre_existing"),
+            count("resolved")
+        ),
+        format!("report {}", report.display()),
+        format!("log    {}", log.display()),
+    ];
+    boxed_whole(st, "cubrid-fastmig check", &lines, color, width)
+        .iter()
+        .map(|l| format!("{l}\n"))
+        .collect()
 }
 
 /// Verifies `target` (and `source`), writes the JSONL report, returns the exit code (0 or 1) and the summary line.

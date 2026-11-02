@@ -7,8 +7,10 @@
 //! `--check`), the SQL files for the user (`deferred-indexes.sql`, `recompile-plcsql.sql`, `recompile-views.sql`,
 //! `post-migration-fixes.sql`, `update-statistics.sql`), `lob-manifest`, `lob-outside-base`, `measured-classes` and
 //! `source-fingerprint` (read by finalize), and once finished `created-paths` (what the run created, read by a later
-//! `--replace`); then the target's `databases.txt` line. Progress (the phases in `PHASES`) goes to stderr. The source
-//! is only read; its active log is read-locked for the whole run.
+//! `--replace`); then the target's `databases.txt` line. Progress (the phases in `PHASES`) goes to stderr
+//! and its full text to `<-F>/fastmig/migrate.log` (the run log); at the end stdout gets report.json, or on a terminal
+//! the result and required SQL boxes (`end_screen`, workspace#610). The source is only read; its active log is
+//! read-locked for the whole run.
 //! Order: the plan refuses before anything is written; with `-r` the old database is removed after that and before
 //! the first write; the new log comes last of the writes; with `--check` the verifier runs on the durable target and
 //! only a target with 0 migration defects is registered and loses its incomplete marker; without it every finished
@@ -21,7 +23,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,13 +56,15 @@ use fastmig_plan::Plan;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::line_name;
 use fastmig_progress::{
-    Bottleneck, Meter, PhaseSpec, ProcSample, Progress, StorageKind, Unit, default_rates,
+    Bottleneck, Meter, PhaseSpec, ProcSample, Progress, ScreenInfo, StorageKind, Stream, Unit,
+    default_rates,
 };
 use fastmig_verify::Role;
 
 use crate::args::{CliError, parse};
 use crate::catalog_regeneration;
 use crate::check::{self, DbArg, run_verifier};
+use crate::end_screen;
 use crate::finalize::{self, CHECK_REPORT, OUTSIDE_BASE};
 use crate::limits::{self, Limits};
 use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
@@ -120,6 +124,9 @@ cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
                                  must not share blocks with the source)
   --volumes-in-first-dir         find volumes 1.. next to volume 0 instead of at their recorded paths (a source
                                  copied to another directory without its headers rewritten, e.g. T1 pristine copies)";
+
+/// The run log in `<dest>/fastmig/` (workspace#610).
+pub const RUN_LOG: &str = "migrate.log";
 
 const FLAGS: &[&str] = &[
     "--log-path",
@@ -236,7 +243,11 @@ struct Options {
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
     let flags = [FLAGS, plan_cmd::FLAGS, limits::FLAGS, progress_args::FLAGS].concat();
-    let p = parse(argv, &flags, &[SWITCHES, plan_cmd::SWITCHES].concat())?;
+    let p = parse(
+        argv,
+        &flags,
+        &[SWITCHES, plan_cmd::SWITCHES, progress_args::SWITCHES].concat(),
+    )?;
     let plan = PlanOptions::from(&p, "migrate")?;
     let worker_limit = limits::worker_limit(&p)?;
     let o = Options {
@@ -381,14 +392,16 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         o.worker_limit,
         started + asked.elapsed(),
     );
+    let steps = required_sql::list(&plan, o.statistics);
+    let fastmig_dir = o.plan.target_dir.join("fastmig");
+    progress.set_screen(screen_info(&o, &plan, &storage, &steps, &fastmig_dir));
     let monitor = progress_args::start(
         &p,
         progress.clone(),
         Some(o.limits.memory_limit_bytes),
         Some(temp_limit),
     )?;
-    let required = required_sql::text(&required_sql::list(&plan, o.statistics));
-    let report = migrate(
+    let result = migrate(
         &o,
         Begun {
             started,
@@ -402,16 +415,79 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             pair_count_used,
             replaced,
         },
-        progress,
-    )
-    .map_err(CliError::Failed)?;
+        progress.clone(),
+    );
     monitor.finish();
-    eprint!("{required}");
-    println!("{report}");
+    // the run log ends with the report path or the error (workspace#610)
+    match &result {
+        Ok(_) => progress.log(&format!(
+            "report: {}",
+            fastmig_dir.join("report.json").display()
+        )),
+        Err(e) => progress.log(&format!("error: {e}")),
+    }
+    let closed = progress.close_log();
+    let (report, summary) = result.map_err(CliError::Failed)?;
+    closed?;
+    // on a terminal the summary and the SQL box; the JSON is in report.json (workspace#610)
+    if std::io::stdout().is_terminal() {
+        let st = progress_args::style(&p, Stream::Stdout)?;
+        print!(
+            "{}",
+            end_screen::text(
+                &st,
+                &progress,
+                &summary,
+                &steps,
+                &o.plan.target_name,
+                &fastmig_dir,
+                &o.plan.target_dbtxt,
+            )
+        );
+    } else {
+        eprint!("{}", required_sql::text(&steps));
+        println!("{report}");
+    }
     if o.delete_source {
         finalize::finalize(&o.plan.target_dir)?;
     }
     Ok(())
+}
+
+/// The screen's header, devices and notes rows (workspace#610).
+fn screen_info(
+    o: &Options,
+    plan: &Plan,
+    storage: &RunStorage,
+    steps: &[required_sql::RequiredSql],
+    fastmig_dir: &Path,
+) -> ScreenInfo {
+    let methods: BTreeSet<&str> = plan.volumes.iter().map(|v| v.copy_method.name()).collect();
+    let mut detail = format!(
+        "{}, {} workers",
+        methods.into_iter().collect::<Vec<_>>().join("+"),
+        o.worker_limit
+    );
+    if o.check {
+        detail += ", --check";
+    }
+    let disks = |d: &[String]| d.join(",");
+    ScreenInfo {
+        source: format!("{} ({})", o.plan.db, plan.source_version.name()),
+        target: format!(
+            "{} ({})",
+            o.plan.target_name,
+            line_name(plan.version_pair.target)
+        ),
+        detail,
+        devices: format!(
+            "{} -> {}",
+            disks(&storage.source.disks),
+            disks(&storage.target.disks)
+        ),
+        sql: required_sql::notes(steps),
+        report: fastmig_dir.join("report.json").display().to_string(),
+    }
 }
 
 /// Step timings for report.json.
@@ -455,8 +531,8 @@ struct Begun {
     replaced: Option<ReplacedDatabase>,
 }
 
-/// Returns report.json.
-fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String> {
+/// Returns report.json and the check's summary line (`null` without --check).
+fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<(String, String)> {
     let mut rep = Report {
         steps: b.pre.clone(),
         started: b.started,
@@ -562,6 +638,10 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     marker.create_dir_all(&o.log_dir)?;
     let fastmig_dir = po.target_dir.join("fastmig");
     marker.create_dir_all(&fastmig_dir)?;
+    // the run log (workspace#610): the lines held since the display started go in first
+    let run_log = fastmig_dir.join(RUN_LOG);
+    marker.record(&run_log)?;
+    rep.progress.open_log(&run_log)?;
     // every byte the run may write is taken from the filesystems now, before the first byte of the target
     // (workspace#526): byte-copied volumes and the new log in full, one reservation for the rest, the temp disk limit
     preallocate_targets(&jobs, &marker)?;
@@ -922,7 +1002,7 @@ fn migrate(o: &Options, b: Begun, progress: Arc<Progress>) -> io::Result<String>
     // the marker goes last: everything above is in place
     marker.finish(&fastmig_dir.join(CREATED_PATHS))?;
     drop(src);
-    Ok(report)
+    Ok((report, summary))
 }
 
 /// The plan's files in `<dest>/fastmig/`: what the user runs on the target, and what verify and finalize read.

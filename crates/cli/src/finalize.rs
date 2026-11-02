@@ -41,6 +41,8 @@ pub const OUTSIDE_BASE: &str = "lob-outside-base";
 
 /// `<dest>/fastmig/check.jsonl`: the check report migrate --check and check write, finalize reads.
 pub const CHECK_REPORT: &str = "check.jsonl";
+/// The standalone check's log beside its report: the summary line and the report path (workspace#610).
+pub const CHECK_LOG: &str = "check.log";
 
 fn refuse(msg: String) -> CliError {
     CliError::Failed(io::Error::other(format!("finalize refused: {msg}")))

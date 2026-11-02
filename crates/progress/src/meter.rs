@@ -10,6 +10,8 @@
 //! Source: user request relayed in workspace#472 (추가 3: writers free, the reader does the work).
 
 use std::cell::Cell;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::Thread;
@@ -18,6 +20,8 @@ use std::time::Instant;
 use crate::bottleneck::{Bottleneck, DeviceThroughput};
 use crate::default_rates::DefaultRate;
 use crate::proc_sample::ProcSample;
+use crate::run_log::RunLog;
+use crate::screen_info::ScreenInfo;
 use crate::unit::Unit;
 
 /// Counter slots per phase. Threads beyond this share slots (still correct, only no longer contention-free).
@@ -177,6 +181,10 @@ pub struct Progress {
     /// Warnings for the running monitor to print between its frames; `None` while no monitor runs, so
     /// [`Progress::warn`] prints directly.
     pub(crate) warnings: Mutex<Option<Vec<String>>>,
+    /// What the screen shows besides the counters, set once by the command ([`Progress::set_screen`]).
+    pub(crate) screen: OnceLock<ScreenInfo>,
+    /// The run log; lines are held until the command opens its file (workspace#610).
+    pub(crate) log: Mutex<RunLog>,
 }
 
 impl Progress {
@@ -225,7 +233,57 @@ impl Progress {
             trail: Mutex::new(Vec::new()),
             waker: OnceLock::new(),
             warnings: Mutex::new(None),
+            screen: OnceLock::new(),
+            log: Mutex::new(RunLog::default()),
         })
+    }
+
+    pub fn set_screen(&self, info: ScreenInfo) {
+        let _ = self.screen.set(info);
+    }
+
+    /// Opens the run log at `path` and writes the lines held so far into it.
+    pub fn open_log(&self, path: &Path) -> io::Result<()> {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .open(path)
+    }
+
+    /// Appends `line` to the run log.
+    pub fn log(&self, line: &str) {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .line(line);
+    }
+
+    pub fn log_path(&self) -> Option<PathBuf> {
+        let l = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        l.path().map(Path::to_path_buf)
+    }
+
+    /// Closes the run log; the first write error it had.
+    pub fn close_log(&self) -> io::Result<()> {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).close()
+    }
+
+    /// Each phase's name and seconds (0 for a phase that never began).
+    pub fn phase_seconds(&self) -> Vec<(&'static str, f64)> {
+        let now = Instant::now();
+        (self.phases.iter())
+            .map(|ph| (ph.spec.name, crate::estimate::elapsed(ph, now)))
+            .collect()
+    }
+
+    /// Elapsed + estimated remaining seconds when the first measured phase began.
+    pub fn start_estimate(&self) -> Option<f64> {
+        self.start_estimate.get().copied()
+    }
+
+    /// Seconds since the run started.
+    pub fn run_seconds(&self) -> f64 {
+        self.run_started.elapsed().as_secs_f64()
     }
 
     /// The handle workers add to for phase `i`.
@@ -297,6 +355,7 @@ impl Progress {
     /// Prints a warning line on stderr at once: through the monitor while one runs (the screen is cleared,
     /// the warning written above it, the screen redrawn), directly otherwise.
     pub fn warn(&self, msg: String) {
+        self.log(&msg);
         let mut q = self.warnings.lock().unwrap_or_else(|e| e.into_inner());
         match q.as_mut() {
             Some(q) => {

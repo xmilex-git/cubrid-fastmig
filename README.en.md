@@ -165,8 +165,8 @@ computed: [docs/resources.md](docs/resources.md)
 
 ## Required SQL after the migration
 
-`migrate` ends by printing the files below with what each fixes, and keeps the same list in
-`<dest>/fastmig/report.json` (`required_sql`). Run them as DBA, in this order, before the target is used
+`migrate` ends by printing the files below with what each fixes (on a terminal, in the `ACTION REQUIRED` box at the
+bottom, as `csql` commands to copy and run), and keeps the same list in `<dest>/fastmig/report.json` (`required_sql`). Run them as DBA, in this order, before the target is used
 (`csql -u dba <db> -i <dest>/fastmig/<file>`); a file with nothing to do is not listed.
 
 1. `recompile-plcsql.sql`: recompiles PL/CSQL routines, which run their copied compiled code until then.

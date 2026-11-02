@@ -156,8 +156,8 @@ cubrid-fastmig finalize <target-dir>
 
 ## 마이그레이션 뒤 반드시 실행할 SQL
 
-`migrate`는 마지막에 아래 파일과 각 파일이 고치는 것을 출력하고, 같은 목록을 `<dest>/fastmig/report.json`
-(`required_sql`)에 남깁니다. 도착 DB를 쓰기 전에 DBA로 이 순서대로 실행하세요
+`migrate`는 마지막에 아래 파일과 각 파일이 고치는 것을 출력하고(터미널에서는 맨 아래 `ACTION REQUIRED` 박스에 바로
+복사해 실행할 `csql` 명령으로), 같은 목록을 `<dest>/fastmig/report.json` (`required_sql`)에 남깁니다. 도착 DB를 쓰기 전에 DBA로 이 순서대로 실행하세요
 (`csql -u dba <db> -i <dest>/fastmig/<file>`). 할 일이 없는 파일은 목록에 나오지 않습니다.
 
 1. `recompile-plcsql.sql`: PL/CSQL 루틴을 다시 컴파일합니다. 그 전까지는 복사된 컴파일 결과로 돕니다.

@@ -114,21 +114,6 @@ pub(crate) fn secs(s: f64) -> String {
     }
 }
 
-/// `(470 MiB, 1.1 GiB/s)` of a finished phase; empty for a step.
-pub(crate) fn finished_amount(ph: &Phase, now: Instant) -> String {
-    if ph.spec.unit == Unit::Step {
-        return String::new();
-    }
-    let el = elapsed(ph, now);
-    let done = ph.done();
-    let rate = if el > 0.0 {
-        format!(", {}", ph.spec.unit.rate(done as f64 / el))
-    } else {
-        String::new()
-    };
-    format!("({}{rate})", ph.spec.unit.amount(done))
-}
-
 /// `volume-copy done 1.78 s 4.2 GiB 2.4 GiB/s`, or `volume-paths done` for a step.
 pub fn ended_brief(p: &Progress, i: usize, now: Instant) -> String {
     let ph = &p.phases[i];

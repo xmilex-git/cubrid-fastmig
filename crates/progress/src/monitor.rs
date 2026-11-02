@@ -1,4 +1,6 @@
-//! The one reader thread: every tick it sums the counters, estimates, and draws the screen or prints a line.
+//! The one reader thread: every tick it sums the counters, estimates, and draws the screen or prints a line, and keeps
+//! the run log (the plain line at each phase boundary and every interval, the summary at the end; workspace#610).
+//! The screen gathers the warnings in its notes box (their full text is in the run log); plain mode prints them.
 //! Plain mode prints exactly one line per interval (the first at start), naming the phases that ended since
 //! the previous line, and the summary at the end; a phase boundary or a warning wakes the thread early so the
 //! screen redraws and warnings go out at once.
@@ -13,11 +15,12 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::estimate::Estimator;
+use crate::estimate::{Estimate, Estimator};
 use crate::meter::Progress;
 use crate::proc_sample::ProcSample;
 use crate::render_line::{self, Heap};
 use crate::render_screen::Screen;
+use crate::style::Style;
 
 /// Redraw period of the terminal display.
 const TTY_TICK: Duration = Duration::from_millis(200);
@@ -69,6 +72,7 @@ impl Monitor {
         heap: HeapProbe,
         memory_limit: Option<u64>,
         temp: Option<(TempProbe, u64)>,
+        style: Style,
     ) -> Monitor {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = (mode != Mode::None).then(|| {
@@ -81,7 +85,17 @@ impl Monitor {
             *p.warnings.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
             std::thread::spawn(move || {
                 let _ = p.waker.set(std::thread::current());
-                watch(&p, mode, tick, heap, memory_limit, temp, &stop)
+                watch(
+                    &p,
+                    mode,
+                    tick,
+                    plain_interval,
+                    heap,
+                    memory_limit,
+                    temp,
+                    style,
+                    &stop,
+                )
             })
         });
         Monitor { stop, thread }
@@ -107,17 +121,23 @@ impl Drop for Monitor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn watch(
     p: &Progress,
     mode: Mode,
     tick: Duration,
+    log_interval: Duration,
     probe: HeapProbe,
     memory_limit: Option<u64>,
     temp: Option<(TempProbe, u64)>,
+    style: Style,
     stop: &AtomicBool,
 ) {
     let mut est = Estimator::default();
-    let mut screen = Screen::new();
+    let mut screen = Screen::new(style);
+    // the run log's own plain lines: at each phase boundary and every `log_interval`
+    let mut logged = vec![false; p.phases.len()];
+    let mut next_log = Instant::now();
     // plain mode: phases already named in a line, and when the next line is due (the first at once)
     let mut ended_shown = vec![false; p.phases.len()];
     let mut next_line = Instant::now();
@@ -127,7 +147,8 @@ fn watch(
     loop {
         let stopping = stop.load(Relaxed);
         let now = Instant::now();
-        let e = est.tick(p, now, ProcSample::now());
+        let sample = ProcSample::now();
+        let e = est.tick(p, now, sample);
         if let Some(ph) = p.phases.get(p.current()) {
             let cur = p.current();
             let sum: u64 = (0..ph.totals.len()).map(|k| ph.done_of(k)).sum();
@@ -167,10 +188,8 @@ fn watch(
         let warnings = p.take_warnings(stopping);
         match mode {
             Mode::Tty => {
-                if !warnings.is_empty() {
-                    screen.print_above(&warnings);
-                }
-                screen.draw(p, &e, &heap, now);
+                screen.note(warnings);
+                screen.draw(p, &e, &heap, now, sample);
             }
             Mode::Plain => {
                 let mut out = String::new();
@@ -181,25 +200,26 @@ fn watch(
                 let cur = p.current();
                 if cur < p.phases.len() && !stopping && now >= next_line {
                     next_line = now + tick;
-                    let since: Vec<String> = (0..p.phases.len())
-                        .filter(|&i| {
-                            p.phases[i].ended.get().is_some()
-                                && !std::mem::replace(&mut ended_shown[i], true)
-                        })
-                        .map(|i| render_line::ended_brief(p, i, now))
-                        .collect();
-                    out += &render_line::running(p, cur, &e, &heap);
-                    if !since.is_empty() {
-                        out += &format!(" (since last: {})", since.join(", "));
-                    }
+                    out += &plain_line(p, cur, &e, &heap, &mut ended_shown, now);
                     out += "\n";
                 }
                 let _ = std::io::stderr().lock().write_all(out.as_bytes());
             }
             Mode::None => {}
         }
+        let cur = p.current();
+        let ended_new = (0..cur.min(p.phases.len())).any(|i| !logged[i]);
+        if cur < p.phases.len() && !stopping && (now >= next_log || ended_new) {
+            next_log = now + log_interval;
+            p.log(&plain_line(p, cur, &e, &heap, &mut logged, now));
+        }
         if stopping {
-            let _ = writeln!(std::io::stderr(), "{}", render_line::summary(p, &heap));
+            let summary = render_line::summary(p, &heap);
+            p.log(&summary);
+            // the screen's last frame says it; plain mode ends with the line
+            if mode == Mode::Plain {
+                let _ = writeln!(std::io::stderr(), "{summary}");
+            }
             break;
         }
         // a boundary or a warning unparks early; plain lines still keep to the interval, the estimate (and its trail
@@ -211,4 +231,24 @@ fn watch(
         };
         std::thread::park_timeout(wake.saturating_duration_since(Instant::now()));
     }
+}
+
+/// The plain line of the running phase `cur`, naming the phases that ended since the last line (marked in `shown`).
+fn plain_line(
+    p: &Progress,
+    cur: usize,
+    e: &Estimate,
+    heap: &Heap,
+    shown: &mut [bool],
+    now: Instant,
+) -> String {
+    let since: Vec<String> = (0..p.phases.len())
+        .filter(|&i| p.phases[i].ended.get().is_some() && !std::mem::replace(&mut shown[i], true))
+        .map(|i| render_line::ended_brief(p, i, now))
+        .collect();
+    let mut out = render_line::running(p, cur, e, heap);
+    if !since.is_empty() {
+        out += &format!(" (since last: {})", since.join(", "));
+    }
+    out
 }

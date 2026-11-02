@@ -12,6 +12,7 @@ mod args;
 mod catalog_regeneration;
 mod check;
 mod database_files;
+mod end_screen;
 mod finalize;
 mod heap_counter;
 mod limits;
@@ -20,6 +21,7 @@ mod migrate;
 mod partition_streams;
 mod plan;
 mod plan_report;
+mod plan_screen;
 mod progress_args;
 mod replace_target;
 mod required_sql;
@@ -55,9 +57,9 @@ const M_MMAP_THRESHOLD: i32 = -3;
 /// The whole help of a user command.
 fn help_of(cmd: &str) -> Option<String> {
     Some(match cmd {
-        "plan" => plan::HELP.to_string(),
+        "plan" => format!("{}\n{}", plan::HELP, progress_args::STYLE_HELP),
         "migrate" => format!("{}\n{}", migrate::HELP, progress_args::HELP),
-        "check" => check::HELP.to_string(),
+        "check" => format!("{}\n{}", check::HELP, progress_args::STYLE_HELP),
         "finalize" => finalize::HELP.to_string(),
         "set-comparison" => set_comparison::HELP.to_string(),
         _ => return None,

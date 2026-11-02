@@ -78,7 +78,7 @@ fn failed(e: impl std::fmt::Display) -> CliError {
 
 pub fn run(argv: &[String]) -> Result<(), CliError> {
     let flags = [&["--out", "--from", "--to"], progress_args::FLAGS].concat();
-    let p = args::parse(argv, &flags, &[])?;
+    let p = args::parse(argv, &flags, progress_args::SWITCHES)?;
     let [src, dev] = p.positional.as_slice() else {
         return Err(CliError::Usage(
             "partition-streams needs <source first volume> <develop first volume>".into(),

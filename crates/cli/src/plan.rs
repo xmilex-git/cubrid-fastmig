@@ -3,7 +3,8 @@
 //!
 //! Input: the source DB name (found in the source `databases.txt`), the optional new DB name, the target directory
 //! and the choices (`--target-version`, `--no-clone`, `-r`, `-E`/`-i`, the target conf defaults). Output: the plan
-//! as a table on stdout, or JSON with `--json`; exit code 1 when the plan has refusals.
+//! as a table on stdout (in boxes when stdout is a terminal, `plan_screen`, workspace#610), or JSON with `--json`;
+//! exit code 1 when the plan has refusals.
 //! Names and defaults follow copydb/createdb and the target `cubrid.conf` (G13 workspace#604): `<db> [<new-db>]`,
 //! `-F`, the target line from the target install, `--db-volume-size`/`--temp-mem-size`/`--temp-disk-size` from the
 //! conf; the command line always wins. The chosen values are the `settings` object of plan.json.
@@ -11,7 +12,7 @@
 //! decided once by the plan), G13 workspace#604.
 
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use fastmig_copy::{incomplete_marker, new_log, open_locked_log, register_db};
@@ -23,9 +24,12 @@ use fastmig_plan::cubrid_conf::ignore_trailing_space;
 use fastmig_plan::migration_plan::lob_base_dir;
 use fastmig_plan::version_pair::{line_name, parse_line};
 use fastmig_plan::{Plan, PlanInputs};
+use fastmig_progress::Stream;
 
 use crate::args::{CliError, Parsed, parse};
 use crate::limits::{self, Limits, TempDiskChoice};
+use crate::plan_screen::PlanScreen;
+use crate::progress_args;
 use crate::replace_target::{self, ReplacedDatabase};
 use crate::storage_kind_detect::RunStorage;
 use crate::target_conf_defaults::TargetConfDefaults;
@@ -366,8 +370,18 @@ pub fn make_plan(o: &PlanOptions, s: &OpenSource) -> io::Result<(Plan, Option<Re
 }
 
 pub fn run(argv: &[String]) -> Result<u8, CliError> {
-    let flags = [FLAGS, limits::FLAGS, &["--thread-count"]].concat();
-    let p = parse(argv, &flags, &[SWITCHES, &["--json", "--check"]].concat())?;
+    let flags = [
+        FLAGS,
+        limits::FLAGS,
+        &["--thread-count"],
+        progress_args::STYLE_FLAGS,
+    ]
+    .concat();
+    let p = parse(
+        argv,
+        &flags,
+        &[SWITCHES, &["--json", "--check"], progress_args::SWITCHES].concat(),
+    )?;
     let o = PlanOptions::from(&p, "plan")?;
     let s = OpenSource::open(&o)?;
     let plan = match make_plan(&o, &s) {
@@ -427,6 +441,23 @@ pub fn run(argv: &[String]) -> Result<u8, CliError> {
         Err(e) => Err(e),
     };
     let storage_json = storage.json();
+    // on a terminal the boxes, else the table as before (workspace#610)
+    if !p.switch("--json") && std::io::stdout().is_terminal() {
+        let st = progress_args::style(&p, Stream::Stdout)?;
+        let screen = PlanScreen {
+            plan: &plan,
+            db: &o.db,
+            target_name: &o.target_name,
+            target_dir: &o.target_dir,
+            estimate: match &space {
+                Ok((t, est)) => Ok((t, est.table(mem))),
+                Err(e) => Err(e.as_str()),
+            },
+            storage: storage.table().trim_end().to_string(),
+        };
+        print!("{}", screen.text(&st));
+        return Ok(u8::from(!plan.refusals.is_empty()));
+    }
     match (&space, p.switch("--json")) {
         (Ok((t, est)), true) => print!(
             "{}",

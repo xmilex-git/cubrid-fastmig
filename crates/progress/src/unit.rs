@@ -29,6 +29,14 @@ impl Unit {
         }
     }
 
+    /// `done/total unit` with counts in decimal multiples (`45.8 k/111.4 k pages`): the screen's narrow column.
+    pub fn short_fraction(self, done: u64, total: u64) -> String {
+        match self {
+            Unit::Count(noun) => format!("{}/{} {noun}", count(done as f64), count(total as f64)),
+            u => u.fraction(done, total),
+        }
+    }
+
     pub fn rate(self, per_sec: f64) -> String {
         match self {
             Unit::Step => String::new(),
