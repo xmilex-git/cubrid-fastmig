@@ -346,14 +346,19 @@ impl PostOutcome {
     }
 }
 
-/// Appends `path` to the target's created-paths (a later `--replace` removes it with the rest).
+/// Appends `path` to the target's created-paths once (a later `--replace` removes it with the rest; a rerun of post adds
+/// nothing twice).
 fn record_created(fastmig_dir: &Path, path: &Path) -> io::Result<()> {
     let created = fastmig_dir.join(CREATED_PATHS);
+    let line = path.display().to_string();
+    if fs::read_to_string(&created).is_ok_and(|t| t.lines().any(|l| l == line)) {
+        return Ok(());
+    }
     let mut f = OpenOptions::new()
         .append(true)
         .create(true)
         .open(&created)?;
-    f.write_all(format!("{}\n", path.display()).as_bytes())?;
+    f.write_all(format!("{line}\n").as_bytes())?;
     f.sync_all()
 }
 

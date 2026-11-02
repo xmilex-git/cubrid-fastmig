@@ -114,7 +114,7 @@ cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
   --source-cubrid <install>      also compare all data: the source's install unloads a copy of the source, the
                                  target install unloads the target, set-comparison compares them (turns on
                                  --engine-check). Later, on a finished target: cubrid-fastmig post (post -h)
-  -t, --thread-count <n>        worker limit: thread cap for the whole run (default: CPUs / 2)
+  -t, --thread-count <n>         worker limit: thread cap for the whole run (default: CPUs / 2)
   --temp-mem-size <size>         memory limit for the whole run, e.g. 16G (default: the target conf's
                                  data_buffer_size, else physical memory / 4, at least 256M)
   --temp-disk-size min|max|<size>  temp disk limit: spill bytes on disk at once, kept by building indexes in batches
