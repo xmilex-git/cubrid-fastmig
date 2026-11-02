@@ -94,6 +94,7 @@ impl PlanScreen<'_> {
             &self.target_dir.join("fastmig"),
             width,
             true,
+            None,
         ));
         out.iter().map(|l| format!("{l}\n")).collect()
     }

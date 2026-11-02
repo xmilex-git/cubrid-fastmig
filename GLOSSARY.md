@@ -124,6 +124,14 @@ _Avoid_: 공백 버그, 데이터 손상, 정합성 오류
 `<dest>/fastmig/post-migration-fixes.sql`. 비교 규칙 어긋남마다 도착에서 DBA가 검토 후 실행할 문장: HASH는 `REMOVE PARTITIONING` + `PARTITION BY HASH`, LIST·RANGE는 모든 파티션을 한 문장으로 `REORGANIZE PARTITION`(LIST는 행이 가진 값을 목록에 더한다), FK는 짝 없는 자식을 찾는 조회문. 그리고 다른 owner SP 호출마다 필요한 `GRANT EXECUTE ON PROCEDURE [owner.sp] TO [caller];`(같은 SP·호출자 쌍은 한 문장). 서버 비밀번호 다시 감싸기가 열지 못한 DBLink 서버마다 값 없는 `ALTER SERVER [owner].[name] CHANGE PASSWORD` 주석. 모두 없으면 빈 파일이다.
 _Avoid_: 수정 스크립트, 패치 SQL(페이지 처리 등급 patch와 섞인다)
 
+**필수 SQL (required SQL)**:
+도착을 쓰기 전에 DBA가 정한 순서로 실행해야 하는 `<dest>/fastmig/` 파일들: `recompile-plcsql.sql` → `recompile-views.sql` → `deferred-indexes.sql` → `update-statistics.sql`(할 일 없는 파일은 빠지고, 통계는 `--no-statistics`로만 빠진다). 파일 사이 순서는 뷰 spec이 루틴을 부를 수 있어서 루틴이 먼저다. 파일 안 순서는 카탈로그 순서다. 의존이 생성 순서와 반대인 경우에도 공식 경로와 같은 결과를 냈다(뷰는 선언 도메인으로 캐스트하고, 루틴은 카탈로그 시그니처로 찾는다; [workspace#611](https://github.com/xmilex-git/workspace/issues/611) 확인). migrate는 끝에서 목록을 보이고 report.json `required_sql`에 남긴다. `--run-sql`이면 도구가 도착 install의 csql로 SA 모드에서 실행한다([ADR 0018](docs/adr/0018-engine-runs-only-after-migration-in-sa-mode.md)). 사후 정리 SQL은 필수 SQL이 아니다.
+_Avoid_: 후처리 SQL, 마무리 스크립트
+
+**엔진 확인 (engine check)**:
+`--engine-check`(또는 `post --engine-check`): 필수 SQL이 모두 실행된 뒤 도착 버전 엔진이 SA 모드로 도착을 읽고 도구와 맞는지 보는 일. 클래스마다 엔진 `SELECT COUNT(*) FROM ONLY`가 도구가 도착 볼륨에서 센 live 행 수(검증기의 힙 스캔, 분할 클래스는 파티션 합)와 같고, 인덱스마다 첫 키 최솟값의 sargable 술어가 그 인덱스의 index scan으로 `USING INDEX NONE`과 같은 건수를 낸다. 엔진이 range scan하지 않는 키의 인덱스는 _skipped_(사유와 함께, 통과로 세지 않음)다. 선택으로 `checkdb -S`(`--engine-checkdb`)와 원본 사본·도착의 `unloaddb` 집합 비교(`--source-cubrid`)를 더한다. 결과는 report.json `post` 항목이고, 실패하면 종료 코드 3과 finalize 거부다. 검증기(`check`)와 달리 엔진을 쓰고, 검증기를 대신하지 않는다.
+_Avoid_: 엔진 검증(검증기와 섞인다), smoke
+
 **다른 owner SP 호출 (other-owner procedure call)**:
 11.4 미만 출발에서 뷰 query spec이나 trigger condition·action이 다른 owner의 저장 프로시저를 부르는 것. 텍스트 owner가 DBA 그룹이면 해당하지 않는다. 11.4 미만에는 `GRANT EXECUTE`가 없어 누구나 모든 SP를 불렀다. develop은 owner가 아닌 호출자에게 EXECUTE를 요구한다. 그래서 그대로 옮기면 그 뷰·trigger가 "EXECUTE authorization failure"로 실패한다. 공식 경로처럼 도구는 권한을 만들지 않는다. plan이 경고하고, 사후 정리 SQL에 GRANT 문을 낸다(G11 [workspace#545](https://github.com/xmilex-git/workspace/issues/545)).
 _Avoid_: 권한 누락, EXECUTE 결함

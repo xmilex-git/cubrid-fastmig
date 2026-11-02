@@ -4,7 +4,7 @@
 //! Input: the target directory of a finished migrate (`<dest>/fastmig/` holds the source fingerprint, the LOB
 //! manifests and the check report `check.jsonl`). Output: the source's files removed, its databases.txt line removed, and
 //! `<dest>/fastmig/finalize.json` listing what was deleted and the LOB files kept.
-//! Guards: no incomplete marker in the target; a check report (`migrate --check` or a later `check` run, ADR 0015)
+//! Guards: no incomplete marker in the target; no failed engine check in report.json's post item (workspace#611); a check report (`migrate --check` or a later `check` run, ADR 0015)
 //! whose summary has 0 migration defects; the source
 //! fingerprint (log header append_lsa and db_creation read under the read lock, every volume's size, every
 //! referenced LOB file's size) equals the one migrate recorded.
@@ -147,6 +147,16 @@ pub fn finalize(dir: &Path) -> Result<(), CliError> {
             "{} does not say 0 migration defects: run the check first (`migrate --check`, or `cubrid-fastmig check <target> --source <source> --measured-classes {}`; ADR 0015)",
             fm.join(CHECK_REPORT).display(),
             fm.join("measured-classes").display()
+        )));
+    }
+    // an engine check that ran and failed refuses; one that never ran asks nothing more (workspace#611 decision 5)
+    if fs::read_to_string(fm.join("report.json"))
+        .is_ok_and(|r| crate::post::engine_check_failed(&r))
+    {
+        return Err(refuse(format!(
+            "the engine check of {} failed (its post item): fix the target and run `cubrid-fastmig post {} --engine-check` again",
+            fm.join("report.json").display(),
+            dir.display()
         )));
     }
     let recorded = SourceFingerprint::read(&fm.join(source_fingerprint::FILE_NAME))?;

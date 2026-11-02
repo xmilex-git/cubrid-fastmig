@@ -32,6 +32,8 @@ pub fn count(summary: &str, key: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// `post`: the `--run-sql` outcome for the SQL box (`required_sql::screen`, workspace#611).
+#[allow(clippy::too_many_arguments)]
 pub fn text(
     st: &Style,
     p: &Progress,
@@ -40,6 +42,9 @@ pub fn text(
     db: &str,
     fastmig_dir: &Path,
     dbtxt: &Path,
+    post: Option<(&[String], bool)>,
+    // the migration's own time, taken before --run-sql ran (workspace#611)
+    took: f64,
 ) -> String {
     let width = term_size(Stream::Stdout).0.saturating_sub(1).max(40);
     let mut lines = Vec::new();
@@ -48,7 +53,7 @@ pub fn text(
     });
     lines.push(format!(
         "took {}{est}",
-        st.strong(Color::Green, &secs(p.run_seconds()))
+        st.strong(Color::Green, &secs(took))
     ));
     lines.push(match count(summary, "migration") {
         Some(0) => format!(
@@ -89,6 +94,7 @@ pub fn text(
         fastmig_dir,
         width,
         false,
+        post,
     ));
     out.iter().map(|l| format!("{l}\n")).collect()
 }

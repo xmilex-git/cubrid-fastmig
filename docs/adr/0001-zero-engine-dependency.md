@@ -12,3 +12,4 @@
 - 식 평가(XASL)가 필요한 함수·필터 인덱스는 도구가 만들 수 없다([ADR 0006](0006-defer-function-and-filter-indexes.md)).
 - 온디스크 구조체는 버전마다 손으로 옮겨 적고, 기준 DB의 실제 페이지로 적합성을 확인한다.
 - 시스템 카탈로그 정의는 실행 시점이 아니라 빌드 시점의 엔진 산출물(카탈로그 템플릿)에서 가져온다. 이 결정의 경계는 [ADR 0011](0011-catalog-template-is-build-time-engine-output.md)이 정한다.
+- 예외(2026-11-02): 마이그레이션이 끝나고 도착이 등록된 뒤, 옵션(`--run-sql`·`--engine-check`, `post` 명령)을 줄 때만 도착 버전 install의 `csql`·`cubrid`를 SA 모드로 실행한다. 원본 쪽은 `--source-cubrid`의 데이터 비교에서 원본의 사본만 연다([ADR 0018](0018-engine-runs-only-after-migration-in-sa-mode.md)).

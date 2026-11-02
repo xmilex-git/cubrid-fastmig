@@ -110,6 +110,8 @@ pub fn notes(steps: &[RequiredSql]) -> Vec<SqlNote> {
 /// The box a terminal shows last: `ACTION REQUIRED` in big letters, then per file the command to run and what it
 /// fixes; a green `no SQL required` box when there is none. `planned`: plan's list of what migrate will leave.
 /// A command line wider than the box is written whole past the right edge ([`panel::boxed_whole`]).
+/// `post`: the outcome lines of `--run-sql` and whether everything passed (workspace#611): passed, the box says the
+/// files ran and shows the lines; failed, the lines join the box of commands under its list.
 pub fn screen(
     st: &Style,
     steps: &[RequiredSql],
@@ -117,8 +119,22 @@ pub fn screen(
     fastmig_dir: &Path,
     width: usize,
     planned: bool,
+    post: Option<(&[String], bool)>,
 ) -> Vec<String> {
-    if steps.is_empty() {
+    if let Some((lines, true)) = post {
+        let lines: Vec<String> = (lines.iter())
+            .flat_map(|l| panel::wrap(l, width.saturating_sub(4)))
+            .map(|l| st.paint(Color::Green, &l))
+            .collect();
+        return panel::boxed_whole(
+            st,
+            &format!("required SQL ({}): ran by --run-sql", steps.len()),
+            &lines,
+            Color::Green,
+            width,
+        );
+    }
+    if steps.is_empty() && post.is_none() {
         let what = if planned {
             "no SQL required after migrate"
         } else {
@@ -168,6 +184,14 @@ pub fn screen(
             panel::wrap(&why, width.saturating_sub(7))
                 .iter()
                 .map(|l| st.paint(Color::Gray, &format!("   {l}"))),
+        );
+    }
+    if let Some((post, _)) = post {
+        lines.push(String::new());
+        lines.extend(
+            (post.iter())
+                .flat_map(|l| panel::wrap(l, width.saturating_sub(4)))
+                .map(|l| st.strong(Color::Red, &l)),
         );
     }
     panel::boxed_whole(

@@ -1,7 +1,7 @@
 //! The `cubrid-fastmig` command: dispatches to one module per subcommand.
 //!
 //! Input: the command line. Output: the subcommand's effect; exit code 0 on success, 2 on usage errors, 1 on
-//! failures. `-h`/`--help` prints the command's whole help on stdout and exits 0; a usage error (a missing required
+//! failures, 3 when migrate or post finished but the required SQL or the engine check failed (workspace#611). `-h`/`--help` prints the command's whole help on stdout and exits 0; a usage error (a missing required
 //! argument, an unknown option) prints one line saying what is wrong and the command's whole help on stderr, exit 2.
 //! Source: decision G1 workspace#481 (commands plan, migrate, check, finalize). Plus the check `set-comparison` (ADR
 //! 0007). Help and exit codes: G13 workspace#604.
@@ -11,8 +11,12 @@
 mod args;
 mod catalog_regeneration;
 mod check;
+mod class_live_rows;
+mod csql_output;
 mod database_files;
 mod end_screen;
+mod engine_check;
+mod engine_sa;
 mod finalize;
 mod heap_counter;
 mod limits;
@@ -22,18 +26,22 @@ mod partition_streams;
 mod plan;
 mod plan_report;
 mod plan_screen;
+mod post;
 mod progress_args;
 mod replace_target;
 mod required_sql;
+mod required_sql_run;
 mod resource_estimate;
 mod set_comparison;
 mod source_fingerprint;
+mod source_unload_copy;
 mod storage_kind_detect;
 mod target_conf_defaults;
 mod target_install_version;
 mod target_space;
 mod temp_disk_choice;
 mod template_extract;
+mod unload_comparison;
 mod unload_files;
 mod unload_normalize;
 mod unload_rules_10_2;
@@ -45,7 +53,7 @@ mod write_probe;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]      (cubrid-fastmig plan -h)\n       cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]   (cubrid-fastmig migrate -h)\n       cubrid-fastmig check <db> [options]                          (cubrid-fastmig check -h)\n       cubrid-fastmig set-comparison <source-prefix> <target-prefix>   (cubrid-fastmig set-comparison -h)\n       cubrid-fastmig finalize <target-dir>                         (cubrid-fastmig finalize -h)";
+const USAGE: &str = "usage: cubrid-fastmig plan <db> [<new-db>] -F <dir> [options]      (cubrid-fastmig plan -h)\n       cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]   (cubrid-fastmig migrate -h)\n       cubrid-fastmig check <db> [options]                          (cubrid-fastmig check -h)\n       cubrid-fastmig set-comparison <source-prefix> <target-prefix>   (cubrid-fastmig set-comparison -h)\n       cubrid-fastmig post <target-dir> [options]                   (cubrid-fastmig post -h)\n       cubrid-fastmig finalize <target-dir>                         (cubrid-fastmig finalize -h)";
 
 unsafe extern "C" {
     fn mallopt(param: i32, value: i32) -> i32;
@@ -61,6 +69,7 @@ fn help_of(cmd: &str) -> Option<String> {
         "migrate" => format!("{}\n{}", migrate::HELP, progress_args::HELP),
         "check" => format!("{}\n{}", check::HELP, progress_args::STYLE_HELP),
         "finalize" => finalize::HELP.to_string(),
+        "post" => post::HELP.to_string(),
         "set-comparison" => set_comparison::HELP.to_string(),
         _ => return None,
     })
@@ -91,7 +100,8 @@ fn main() -> ExitCode {
     }
     let help = help.unwrap_or_else(|| USAGE.to_string());
     let result = match cmd {
-        "migrate" => migrate::run(rest).map(|()| 0),
+        // 3 = migrated, but the required SQL or the engine check failed (workspace#611)
+        "migrate" => migrate::run(rest),
         "finalize" => finalize::run(rest).map(|()| 0),
         "template-extract" => template_extract::run(rest).map(|()| 0),
         "partition-streams" => partition_streams::run(rest).map(|()| 0),
@@ -101,6 +111,8 @@ fn main() -> ExitCode {
         "plan" => return checker_exit(plan::run(rest), &help),
         // 1 = the two unload sets differ (ADR 0007)
         "set-comparison" => return checker_exit(set_comparison::run(rest), &help),
+        // 3 = the required SQL or the engine check failed (workspace#611)
+        "post" => return checker_exit(post::run(rest), &help),
         "verify" => {
             eprintln!("error: unknown command verify (renamed: use check)\n{USAGE}");
             return ExitCode::from(2);
@@ -111,7 +123,7 @@ fn main() -> ExitCode {
         }
     };
     match result {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(args::CliError::Usage(m)) => {
             eprintln!("error: {m}\n{help}");
             ExitCode::from(2)

@@ -68,6 +68,7 @@ use crate::end_screen;
 use crate::finalize::{self, CHECK_REPORT, OUTSIDE_BASE};
 use crate::limits::{self, Limits};
 use crate::plan::{self as plan_cmd, OpenSource, PlanOptions, absolute, make_plan};
+use crate::post;
 use crate::replace_target::{self, ReplacedDatabase};
 use crate::required_sql;
 use crate::resource_estimate::{self, ResourceEstimate};
@@ -103,7 +104,17 @@ cubrid-fastmig migrate <db> [<new-db>] -F <dir> [options]
   --check                        run the check after the writes: structure checks as checkdb does, plus a comparison
                                  with the source; register and remove FASTMIG_INCOMPLETE only with 0 migration defects
                                  (default: not run; finalize refuses a target without a passing check)
-  -t, --thread-count <n>         worker limit: thread cap for the whole run (default: CPUs / 2)
+  --run-sql                      once the target is registered, run the required SQL with the install $CUBRID's
+                                 csql in SA mode (the target's line; not post-migration-fixes.sql: review that one);
+                                 a failed statement ends the run with exit 3, the target stays registered
+  --engine-check                 turns on --run-sql; then the engine's row count of every class must equal the
+                                 tool's, and a query through every index must count what a heap scan counts
+                                 (exit 3 otherwise; finalize refuses a target whose engine check failed)
+  --engine-checkdb               also cubrid checkdb -S (turns on --engine-check)
+  --source-cubrid <install>      also compare all data: the source's install unloads a copy of the source, the
+                                 target install unloads the target, set-comparison compares them (turns on
+                                 --engine-check). Later, on a finished target: cubrid-fastmig post (post -h)
+  -t, --thread-count <n>        worker limit: thread cap for the whole run (default: CPUs / 2)
   --temp-mem-size <size>         memory limit for the whole run, e.g. 16G (default: the target conf's
                                  data_buffer_size, else physical memory / 4, at least 256M)
   --temp-disk-size min|max|<size>  temp disk limit: spill bytes on disk at once, kept by building indexes in batches
@@ -223,7 +234,7 @@ const DURABLE_SYNC: usize = 9;
 /// Meter of the verifier (workspace#560): index pairs merged, target and source.
 const VERIFIER: usize = 10;
 
-const SWITCHES: &[&str] = &["--check", "--delete-source", "--no-statistics"];
+const SWITCHES: &[&str] = &["--check", "--delete-source", "--no-statistics", "--run-sql"];
 
 struct Options {
     plan: PlanOptions,
@@ -239,15 +250,32 @@ struct Options {
     statistics: bool,
     /// `--server-name`: the db-host of the target's databases.txt line; none: the source's (workspace#604).
     server_name: Option<String>,
+    /// `--run-sql` (or an engine check option): the required SQL and checks once registered (workspace#611).
+    post: Option<post::PostOptions>,
 }
 
-pub fn run(argv: &[String]) -> Result<(), CliError> {
-    let flags = [FLAGS, plan_cmd::FLAGS, limits::FLAGS, progress_args::FLAGS].concat();
+pub fn run(argv: &[String]) -> Result<u8, CliError> {
+    let flags = [
+        FLAGS,
+        plan_cmd::FLAGS,
+        limits::FLAGS,
+        progress_args::FLAGS,
+        post::FLAGS,
+    ]
+    .concat();
     let p = parse(
         argv,
         &flags,
-        &[SWITCHES, plan_cmd::SWITCHES, progress_args::SWITCHES].concat(),
+        &[
+            SWITCHES,
+            plan_cmd::SWITCHES,
+            progress_args::SWITCHES,
+            post::SWITCHES,
+        ]
+        .concat(),
     )?;
+    let post_options = post::PostOptions::from(&p)?;
+    let post_options = (p.switch("--run-sql") || post_options.engine_check).then_some(post_options);
     let plan = PlanOptions::from(&p, "migrate")?;
     let worker_limit = limits::worker_limit(&p)?;
     let o = Options {
@@ -267,6 +295,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         delete_source: p.switch("--delete-source"),
         statistics: !p.switch("--no-statistics"),
         server_name: p.value("--server-name").map(str::to_string),
+        post: post_options,
         plan,
     };
     // the copy engine streams every volume through one fixed buffer per worker; the index build merges and spills
@@ -289,6 +318,37 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
             plan.refusals.join("\n  ")
         ))));
     }
+    // the engine of --run-sql is the target line's, checked before the first write (workspace#611)
+    let post_install = match &o.post {
+        Some(po) => {
+            if o.plan
+                .target_dbtxt
+                .file_name()
+                .is_none_or(|n| n != "databases.txt")
+            {
+                return Err(CliError::Usage(format!(
+                    "--run-sql: the engine finds the target only through a file named databases.txt, not {}",
+                    o.plan.target_dbtxt.display()
+                )));
+            }
+            if let Some(s) = po
+                .source_install
+                .as_ref()
+                .filter(|s| !s.join("bin/cubrid").is_file())
+            {
+                return Err(CliError::Usage(format!(
+                    "--source-cubrid {}: no bin/cubrid",
+                    s.display()
+                )));
+            }
+            Some(post::target_install(line_name(plan.version_pair.target))?)
+        }
+        None => None,
+    };
+    let post_pair = (
+        plan.source_version.name().to_string(),
+        line_name(plan.version_pair.target).to_string(),
+    );
     // the reads inside precheck, timed on their own (workspace#526: what the space and temp figures cost)
     let mut pre: Vec<(&'static str, f64)> = Vec::new();
     let mut storage =
@@ -418,6 +478,7 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         progress.clone(),
     );
     monitor.finish();
+    let took = progress.run_seconds();
     // the run log ends with the report path or the error (workspace#610)
     match &result {
         Ok(_) => progress.log(&format!(
@@ -427,8 +488,37 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
         Err(e) => progress.log(&format!("error: {e}")),
     }
     let closed = progress.close_log();
-    let (report, summary) = result.map_err(CliError::Failed)?;
+    let (mut report, summary) = result.map_err(CliError::Failed)?;
     closed?;
+    // the target is registered: the required SQL and the engine check on request (workspace#611)
+    let outcome = match (&o.post, &post_install) {
+        (Some(po), Some(install)) => {
+            let t = post::PostTarget {
+                name: o.plan.target_name.clone(),
+                first_volume: o.plan.target_dir.join(&o.plan.target_name),
+                log: o.log_dir.join(format!("{}_lgat", o.plan.target_name)),
+                databases_txt: o.plan.target_dbtxt.clone(),
+                fastmig_dir: fastmig_dir.clone(),
+            };
+            let files: Vec<String> = steps.iter().map(|s| s.file.to_string()).collect();
+            let out = post::post(
+                &t,
+                po,
+                &files,
+                &[],
+                install,
+                (&post_pair.0, &post_pair.1),
+                o.worker_limit,
+                o.limits.memory_limit_bytes,
+            )?;
+            post::record(&fastmig_dir, &out)?;
+            report = fs::read_to_string(fastmig_dir.join("report.json"))?;
+            Some(out)
+        }
+        _ => None,
+    };
+    let post_lines = outcome.as_ref().map(|out| (out.summary(), out.passed()));
+    let post_view = post_lines.as_ref().map(|(l, ok)| (l.as_slice(), *ok));
     // on a terminal the summary and the SQL box; the JSON is in report.json (workspace#610)
     if std::io::stdout().is_terminal() {
         let st = progress_args::style(&p, Stream::Stdout)?;
@@ -442,16 +532,25 @@ pub fn run(argv: &[String]) -> Result<(), CliError> {
                 &o.plan.target_name,
                 &fastmig_dir,
                 &o.plan.target_dbtxt,
+                post_view,
+                took,
             )
         );
     } else {
         eprint!("{}", required_sql::text(&steps));
+        if let Some((lines, _)) = &post_lines {
+            for l in lines {
+                eprintln!("{l}");
+            }
+        }
         println!("{report}");
     }
-    if o.delete_source {
+    let code = outcome.as_ref().map_or(0, post::PostOutcome::exit_code);
+    // a failed engine check keeps the source, as finalize would refuse it (workspace#611 decision 5)
+    if o.delete_source && code == 0 {
         finalize::finalize(&o.plan.target_dir)?;
     }
-    Ok(())
+    Ok(code)
 }
 
 /// The screen's header, devices and notes rows (workspace#610).

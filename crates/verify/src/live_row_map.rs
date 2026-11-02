@@ -39,6 +39,11 @@ impl LiveSlots {
         }
         self.pages.push((vpid, at as u32, words as u32));
     }
+
+    /// The live rows of the heap: the engine's `SELECT COUNT(*) FROM ONLY` of its class (workspace#611).
+    pub fn count(&self) -> u64 {
+        self.bits.iter().map(|w| u64::from(w.count_ones())).sum()
+    }
 }
 
 /// One page of the map.

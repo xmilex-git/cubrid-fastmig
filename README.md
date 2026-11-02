@@ -115,6 +115,7 @@ cubrid-fastmig migrate demodb -F /data/demodb-new --check -t 16 --temp-mem-size 
 # 4. 끝에 출력된 SQL을 순서대로 DBA로 실행한다
 csql -u dba demodb -i /data/demodb-new/fastmig/recompile-plcsql.sql
 # ... (아래 "마이그레이션 뒤 반드시 실행할 SQL")
+#    또는 3에 --engine-check를 붙여 도구가 $CUBRID의 csql로 SA 모드에서 대신 실행하고 엔진으로 확인하게 한다
 
 # 5. 원본 삭제 (검증 통과 + 원본이 그대로일 때만 허락)
 cubrid-fastmig finalize /data/demodb-new
@@ -129,10 +130,15 @@ cubrid-fastmig finalize /data/demodb-new
 cubrid-fastmig plan     <db> [<new-db>] -F <dir> [options]   # 읽기만 함, 거부하면 exit 1
 cubrid-fastmig migrate  <db> [<new-db>] -F <dir> [-L <log dir>] [-B <lob dir>] [-E <dir> | -i <control file>]
                         [-r] [-d | --check] [-t <threads>] [--temp-mem-size <size>] [--temp-disk-size min|max|<size>]
+                        [--run-sql | --engine-check [--engine-checkdb] [--source-cubrid <install>]]
 cubrid-fastmig check    <db | first-volume-path> [--source <db | path>] [-t <threads>]
 cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix>
+cubrid-fastmig post     <target-dir> [--engine-check [--engine-checkdb] [--source-cubrid <install>]]
 cubrid-fastmig finalize <target-dir>
 ```
+
+종료 코드: 0 성공, 1 실패(`plan` 거부, `check` 결함, `set-comparison` 차이), 2 사용법 오류, 3 마이그레이션은 끝났지만
+`--run-sql`의 SQL이나 엔진 확인이 실패(도착은 등록된 채로 남음).
 
 | 옵션 | 기본값 |
 |---|---|
@@ -143,6 +149,10 @@ cubrid-fastmig finalize <target-dir>
 | `--db-volume-size` | 도착 conf `db_volume_size`, 없으면 512M |
 | `--server-name` | 원본의 db-host |
 | `--no-clone` | (끔) 도착이 원본과 블록을 공유하면 안 될 때 모든 볼륨을 바이트 복사 |
+| `--run-sql` | (끔) 등록 뒤 필수 SQL을 `$CUBRID`의 `csql`로 SA 모드에서 실행 |
+| `--engine-check` | (끔) `--run-sql`을 켜고, 엔진으로 클래스별 행 수와 인덱스별 조회를 확인 |
+| `--engine-checkdb` | (끔) 엔진 확인에 `cubrid checkdb -S`를 더함 |
+| `--source-cubrid <install>` | (없음) 엔진 확인에 전체 데이터 비교를 더함: 원본 버전 install이 원본 사본을 unload |
 
 예전 이름(`--dest`, `--log-dir`, `--lob-dir`, `--workers`, `--mem`, `--temp-disk`, `--verify`, `--target-name`,
 `verify` 명령)은 거부하고, 대신 쓸 이름을 알려 줍니다.
@@ -168,11 +178,31 @@ cubrid-fastmig finalize <target-dir>
 
 `post-migration-fixes.sql`은 이 목록에 없습니다. 문장을 하나씩 검토한 뒤 실행하세요.
 
+### 도구가 대신 실행하고 엔진으로 확인하기
+
+도착 버전 CUBRID install(`$CUBRID`)이 있으면 `migrate --run-sql`이 등록 뒤 위 파일을 이 순서대로 `csql -S -u dba -i`로
+실행합니다. 엔진을 띄우는 것은 이 옵션들과 `post` 명령뿐이고, 마이그레이션 자체는 엔진 없이 돕니다([ADR 0018](docs/adr/0018-engine-runs-only-after-migration-in-sa-mode.md)).
+csql은 문장이 실패해도 0으로 끝나므로 stderr의 `ERROR`로 판정하고, 실패한 파일에서 멈춰 파일, 줄, `.err` 경로를 보고합니다.
+`--engine-check`는 이어서 엔진으로 확인합니다.
+
+- 클래스마다 엔진의 `SELECT COUNT(*) FROM ONLY`가 도구가 도착 볼륨에서 센 행 수와 같은지(분할 클래스는 파티션 합).
+- 인덱스마다 첫 키의 최솟값으로 `key >= 최솟값 … USING INDEX`를 실행해 실행 계획이 그 인덱스의 index scan이고 건수가
+  `USING INDEX NONE`과 같은지. 엔진이 range scan하지 않는 키(`=`로 다시 시도한 뒤에도 index scan이 아닌 키, 예: `utf8_en_ci`
+  열)는 통과로 세지 않고 `skipped`로 사유와 함께 남깁니다.
+- `--engine-checkdb`: `cubrid checkdb -S`. `--source-cubrid <install>`: 원본 버전 install이 원본의 사본(같은 파일시스템이면
+  reflink, 아니면 바이트 복사; 모자라면 쓰기 전에 거부)을 `unloaddb -S`하고, 도착을 `unloaddb -S`해서 `set-comparison`으로
+  비교합니다. `unloaddb`는 읽기만 하는 DB에도 쓰기 때문에 원본 자체는 열지 않습니다. 10.2, 11.0, 11.2 install은
+  `libncurses.so.5`가 `LD_LIBRARY_PATH`에 있어야 합니다.
+
+결과는 `report.json`의 `post` 항목과 `migrate.log` 끝에 남고, 엔진 출력은 `<dest>/fastmig/post/`에 있습니다. 실패하면
+종료 코드 3이고 도착은 등록된 채로 남습니다. 엔진 확인이 실패한 도착은 `finalize`가 거부합니다. 이미 옮긴 도착에는
+`cubrid-fastmig post <target-dir> [--engine-check]`로 같은 일을 나중에 할 수 있고, 앞선 `post`가 성공한 파일은 다시 실행하지 않습니다.
+
 ## 안전 장치
 
 - **원본은 검증한 뒤에만 지웁니다.** `finalize <target-dir>`는 검증이 통과했고(`migrate --check` 또는 이후 `check`)
   마이그레이션 뒤 원본이 바뀌지 않았을 때만 원본을 지웁니다([ADR 0008](docs/adr/0008-source-deleted-only-by-finalize.md)).
-  `migrate -d`도 자기 검증에서 마이그레이션 결함이 0일 때만 지웁니다.
+  `migrate -d`도 자기 검증에서 마이그레이션 결함이 0일 때만 지웁니다. `--run-sql`이나 엔진 확인이 실패하면 `migrate -d`는 지우지 않고, 엔진 확인이 실패한 도착이면 `finalize`가 거부합니다.
 - **실패한 실행은 표시가 남습니다.** 등록 전까지 도착에는 `FASTMIG_INCOMPLETE` 표시가 있고, 다른 migrate가 같은 디렉터리를 잡고 있으면 거부합니다.
 - **원본에 원래 있던 결함은 구분합니다.** 검증기는 원본과 도착을 모두 검사해서, 원본에 이미 있던 결함을 마이그레이션 결함으로 보고하지 않습니다.
 
@@ -231,7 +261,7 @@ just run --help         # cubrid-fastmig를 인자와 함께 실행
 | 문서 | 내용 |
 |---|---|
 | [GLOSSARY.md](GLOSSARY.md) | 용어 |
-| [docs/adr/](docs/adr/) | 되돌리기 어려운 설계 결정 (ADR 0001–0017) |
+| [docs/adr/](docs/adr/) | 되돌리기 어려운 설계 결정 (ADR 0001–0018) |
 | [docs/resources.md](docs/resources.md) | 디스크·메모리 한도 계산, 진행 표시와 ETA |
 | [docs/verify.md](docs/verify.md) | 검증기 검사 항목과 결함 코드 |
 | [docs/ops-verification.md](docs/ops-verification.md) | 운영 시나리오, 버전 매트릭스, HA |

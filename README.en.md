@@ -122,6 +122,7 @@ cubrid-fastmig migrate demodb -F /data/demodb-new --check -t 16 --temp-mem-size 
 # 4. Run the SQL files it printed, in order, as DBA
 csql -u dba demodb -i /data/demodb-new/fastmig/recompile-plcsql.sql
 # ... (see "Required SQL after the migration")
+#    or add --engine-check to step 3: the tool runs them with $CUBRID's csql in SA mode and checks with the engine
 
 # 5. Delete the source (allowed only after a passing check, with the source unchanged)
 cubrid-fastmig finalize /data/demodb-new
@@ -137,10 +138,15 @@ forms (`-F dir`, `-Fdir`); `-h` prints a command's whole help. Defaults come fro
 cubrid-fastmig plan     <db> [<new-db>] -F <dir> [options]   # reads only; exit 1 when it refuses
 cubrid-fastmig migrate  <db> [<new-db>] -F <dir> [-L <log dir>] [-B <lob dir>] [-E <dir> | -i <control file>]
                         [-r] [-d | --check] [-t <threads>] [--temp-mem-size <size>] [--temp-disk-size min|max|<size>]
+                        [--run-sql | --engine-check [--engine-checkdb] [--source-cubrid <install>]]
 cubrid-fastmig check    <db | first-volume-path> [--source <db | path>] [-t <threads>]
 cubrid-fastmig set-comparison <source-unload-prefix> <target-unload-prefix>
+cubrid-fastmig post     <target-dir> [--engine-check [--engine-checkdb] [--source-cubrid <install>]]
 cubrid-fastmig finalize <target-dir>
 ```
+
+Exit codes: 0 success, 1 failure (`plan` refused, `check` defects, `set-comparison` differences), 2 usage error, 3 the
+migration finished but the SQL of `--run-sql` or the engine check failed (the target stays registered).
 
 | Option | Default |
 |---|---|
@@ -151,6 +157,10 @@ cubrid-fastmig finalize <target-dir>
 | `--db-volume-size` | target conf `db_volume_size`, else 512M |
 | `--server-name` | the source's db-host |
 | `--no-clone` | (off) byte-copy every volume, for a target that must not share blocks with the source |
+| `--run-sql` | (off) once registered, run the required SQL with `$CUBRID`'s `csql` in SA mode |
+| `--engine-check` | (off) turns on `--run-sql`, then checks each class's row count and a query through each index with the engine |
+| `--engine-checkdb` | (off) adds `cubrid checkdb -S` to the engine check |
+| `--source-cubrid <install>` | (none) adds a whole-data comparison to the engine check: the source line's install unloads a copy of the source |
 
 A name the tool had before (`--dest`, `--log-dir`, `--lob-dir`, `--workers`, `--mem`, `--temp-disk`, `--verify`,
 `--target-name`, the command `verify`) is refused with the name that replaced it.
@@ -178,12 +188,37 @@ bottom, as `csql` commands to copy and run), and keeps the same list in `<dest>/
 
 `post-migration-fixes.sql` is not on that list: review its statements one by one before they run.
 
+### Let the tool run them and check with the engine
+
+With a CUBRID install of the target line (`$CUBRID`), `migrate --run-sql` runs the files above in this order with
+`csql -S -u dba -i` once the target is registered. These options and the `post` command are the only places the tool
+starts the engine; the migration itself runs without it ([ADR 0018](docs/adr/0018-engine-runs-only-after-migration-in-sa-mode.md)).
+csql exits 0 after a failed statement, so an `ERROR` on its stderr decides; the run stops at the failed file and
+reports the file, the line and its `.err` file. `--engine-check` then checks with the engine:
+
+- per class, the engine's `SELECT COUNT(*) FROM ONLY` equals the rows the tool counted on the target's volumes (a
+  partitioned class with its partitions);
+- per index, `key >= <its minimum> … USING INDEX` plans an index scan of that index and counts what `USING INDEX NONE`
+  counts. A key the engine does not range-scan (no index scan after a retry with `=`, e.g. a `utf8_en_ci` column) is
+  not counted as passed: it is listed as `skipped` with the reason.
+- `--engine-checkdb`: `cubrid checkdb -S`. `--source-cubrid <install>`: the source line's install runs `unloaddb -S` on
+  a copy of the source (reflink on the same filesystem, else a byte copy, refused before writing when it does not
+  fit), the target install unloads the target, and `set-comparison` compares them. `unloaddb` writes to the database
+  it reads, so the source itself is never opened. 10.2, 11.0 and 11.2 installs need `libncurses.so.5` on
+  `LD_LIBRARY_PATH`.
+
+The outcome is the `post` item of `report.json` and the end of `migrate.log`; the engine output is in
+`<dest>/fastmig/post/`. A failure exits 3 and leaves the target registered; `finalize` refuses a target whose engine
+check failed. On a target migrated earlier, `cubrid-fastmig post <target-dir> [--engine-check]` does the same later
+and does not rerun a file an earlier `post` ran without error.
+
 ## Safety
 
 - **The source is deleted only after verification.** `finalize <target-dir>` deletes the source only when a check
   passed (`migrate --check` or a later `check`) and the source is unchanged since the migration
   ([ADR 0008](docs/adr/0008-source-deleted-only-by-finalize.md)). `migrate -d` deletes it only when its own check
-  found 0 migration defects.
+  found 0 migration defects. When `--run-sql` or the engine check fails, `migrate -d` deletes nothing, and `finalize`
+  refuses a target whose engine check failed.
 - **An unfinished run is marked.** The target holds `FASTMIG_INCOMPLETE` until it is registered, and a second
   migrate into a directory another one holds is refused.
 - **Pre-existing defects are told apart.** The verifier checks both source and target, so a defect already in the
@@ -247,7 +282,7 @@ just run --help         # run cubrid-fastmig with its arguments
 | Document | Content |
 |---|---|
 | [GLOSSARY.md](GLOSSARY.md) | Vocabulary |
-| [docs/adr/](docs/adr/) | Hard-to-reverse design decisions (ADR 0001–0017) |
+| [docs/adr/](docs/adr/) | Hard-to-reverse design decisions (ADR 0001–0018) |
 | [docs/resources.md](docs/resources.md) | Disk and memory bounds, progress display and ETA |
 | [docs/verify.md](docs/verify.md) | The verifier's checks and defect codes |
 | [docs/ops-verification.md](docs/ops-verification.md) | Operations scenario, version matrix, HA |
