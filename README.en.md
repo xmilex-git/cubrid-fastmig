@@ -198,10 +198,12 @@ starts the engine; the migration itself runs without it ([ADR 0018](docs/adr/001
 csql exits 0 after a failed statement, so an `ERROR` on its stderr decides; the run stops at the failed file and
 reports the file, the line and its `.err` file. `--engine-check` then checks with the engine:
 
-- per class, the engine's `SELECT COUNT(*) FROM ONLY` equals the rows the tool counted on the target's volumes (a
+- per class, the engine's `COUNT(*) FROM ONLY` equals the rows the tool counted on the target's volumes (a
   partitioned class with its partitions);
-- per index, `key >= <its minimum> … USING INDEX` plans an index scan of that index and counts what `USING INDEX NONE`
-  counts. A key the engine does not range-scan (no index scan after a retry with `=`, e.g. a `utf8_en_ci` column) is
+- per index, `key >= <its minimum> … USING INDEX` plans an index scan of that index and counts what the heap counts
+  under `USING INDEX NONE`. The heap is read once per class: one query counts the class's rows and the rows of each of
+  its indexes, run REPEATABLE READ (under READ COMMITTED the engine answers a `COUNT(*)` without WHERE from the B-tree
+  statistics the tool wrote, without reading the heap). A key the engine does not range-scan (no index scan after a retry with `=`, e.g. a `utf8_en_ci` column) is
   not counted as passed: it is listed as `skipped` with the reason.
 - `--engine-checkdb`: `cubrid checkdb -S`. `--source-cubrid <install>`: the source line's install runs `unloaddb -S` on
   a copy of the source (reflink on the same filesystem, else a byte copy, refused before writing when it does not

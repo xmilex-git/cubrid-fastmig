@@ -187,9 +187,11 @@ Java SP, databases.txt)를 먼저 보이고, 옵션이나 conf로 정해지지 �
 csql은 문장이 실패해도 0으로 끝나므로 stderr의 `ERROR`로 판정하고, 실패한 파일에서 멈춰 파일, 줄, `.err` 경로를 보고합니다.
 `--engine-check`는 이어서 엔진으로 확인합니다.
 
-- 클래스마다 엔진의 `SELECT COUNT(*) FROM ONLY`가 도구가 도착 볼륨에서 센 행 수와 같은지(분할 클래스는 파티션 합).
+- 클래스마다 엔진의 `COUNT(*) FROM ONLY`가 도구가 도착 볼륨에서 센 행 수와 같은지(분할 클래스는 파티션 합).
 - 인덱스마다 첫 키의 최솟값으로 `key >= 최솟값 … USING INDEX`를 실행해 실행 계획이 그 인덱스의 index scan이고 건수가
-  `USING INDEX NONE`과 같은지. 엔진이 range scan하지 않는 키(`=`로 다시 시도한 뒤에도 index scan이 아닌 키, 예: `utf8_en_ci`
+  `USING INDEX NONE`으로 힙에서 센 건수와 같은지. 힙은 클래스마다 한 번만 읽습니다: 질의 하나가 행 수와 그 클래스
+  인덱스들의 건수를 함께 세고, REPEATABLE READ로 실행합니다(READ COMMITTED에서는 엔진이 WHERE 없는 `COUNT(*)`를 힙을 읽지
+  않고 도구가 쓴 B-tree 통계로 답합니다). 엔진이 range scan하지 않는 키(`=`로 다시 시도한 뒤에도 index scan이 아닌 키, 예: `utf8_en_ci`
   열)는 통과로 세지 않고 `skipped`로 사유와 함께 남깁니다.
 - `--engine-checkdb`: `cubrid checkdb -S`. `--source-cubrid <install>`: 원본 버전 install이 원본의 사본(같은 파일시스템이면
   reflink, 아니면 바이트 복사; 모자라면 쓰기 전에 거부)을 `unloaddb -S`하고, 도착을 `unloaddb -S`해서 `set-comparison`으로

@@ -129,7 +129,7 @@ _Avoid_: 수정 스크립트, 패치 SQL(페이지 처리 등급 patch와 섞인
 _Avoid_: 후처리 SQL, 마무리 스크립트
 
 **엔진 확인 (engine check)**:
-`--engine-check`(또는 `post --engine-check`): 필수 SQL이 모두 실행된 뒤 도착 버전 엔진이 SA 모드로 도착을 읽고 도구와 맞는지 보는 일. 클래스마다 엔진 `SELECT COUNT(*) FROM ONLY`가 도구가 도착 볼륨에서 센 live 행 수(검증기의 힙 스캔, 분할 클래스는 파티션 합)와 같고, 인덱스마다 첫 키 최솟값의 sargable 술어가 그 인덱스의 index scan으로 `USING INDEX NONE`과 같은 건수를 낸다. 엔진이 range scan하지 않는 키의 인덱스는 _skipped_(사유와 함께, 통과로 세지 않음)다. 선택으로 `checkdb -S`(`--engine-checkdb`)와 원본 사본·도착의 `unloaddb` 집합 비교(`--source-cubrid`)를 더한다. 결과는 report.json `post` 항목이고, 실패하면 종료 코드 3과 finalize 거부다. 검증기(`check`)와 달리 엔진을 쓰고, 검증기를 대신하지 않는다.
+`--engine-check`(또는 `post --engine-check`): 필수 SQL이 모두 실행된 뒤 도착 버전 엔진이 SA 모드로 도착을 읽고 도구와 맞는지 보는 일. 클래스마다 엔진 `COUNT(*) FROM ONLY`가 도구가 도착 볼륨에서 센 live 행 수(검증기의 힙 스캔, 분할 클래스는 파티션 합)와 같고, 인덱스마다 첫 키 최솟값의 sargable 술어가 그 인덱스의 index scan으로 `USING INDEX NONE` 힙 스캔과 같은 건수를 낸다. 엔진 쪽 힙은 클래스마다 REPEATABLE READ 질의 하나로 한 번 읽는다(READ COMMITTED의 WHERE 없는 `COUNT(*)`는 힙을 읽지 않고 B-tree 통계로 답한다, [workspace#613](https://github.com/xmilex-git/workspace/issues/613)). 엔진이 range scan하지 않는 키의 인덱스는 _skipped_(사유와 함께, 통과로 세지 않음)다. 선택으로 `checkdb -S`(`--engine-checkdb`)와 원본 사본·도착의 `unloaddb` 집합 비교(`--source-cubrid`)를 더한다. 결과는 report.json `post` 항목이고, 실패하면 종료 코드 3과 finalize 거부다. 검증기(`check`)와 달리 엔진을 쓰고, 검증기를 대신하지 않는다.
 _Avoid_: 엔진 검증(검증기와 섞인다), smoke
 
 **다른 owner SP 호출 (other-owner procedure call)**:
