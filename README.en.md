@@ -82,7 +82,7 @@ flowchart LR
 4. **Index build**: every index is rebuilt, even on a same-version run
    ([ADR 0005](docs/adr/0005-rebuild-every-index.md)). Key sorting, run merging and leaf shards run in parallel
    within `--thread-count` and `--temp-mem-size`.
-5. **Finish**: new log and fsync: the target starts a new log after the end of the source's log. Every write is made durable
+5. **Finish** (new log and fsync): the target starts a new log after the end of the source's log. Every write is made durable
    in one fsync pass at the end. With `--check` the target is verified against the source and registered only when no
    migration defect is found.
 
