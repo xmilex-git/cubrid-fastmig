@@ -44,7 +44,7 @@ comes from, without reading the rest of the tree.
 
 ## Crate map
 
-Roles: [README § Layout](README.md#layout). Dependencies point toward `ondisk` (and the leaf `progress`) and never form a cycle:
+Roles: [README § Layout](README.en.md#layout) (Korean: [README.md § 저장소 구성](README.md#저장소-구성)). Dependencies point toward `ondisk` (and the leaf `progress`) and never form a cycle:
 
 ```
 ondisk   ← every other crate but progress; the only crate that knows byte layouts
@@ -58,7 +58,7 @@ cli      → all of the above; the only binary
 ```
 
 These are the allowed edges, not yet all wired. An edge outside this list, or a new crate,
-updates this map (and README § Layout for a crate) in the same commit.
+updates this map (and, for a crate, the layout table of both README.md and README.en.md) in the same commit.
 
 External crates, each with the reason it is not a few lines of our own (add a row with a new one):
 
