@@ -45,7 +45,7 @@ cubrid-fastmig는 정상 종료된 CUBRID 10.2, 11.2–11.5 데이터베이스�
 
 ```mermaid
 flowchart LR
-    subgraph IN["입력: 정상 종료된 원본 DB"]
+    subgraph IN["입력"]
         direction TB
         S102["10.2"]
         S112["11.2"]
@@ -54,13 +54,13 @@ flowchart LR
         S115["11.5 (develop)"]
     end
 
-    P["1. 사전 점검·계획<br/>버전 쌍, 볼륨별 복사 방식,<br/>클래스별 페이지 처리,<br/>디스크·메모리 한도"]
-    C["2. 볼륨 복사<br/>reflink clone (cp --reflink)<br/>또는 병렬 바이트 복사"]
-    T["3. 디스크 위에서 고치기<br/>페이지: 그대로 / patch / transform<br/>카탈로그: 도착 버전 형식으로 재생성"]
-    X["4. 병렬 인덱스 빌드<br/>모든 인덱스를 새로 정렬해서<br/>B-tree로 만든다"]
-    F["5. 새 로그 + fsync<br/>(--check: 원본과 비교 검증)"]
+    P["1. 계획"]
+    C["2. 복사 (cp)"]
+    T["3. 버전별 패치"]
+    X["4. 인덱스 빌드"]
+    F["5. 마무리"]
 
-    subgraph OUT["출력: 도착 DB"]
+    subgraph OUT["출력"]
         direction TB
         T114["11.4"]
         T115["11.5 (develop)"]
@@ -69,15 +69,15 @@ flowchart LR
     IN --> P --> C --> T --> X --> F --> OUT
 ```
 
-1. **사전 점검·계획** (`plan`): 원본 로그 헤더에서 버전을 읽고 버전 쌍을 정합니다. 볼륨마다 clone할지
+1. **계획** (`plan`): 원본 로그 헤더에서 버전을 읽고 버전 쌍을 정합니다. 볼륨마다 clone할지
    복사할지, 클래스마다 페이지를 그대로 둘지·고칠지(patch)·다시 쓸지(transform) 정합니다. 쓰기 전에
    인덱스 빌드에 필요한 temp 디스크의 최소·최대를 보여 줍니다. 결정은 여기서 한 번만 하고 뒤 단계는 읽기만 합니다.
-2. **볼륨 복사**: 도착 디렉터리가 원본과 같은 파일 시스템이면 reflink로 clone하고, 아니면 병렬로 바이트 복사합니다.
-3. **디스크 위에서 고치기**: 사용자 힙과 overflow 페이지는 자리(volid/pageid/slot)를 그대로 지킵니다.
+2. **복사 (cp)**: 도착 디렉터리가 원본과 같은 파일 시스템이면 reflink로 clone하고, 아니면 병렬로 바이트 복사합니다.
+3. **버전별 패치**: 사용자 힙과 overflow 페이지는 자리(volid/pageid/slot)를 그대로 지킵니다.
    그래서 클래스 OID와 OBJECT 참조가 바뀌지 않습니다. 형식이 바뀐 필드만 고치고, 시스템 카탈로그는 도착 버전 형식으로 다시 만듭니다.
-4. **병렬 인덱스 빌드**: 같은 버전끼리 옮길 때도 모든 인덱스를 새로 만듭니다([ADR 0005](docs/adr/0005-rebuild-every-index.md)).
+4. **인덱스 빌드**: 같은 버전끼리 옮길 때도 모든 인덱스를 새로 만듭니다([ADR 0005](docs/adr/0005-rebuild-every-index.md)).
    키 정렬, 정렬 run 병합, leaf 샤드가 `--thread-count`와 `--temp-mem-size` 안에서 병렬로 돕니다.
-5. **새 로그와 fsync**: 도착 DB는 원본 로그 끝 뒤에서 새 로그로 시작합니다. 모든 쓰기를 마지막에 한 번 fsync합니다.
+5. **마무리**: 새 로그와 fsync: 도착 DB는 원본 로그 끝 뒤에서 새 로그로 시작합니다. 모든 쓰기를 마지막에 한 번 fsync합니다.
    `--check`를 주면 도착 DB를 원본과 비교 검증하고, 결함이 없을 때만 등록합니다.
 
 ## 지원 버전
@@ -147,7 +147,7 @@ cubrid-fastmig finalize <target-dir>
 예전 이름(`--dest`, `--log-dir`, `--lob-dir`, `--workers`, `--mem`, `--temp-disk`, `--verify`, `--target-name`,
 `verify` 명령)은 거부하고, 대신 쓸 이름을 알려 줍니다.
 
-### 디스크와 메모리는 시작 전에 정한다
+### 작업 전 디스크, 메모리 사용량 정하기
 
 `plan`은 인덱스 재빌드에 드는 temp 디스크의 최소(인덱스 하나씩)와 최대(모든 인덱스를 한 번에)를 보여 주고,
 그 사이 배치 수에 따른 시간 차이도 보여 줍니다. `migrate --temp-disk-size min|max|<size>`는 쓰기 전에 하나를 고르고,

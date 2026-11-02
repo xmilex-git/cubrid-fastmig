@@ -46,7 +46,7 @@ Conditions and per-stage times: [docs/measurements.md](docs/measurements.md)
 
 ```mermaid
 flowchart LR
-    subgraph IN["Input: a cleanly shut down source"]
+    subgraph IN["Input"]
         direction TB
         S102["10.2"]
         S112["11.2"]
@@ -55,13 +55,13 @@ flowchart LR
         S115["11.5 (develop)"]
     end
 
-    P["1. Pre-check and plan<br/>version pair, copy method per volume,<br/>page treatment per class,<br/>disk and memory limits"]
-    C["2. Volume copy<br/>reflink clone (cp --reflink)<br/>or parallel byte copy"]
-    T["3. Fix in place<br/>pages: as-is / patch / transform<br/>catalog: regenerated in the target format"]
-    X["4. Parallel index build<br/>every index sorted again<br/>and built as a B-tree"]
-    F["5. New log + fsync<br/>(--check: verified against the source)"]
+    P["1. Plan"]
+    C["2. Copy (cp)"]
+    T["3. Per-version patch"]
+    X["4. Index build"]
+    F["5. Finish"]
 
-    subgraph OUT["Output: the target"]
+    subgraph OUT["Output"]
         direction TB
         T114["11.4"]
         T115["11.5 (develop)"]
@@ -70,19 +70,19 @@ flowchart LR
     IN --> P --> C --> T --> X --> F --> OUT
 ```
 
-1. **Pre-check and plan** (`plan`): reads the source version from its log header and fixes the version pair. It
+1. **Plan** (`plan`): reads the source version from its log header and fixes the version pair. It
    picks, per volume, clone or copy, and per class, whether its pages stay as they are, are patched, or are
    transformed. Before anything is written it shows the least and the most temp disk the index build needs. Every
    decision is made here once; later stages only read it.
-2. **Volume copy**: a volume whose target directory is on the source's filesystem is cloned with reflink; any other is
+2. **Copy (cp)**: a volume whose target directory is on the source's filesystem is cloned with reflink; any other is
    byte-copied in parallel.
-3. **Fix in place**: user heap and overflow pages keep their placement (volid/pageid/slot), so class OIDs and OBJECT
+3. **Per-version patch**: user heap and overflow pages keep their placement (volid/pageid/slot), so class OIDs and OBJECT
    references survive unchanged. Only the fields whose format changed are rewritten; the system catalog is
    regenerated in the target format.
-4. **Parallel index build**: every index is rebuilt, even on a same-version run
+4. **Index build**: every index is rebuilt, even on a same-version run
    ([ADR 0005](docs/adr/0005-rebuild-every-index.md)). Key sorting, run merging and leaf shards run in parallel
    within `--thread-count` and `--temp-mem-size`.
-5. **New log and fsync**: the target starts a new log after the end of the source's log. Every write is made durable
+5. **Finish**: new log and fsync: the target starts a new log after the end of the source's log. Every write is made durable
    in one fsync pass at the end. With `--check` the target is verified against the source and registered only when no
    migration defect is found.
 
@@ -155,7 +155,7 @@ cubrid-fastmig finalize <target-dir>
 A name the tool had before (`--dest`, `--log-dir`, `--lob-dir`, `--workers`, `--mem`, `--temp-disk`, `--verify`,
 `--target-name`, the command `verify`) is refused with the name that replaced it.
 
-### Disk and memory are chosen before the start
+### Set disk and memory use before the run
 
 `plan` shows the temp disk the index rebuild needs at least (one index at a time) and at most (every index at once),
 and what the batches in between cost in time; `migrate --temp-disk-size min|max|<size>` picks one before anything is
